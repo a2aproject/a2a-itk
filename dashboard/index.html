@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>A2A Integration Test Kit (ITK) Compatibility Dashboard</title>
+        <!-- Modern premium font -->
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap"
+            rel="stylesheet" />
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <div class="glow-bg"></div>
+
+        <header class="glass-header">
+            <div class="header-container">
+                <div class="brand">
+                    <div class="logo-icon"></div>
+                    <div class="brand-text">
+                        <h1>A2A SDKs Compatibility</h1>
+                        <p class="subtitle">
+                            Multi-SDK Interop Matrix & Timeline
+                        </p>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <a href="https://github.com/a2aproject/a2a-itk#readme" target="_blank" class="docs-link">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                        Documentation
+                    </a>
+                </div>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <!-- SDK Navigation Tabs -->
+            <nav class="sdk-tabs-container">
+                <div class="tabs-label">Select SDK Target:</div>
+                <div class="tabs" id="sdk-tabs">
+                    <button
+                        class="tab-btn active"
+                        data-sdk="python"
+                        data-url="itk_python.json">
+                        <span class="sdk-icon python"></span> Python SDK
+                    </button>
+                    <button
+                        class="tab-btn"
+                        data-sdk="go"
+                        data-url="itk_go.json">
+                        <span class="sdk-icon go"></span> Go SDK
+                    </button>
+                    <button
+                        class="tab-btn"
+                        data-sdk="dotnet"
+                        data-url="itk_dotnet.json">
+                        <span class="sdk-icon dotnet"></span> .NET SDK
+                    </button>
+                    <button
+                        class="tab-btn"
+                        data-sdk="ts"
+                        data-url="itk_ts.json">
+                        <span class="sdk-icon ts"></span> TypeScript SDK
+                    </button>
+                    <button
+                        class="tab-btn"
+                        data-sdk="java"
+                        data-url="itk_java.json">
+                        <span class="sdk-icon java"></span> Java SDK
+                    </button>
+                </div>
+            </nav>
+
+            <!-- Dashboard Legend -->
+            <div class="legend-container hidden" id="dashboard-legend">
+                <span class="legend-title">Legend:</span>
+                <div class="legend-group">
+                    <div class="legend-item">
+                        <span class="legend-color pass"></span> Passing
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-color fail"></span> Fail
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-color disabled"></span> Not Covered
+                    </div>
+                </div>
+            </div>
+
+            <!-- Loading State -->
+            <div class="loading-overlay" id="loading-state">
+                <div class="loader"></div>
+                <p>Fetching interoperability matrix...</p>
+            </div>
+
+            <!-- Main Dashboard Grid -->
+            <div class="dashboard-grid hidden" id="dashboard-body">
+                <!-- Sidebar: History Timeline -->
+                <section class="panel glass history-sidebar">
+                    <div class="panel-header">
+                        <h2>Nightly Runs History</h2>
+                        <span class="badge" id="history-count">0 runs</span>
+                    </div>
+                    <div class="history-timeline" id="history-timeline-list">
+                        <!-- Filled dynamically by JS -->
+                    </div>
+                </section>
+
+                <!-- Main Content: Topologies and Compatibility Matrices -->
+                <section class="main-dashboard-panes">
+                    <!-- Static Summary & Pairwise Layout -->
+                    <div class="dashboard-unified-layout">
+                        <div class="summary-section">
+                            <h3 class="section-title-unified">SUMMARY</h3>
+                            <div id="summary-container">
+                                <!-- Dynamically injected full star topology summary card -->
+                            </div>
+                        </div>
+
+                        <div class="pairwise-section">
+                            <h3 class="section-title-unified">
+                                Pairwise Interoperability Matrices
+                            </h3>
+                            <div
+                                id="pairwise-list"
+                                class="pairwise-grid-layout">
+                                <!-- Dynamically injected pairwise matrices -->
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+
+        <footer class="glass-footer">
+            <div class="footer-container">
+                <p>
+                    Agent2Agent (A2A) Protocol Spec:
+                    <a href="https://goo.gle/a2a" target="_blank"
+                        >goo.gle/a2a</a
+                    >
+                </p>
+                <p class="copyright">
+                    &copy; 2026 Google LLC. A2A Compatibility Kit.
+                </p>
+            </div>
+        </footer>
+
+        <script src="app.js"></script>
+    </body>
+</html>

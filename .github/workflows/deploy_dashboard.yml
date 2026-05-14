@@ -1,0 +1,62 @@
+name: Deploy ITK Dashboard
+
+on:
+  schedule:
+    - cron: '0 4 * * *'       # Run daily at 4:00 AM UTC (2 hours after SDK nightly runs)
+  workflow_dispatch:          # Allow manual trigger to refresh metrics instantly
+  push:
+    branches:
+      - main
+    paths:
+      - 'dashboard/**'
+      - '.github/workflows/deploy_dashboard.yml'
+
+# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment, skipping runs in progress for safety
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}dashboard/
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Fetch live nightly compatibility metrics
+        run: |
+          echo "Syncing latest interop logs from SDK rolling releases..."
+          # Download Python Metrics directly into the dashboard directory
+          curl -L -f -o dashboard/itk_python.json https://github.com/a2aproject/a2a-python/releases/download/nightly-metrics/itk_python.json || echo "{}" > dashboard/itk_python.json
+          # Download Go Metrics directly into the dashboard directory
+          curl -L -f -o dashboard/itk_go.json https://github.com/a2aproject/a2a-go/releases/download/nightly-metrics/itk_go.json || echo "{}" > dashboard/itk_go.json
+          echo "Metrics synchronized successfully!"
+
+      - name: Prepare static site structure
+        run: |
+          # Create a clean temporary distribution directory serving only the dashboard folder
+          mkdir -p deploy_dist/dashboard
+          cp -r dashboard/* deploy_dist/dashboard/
+          echo "Site structure prepared under deploy_dist/"
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload static site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # Upload the temporary distribution directory to prevent exposing unwanted repo files
+          path: 'deploy_dist'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
