@@ -15,15 +15,26 @@ The kit operates by dispatching a single, deeply nested instruction through a ch
 ### Traversal Cycle Flow
 1. **Dispatch**: The Test Runner initiates execution by sending the nested traversal instruction to the primary entrypoint agent (**Agent 1**) via **JSON-RPC**.
 2. **Consistent Inter-Agent Traversal**: For intermediate hops between agents within a given scenario, messaging evaluates a single, consistent transport protocol. Each receiving agent resolves the next target's agent card, maps the transport, and forwards the remaining payload.
-3. **Cycle Completion**: Upon completing the final traversal hop, the execution unwinds, and **Agent 1** ultimately returns a full traversal trace to the Test Runner - which is then verified.
+3. **Cycle Completion & Trace Verification**: Upon completing the final traversal hop, the execution unwinds, and **Agent 1** returns a JSON-RPC response to the Test Runner across all modes.
+   - **Standard / Streaming Verification**: The Test Runner verifies the traversal trace directly from the returned response payload.
+   - **Push Notification Verification**: In scenarios evaluating asynchronous event delivery (`push_notification`), participating agents asynchronously push trace updates to an isolated Mock Notification Server during traversal. The Test Runner queries this Push Notification Service (`GET /notifications`) to read and verify the accumulated traversal trace.
 
 ```mermaid
 graph TD
-    Runner[Test Runner] -->|JSON-RPC Request| Ag1[Agent 1]
-    Ag1 -.->|Configured Transport| Ag2[Agent 2]
-    Ag2 -.->|Configured Transport| AgN[...Agent N]
-    AgN -.->|Response Path| Ag1
-    Ag1 -->|JSON-RPC Response| Runner
+    Runner[Test Runner] -->|1. JSON-RPC Request| Ag1[Agent 1]
+    Ag1 -.->|2. Configured Transport| Ag2[Agent 2]
+    Ag2 -.->|2. Configured Transport| AgN[...Agent N]
+    
+    %% Return Path (Always Executed)
+    AgN -.->|3. Response Unwinding| Ag1
+    Ag1 -->|3. Standard Verification - JSON-RPC Response| Runner
+    
+    %% Push Notification Path & Verification
+    PNS[Push Notification Service]
+    Ag1 -.->|Async Push Event| PNS
+    Ag2 -.->|Async Push Event| PNS
+    AgN -.->|Async Push Event| PNS
+    PNS -->|4. Push Verification - GET /notifications| Runner
 ```
 
 ---
