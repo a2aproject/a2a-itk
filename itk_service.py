@@ -1,10 +1,11 @@
 import asyncio  # noqa: I001
 import logging
+from typing import Any, Literal
 
 import uvicorn
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from testlib import execute_itk_test, start_itk_cluster, stop_itk_cluster
 
@@ -19,16 +20,76 @@ app = FastAPI(title='ITK Test Orchestration Service')
 _execution_lock = asyncio.Lock()
 
 
-class TestCase(BaseModel):
-    """Component representing a single test case for ITK."""
+class TestStep(BaseModel):
+    """A single traversal execution within a test case.
 
-    name: str
+    One step corresponds to one call into ``execute_itk_test``: a cluster
+    of SDK agents is exercised over the given protocols and behavior.
+    """
+
     sdks: list[str]
     behavior: str
     edges: list[str] | None = None
     protocols: list[str] | None = None
     streaming: bool = False
     build_subtests: bool = False
+
+
+class TestCase(BaseModel):
+    """A named ITK test case.
+
+    A test case is composed of one or more :class:`TestStep` executions
+    run sequentially. The legacy flat form (sdks/behavior/... at the
+    top level) is still accepted for backwards compatibility and is
+    automatically normalised into a single-step list.
+    """
+
+    name: str
+    expected: Literal['pass', 'fail'] = 'pass'
+    steps: list[TestStep] = Field(default_factory=list)
+
+    # --- Legacy fields (single-step, flat form). Kept optional and only
+    # used to construct ``steps`` when the caller did not provide it. ---
+    sdks: list[str] | None = None
+    behavior: str | None = None
+    edges: list[str] | None = None
+    protocols: list[str] | None = None
+    streaming: bool | None = None
+    build_subtests: bool | None = None
+
+    @model_validator(mode='after')
+    def _coalesce_legacy_flat_form(self) -> 'TestCase':
+        """Promote legacy top-level fields into a single ``TestStep``.
+
+        This keeps existing scenarios.json files and ``/run`` callers
+        working without modification while we transition to the
+        explicit multi-step schema.
+        """
+        if self.steps:
+            return self
+        if self.sdks is None or self.behavior is None:
+            raise ValueError(
+                f"TestCase '{self.name}' must define either 'steps' or both "
+                "'sdks' and 'behavior' at the top level."
+            )
+        self.steps = [
+            TestStep(
+                sdks=self.sdks,
+                behavior=self.behavior,
+                edges=self.edges,
+                protocols=self.protocols,
+                streaming=self.streaming or False,
+                build_subtests=self.build_subtests or False,
+            )
+        ]
+        return self
+
+    def all_sdks(self) -> list[str]:
+        """All SDKs referenced across all steps (deduplicated)."""
+        seen: set[str] = set()
+        for step in self.steps:
+            seen.update(step.sdks)
+        return sorted(seen)
 
 
 class RunTestsRequest(BaseModel):
@@ -76,15 +137,54 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
     return response
 
 
+async def _run_test_case(case: TestCase) -> dict[str, dict[str, Any]]:
+    """Execute every step of a test case sequentially against a running cluster.
+
+    Each step's traversal results are merged into one dict keyed by the
+    runtime scenario name produced by ``execute_itk_test`` (which may
+    differ from ``case.name`` when sub-tests are expanded). When a case
+    has more than one step, each step's results are prefixed with
+    ``"{case.name}/step-{n}/"`` so they remain distinguishable.
+
+    If ``case.expected == "fail"``, every result's ``passed`` flag is
+    inverted before returning, so an expected-failing case that does
+    fail is reported as ``passed: true``.
+    """
+    multi_step = len(case.steps) > 1
+    merged: dict[str, dict[str, Any]] = {}
+    for idx, step in enumerate(case.steps, start=1):
+        label = (
+            f'{case.name}/step-{idx}' if multi_step else case.name
+        )
+        logger.info("Executing scenario '%s'...", label)
+        step_results = await execute_itk_test(
+            sdks=step.sdks,
+            behavior=step.behavior,
+            edges=step.edges,
+            scenario_name=label,
+            protocols=step.protocols,
+            streaming=step.streaming,
+            build_subtests=step.build_subtests,
+        )
+        merged.update(step_results)
+
+    if case.expected == 'fail':
+        for entry in merged.values():
+            entry['passed'] = not entry['passed']
+            entry['expected'] = 'fail'
+
+    return merged
+
+
 async def _test(request: RunTestsRequest) -> RunTestsResponse:
     """Internal logic to execute a batch of ITK test scenarios."""
     if not request.tests:
         raise HTTPException(status_code=400, detail='No tests provided')
 
-    # 1. Identify all unique SDKs needed across all test cases
-    all_required_sdks = set()
+    # 1. Identify all unique SDKs needed across all steps of all test cases
+    all_required_sdks: set[str] = set()
     for case in request.tests:
-        all_required_sdks.update(case.sdks)
+        all_required_sdks.update(case.all_sdks())
 
     sdk_list = sorted(all_required_sdks)
 
@@ -110,20 +210,11 @@ async def _test(request: RunTestsRequest) -> RunTestsResponse:
         logger.info('Starting sequential scenario execution...')
         results_list = []
         for case in request.tests:
-            logger.info("Executing parent scenario '%s'...", case.name)
-            res_dict = await execute_itk_test(
-                sdks=case.sdks,
-                behavior=case.behavior,
-                edges=case.edges,
-                scenario_name=case.name,
-                protocols=case.protocols,
-                streaming=case.streaming,
-                build_subtests=case.build_subtests,
-            )
+            res_dict = await _run_test_case(case)
             results_list.append(res_dict)
 
         # 5. Prepare results
-        results_map = {}
+        results_map: dict[str, Any] = {}
         all_passed = True
         for res_dict in results_list:
             results_map.update(res_dict)

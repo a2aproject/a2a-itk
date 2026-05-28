@@ -1,0 +1,200 @@
+# ITK integration test scenarios.
+#
+# Schema (see itk_service.py for the pydantic definitions):
+#
+#   tests:
+#     - name: str                 # Unique scenario identifier.
+#       expected: pass | fail     # Optional, defaults to "pass". When set to
+#                                 # "fail", a scenario is considered passing
+#                                 # iff at least one step actually fails.
+#       steps:                    # One or more traversal executions, run in
+#                                 # sequence against the same cluster.
+#         - sdks: [str, ...]      # SDK identifiers (see test_suite/__init__.py).
+#           behavior: str         # send_message | push_notification | resubscribe.
+#           protocols: [str, ...] # jsonrpc | grpc | http_json. Omit for all.
+#           edges: [str, ...]     # Optional custom topology, e.g. "0->1".
+#                                 # Omit for a complete (n-to-n) digraph.
+#           streaming: bool       # Optional, defaults to false.
+#           build_subtests: bool  # Optional. When true, individual edges are
+#                                 # extracted and executed as subtests too.
+#
+# The legacy flat form (sdks/behavior/... at the top level of a test entry,
+# without a `steps:` block) is still accepted and is automatically promoted
+# to a single-step list.
+
+tests:
+  # ──────────────────────────────────────────────────────────────────
+  # Resubscribe scenarios
+  # ──────────────────────────────────────────────────────────────────
+  - name: resubscribe-jsonrpc
+    steps:
+      - sdks: [python_v10, go_v03]
+        protocols: [jsonrpc]
+        behavior: resubscribe
+        streaming: true
+
+  - name: resubscribe-grpc
+    steps:
+      - sdks: [python_v03, python_v10, go_v03]
+        protocols: [grpc]
+        behavior: resubscribe
+        streaming: true
+
+  - name: resubscribe-python-all-protocols
+    steps:
+      - sdks: [python_v03, python_v10]
+        protocols: [jsonrpc, grpc, http_json]
+        behavior: resubscribe
+        streaming: true
+
+  - name: resubscribe-v10-all-protocols
+    steps:
+      - sdks: [python_v10, go_v10]
+        protocols: [jsonrpc, grpc, http_json]
+        behavior: resubscribe
+        streaming: true
+
+  - name: resubscribe-v03-grpc
+    steps:
+      - sdks: [python_v03, go_v03]
+        protocols: [grpc]
+        behavior: resubscribe
+        streaming: true
+
+  # ──────────────────────────────────────────────────────────────────
+  # Push-notification scenarios
+  # ──────────────────────────────────────────────────────────────────
+  - name: go-v03-v10-push-notification
+    steps:
+      - sdks: [go_v03, go_v10]
+        protocols: [jsonrpc]
+        behavior: push_notification
+
+  - name: python-v10-and-v03-sdks-push-notifications
+    steps:
+      - sdks: [python_v10, python_v03, go_v03, go_v10]
+        protocols: [jsonrpc]
+        behavior: push_notification
+
+  - name: python-v10-and-v03-sdks-push-notifications-grpc-http-json
+    steps:
+      - sdks: [python_v10, python_v03]
+        protocols: [grpc, http_json]
+        behavior: push_notification
+
+  # ──────────────────────────────────────────────────────────────────
+  # Core send-message scenarios
+  # ──────────────────────────────────────────────────────────────────
+  - name: v03-core
+    steps:
+      - sdks: [python_v03, go_v03]
+        protocols: [jsonrpc, grpc]
+        behavior: send_message
+
+  - name: v03-core-streaming
+    steps:
+      - sdks: [python_v03, go_v03]
+        protocols: [jsonrpc, grpc]
+        behavior: send_message
+        streaming: true
+
+  - name: v10-core
+    steps:
+      - sdks: [python_v10, go_v10]
+        protocols: [http_json, jsonrpc, grpc]
+        behavior: send_message
+
+  - name: v10-core-streaming
+    steps:
+      - sdks: [python_v10, go_v10]
+        protocols: [jsonrpc, grpc, http_json]
+        behavior: send_message
+        streaming: true
+
+  - name: python-v03-v10-all-transports
+    steps:
+      - sdks: [python_v03, python_v10]
+        protocols: [jsonrpc, grpc, http_json]
+        behavior: send_message
+
+  - name: python-v03-v10-all-transports-streaming
+    steps:
+      - sdks: [python_v03, python_v10]
+        protocols: [jsonrpc, grpc, http_json]
+        behavior: send_message
+        streaming: true
+
+  # ──────────────────────────────────────────────────────────────────
+  # Topology scenarios (custom edges, hubs, full-mesh backwards compat)
+  # ──────────────────────────────────────────────────────────────────
+  - name: python-v03-go-v03-python-v10-hub-all-common-transports
+    steps:
+      - sdks: [python_v03, go_v03, python_v10]
+        protocols: [jsonrpc, grpc]
+        edges: ['2->0', '2->1', '0->2', '1->2']
+        behavior: send_message
+        build_subtests: true
+
+  - name: python-v03-go-v03-python-v10-hub-all-common-transports-streaming
+    steps:
+      - sdks: [python_v03, go_v03, python_v10]
+        protocols: [jsonrpc, grpc]
+        edges: ['2->0', '2->1', '0->2', '1->2']
+        behavior: send_message
+        streaming: true
+
+  - name: full-backwards-compat-with-jsonrpc
+    steps:
+      - sdks: [python_v03, go_v03, python_v10, go_v10]
+        protocols: [jsonrpc]
+        edges:
+          - '3->0'
+          - '3->1'
+          - '2->0'
+          - '2->1'
+          - '0->2'
+          - '0->3'
+          - '1->2'
+          - '1->3'
+        behavior: send_message
+
+  - name: full-backwards-compat-with-jsonrpc-streaming
+    steps:
+      - sdks: [python_v03, go_v03, python_v10, go_v10]
+        protocols: [jsonrpc]
+        edges:
+          - '3->0'
+          - '3->1'
+          - '2->0'
+          - '2->1'
+          - '0->2'
+          - '0->3'
+          - '1->2'
+          - '1->3'
+        behavior: send_message
+        streaming: true
+
+  - name: disconnected-components
+    steps:
+      - sdks: [python_v03, go_v03, python_v10, go_v10]
+        protocols: [jsonrpc]
+        edges: ['1->3', '3->1', '2->0', '0->2']
+        behavior: send_message
+
+  # ──────────────────────────────────────────────────────────────────
+  # Known-failing scenarios (kept in CI so regressions get detected
+  # when these eventually start passing).
+  # ──────────────────────────────────────────────────────────────────
+  - name: failing-go-v03-http-json
+    expected: fail
+    steps:
+      - sdks: [python_v03, python_v10, go_v03]
+        protocols: [http_json]
+        behavior: send_message
+
+  - name: failing-go-v10-grpc
+    expected: fail
+    steps:
+      - sdks: [go_v03, go_v10]
+        protocols: [grpc]
+        behavior: send_message
