@@ -104,6 +104,11 @@ class TestResultDetails(BaseModel):
     passed: bool
     sdks: list[str]
     edges: list[str] | None = None
+    # Set to "fail" when the surrounding TestCase declared ``expected: fail``,
+    # in which case ``passed`` has already been inverted (i.e. an
+    # actually-failing run is reported as ``passed: true``). Omitted for the
+    # default expected-pass case so that legacy consumers see no schema change.
+    expected: Literal['fail'] | None = None
 
 
 class RunTestsResponse(BaseModel):
