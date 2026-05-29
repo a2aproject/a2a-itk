@@ -148,18 +148,23 @@ async def _run_test_case(case: TestCase) -> dict[str, dict[str, Any]]:
     Each step's traversal results are merged into one dict keyed by the
     runtime scenario name produced by ``execute_itk_test`` (which may
     differ from ``case.name`` when sub-tests are expanded). When a case
-    has more than one step, each step's results are prefixed with
-    ``"{case.name}/step-{n}/"`` so they remain distinguishable.
+    has more than one step, each step's results are labeled
+    ``"{case.name}-step-{n}"`` so they remain distinguishable. A hyphen
+    (not a forward slash) is used so the label remains a valid filename
+    component for the debug log writers in :mod:`testlib`.
 
-    If ``case.expected == "fail"``, every result's ``passed`` flag is
-    inverted before returning, so an expected-failing case that does
-    fail is reported as ``passed: true``.
+    If ``case.expected == "fail"``, the case is considered passing iff
+    **at least one** of its result entries actually failed. The same
+    aggregated ``passed`` flag is then written back to every entry, so
+    callers that aggregate "if any entry failed, the run failed" see a
+    coherent signal across multi-step cases and across the per-subtest
+    expansion produced by ``build_subtests``.
     """
     multi_step = len(case.steps) > 1
     merged: dict[str, dict[str, Any]] = {}
     for idx, step in enumerate(case.steps, start=1):
         label = (
-            f'{case.name}/step-{idx}' if multi_step else case.name
+            f'{case.name}-step-{idx}' if multi_step else case.name
         )
         logger.info("Executing scenario '%s'...", label)
         step_results = await execute_itk_test(
@@ -174,8 +179,17 @@ async def _run_test_case(case: TestCase) -> dict[str, dict[str, Any]]:
         merged.update(step_results)
 
     if case.expected == 'fail':
+        # Aggregate to a single case-level pass/fail signal: the case
+        # "passed" iff at least one of its entries actually failed,
+        # which means the expectation was met. Writing the aggregated
+        # value back to every entry keeps the downstream
+        # "any entry false => overall fail" loop coherent for both
+        # multi-step cases and ``build_subtests`` expansions.
+        actually_failed = any(
+            not entry['passed'] for entry in merged.values()
+        )
         for entry in merged.values():
-            entry['passed'] = not entry['passed']
+            entry['passed'] = actually_failed
             entry['expected'] = 'fail'
 
     return merged

@@ -8,6 +8,7 @@ the runner at their own scenarios file via ``--scenarios``.
 
 import argparse
 import asyncio
+import collections
 import logging
 import pathlib
 import sys
@@ -30,23 +31,49 @@ DEFAULT_SCENARIOS_PATH = (
 def load_scenarios(path: pathlib.Path) -> list[TestCase]:
     """Load and validate a scenarios file.
 
-    The file is expected to have a top-level ``tests:`` list, each entry
-    of which conforms to :class:`TestCase` (either the multi-step or
-    legacy flat form).
+    The file is expected to be a YAML mapping with a top-level
+    ``tests:`` list, each entry of which conforms to :class:`TestCase`
+    (either the multi-step or legacy flat form). On any failure
+    (missing file, YAML parse error, wrong shape, schema violation, or
+    duplicate test names) the runner logs the cause and exits with
+    status 1 instead of raising an unhandled exception.
     """
     if not path.exists():
         logger.error('Scenarios file not found: %s', path)
         sys.exit(1)
-    with path.open() as f:
-        data = yaml.safe_load(f) or {}
-    raw_tests = data.get('tests')
-    if not isinstance(raw_tests, list) or not raw_tests:
-        logger.error(
-            "Scenarios file %s must contain a non-empty 'tests' list.", path
-        )
-        sys.exit(1)
     try:
-        return [TestCase.model_validate(entry) for entry in raw_tests]
+        with path.open() as f:
+            data = yaml.safe_load(f)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            logger.error(
+                'Scenarios file %s must contain a YAML mapping at the '
+                'top level; got %s.',
+                path,
+                type(data).__name__,
+            )
+            sys.exit(1)
+        raw_tests = data.get('tests')
+        if not isinstance(raw_tests, list) or not raw_tests:
+            logger.error(
+                "Scenarios file %s must contain a non-empty 'tests' list.",
+                path,
+            )
+            sys.exit(1)
+        tests = [TestCase.model_validate(entry) for entry in raw_tests]
+        name_counts = collections.Counter(t.name for t in tests)
+        duplicates = sorted(n for n, c in name_counts.items() if c > 1)
+        if duplicates:
+            logger.error(
+                'Duplicate test case names in %s: %s',
+                path,
+                ', '.join(duplicates),
+            )
+            sys.exit(1)
+        return tests
+    except SystemExit:
+        raise
     except Exception:
         logger.exception('Failed to parse scenarios from %s', path)
         sys.exit(1)
