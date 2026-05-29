@@ -50,6 +50,12 @@ def stop_itk_cluster(procs: list[subprocess.Popen], ports: list[int]) -> None:
             proc.terminate()
         except Exception:
             logger.debug('Failed to terminate process', exc_info=True)
+        log_file = getattr(proc, '_log_file', None)
+        if log_file is not None:
+            try:
+                log_file.close()
+            except Exception:
+                logger.debug('Failed to close log file', exc_info=True)
     _clean_ports(*ports)
     test_suite.reset_all_agent_ports(ports)
 
@@ -459,10 +465,17 @@ async def _read_stream_response(
 ) -> dict:
     """Reads a streaming response using SSE and aggregates results."""
     logger.info('Starting streaming request to agent...')
+    logger.info('POST %s payload=%s headers=%s', target_url, json.dumps(json_rpc_request, indent=2), headers)
     collected_text = []
     async with aconnect_sse(
         http_client, 'POST', target_url, json=json_rpc_request, headers=headers
     ) as event_source:
+        logger.info(
+            'SSE response: status=%s, content-type=%s, headers=%s',
+            event_source.response.status_code,
+            event_source.response.headers.get('content-type'),
+            dict(event_source.response.headers),
+        )
         async for sse in event_source.aiter_sse():
             logger.info('SSE Event: %s', sse.data)
             try:
@@ -502,6 +515,7 @@ async def _read_sync_response(
     headers: dict,
 ) -> dict:
     """Reads a synchronous JSON-RPC response."""
+    logger.info('POST %s payload=%s headers=%s', target_url, json.dumps(json_rpc_request, indent=2), headers)
     response = await http_client.post(
         target_url, json=json_rpc_request, headers=headers
     )
@@ -608,7 +622,7 @@ async def _execute_single_itk_test(  # noqa: PLR0913
         else:
             headers['A2A-Version'] = '1.0'
 
-        async with httpx.AsyncClient(timeout=15) as http_client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15, read=120)) as http_client:
             if streaming:
                 result = await _read_stream_response(
                     http_client,

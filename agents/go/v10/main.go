@@ -500,7 +500,9 @@ func run() error {
 	mux.Handle("/rest/", http.StripPrefix("/rest", a2asrv.NewRESTHandler(requestHandler)))
 
 	cardProducer := a2av0.NewStaticAgentCardProducer(agentCard)
-	mux.Handle(agentCardRoute, a2asrv.NewAgentCardHandler(cardProducer))
+	cardHandler := a2asrv.NewAgentCardHandler(cardProducer)
+	mux.Handle(agentCardRoute, cardHandler)
+	mux.Handle(a2asrv.WellKnownAgentCardPath, cardHandler)
 
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", *httpPort),

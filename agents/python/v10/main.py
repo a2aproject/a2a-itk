@@ -427,6 +427,12 @@ class V10AgentExecutor(AgentExecutor):
                         'Held task %s timed out, auto-completing',
                         context.task_id,
                     )
+                    await task_updater.update_status(
+                        TaskState.TASK_STATE_COMPLETED,
+                        message=task_updater.new_agent_message(
+                            [Part(text=response_text + '\ntask-finished')]
+                        ),
+                    )
                 except asyncio.CancelledError:
                     logger.info('Task %s cancelled', context.task_id)
                     return
@@ -559,6 +565,8 @@ async def main_async(http_port: int, grpc_port: int) -> None:
         FastAPI(routes=jsonrpc_routes + agent_card_routes),
     )
     app.mount('/rest', FastAPI(routes=rest_routes + agent_card_routes))
+    for route in agent_card_routes:
+        app.routes.insert(0, route)
 
     server = grpc.aio.server()
 

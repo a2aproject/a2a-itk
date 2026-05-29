@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -47,6 +48,14 @@ TEST_CASES = [
     {
         'name': 'resubscribe-v10-all-protocols',
         'sdks': ['python_v10', 'go_v10'],
+        'protocols': ['jsonrpc', 'grpc', 'http_json'],
+        'edges': None,
+        'streaming': True,
+        'behavior': 'resubscribe',
+    },
+    {
+        'name': 'resubscribe-java-v10-all-protocols',
+        'sdks': ['java_v10', 'python_v10'],
         'protocols': ['jsonrpc', 'grpc', 'http_json'],
         'edges': None,
         'streaming': True,
@@ -110,6 +119,35 @@ TEST_CASES = [
         'edges': None,
         'streaming': True,
         'behavior': 'send_message',
+    },
+    {
+        'name': 'java-v10-core',
+        'sdks': ['java_v10', 'python_v10'],
+        'protocols': ['http_json', 'jsonrpc', 'grpc'],
+        'edges': None,
+        'behavior': 'send_message',
+    },
+    {
+        'name': 'java-v10-core-streaming',
+        'sdks': ['java_v10', 'python_v10'],
+        'protocols': ['jsonrpc', 'grpc', 'http_json'],
+        'edges': None,
+        'streaming': True,
+        'behavior': 'send_message',
+    },
+    {
+        'name': 'java-v10-go-v10-core',
+        'sdks': ['java_v10', 'go_v10'],
+        'protocols': ['http_json', 'jsonrpc', 'grpc'],
+        'edges': None,
+        'behavior': 'send_message',
+    },
+    {
+        'name': 'java-v10-push-notification',
+        'sdks': ['java_v10', 'python_v10'],
+        'protocols': ['jsonrpc'],
+        'edges': None,
+        'behavior': 'push_notification',
     },
     {
         'name': 'python-v03-v10-all-transports',
@@ -251,6 +289,13 @@ async def main_async() -> None:
             )
             if not passed:
                 all_passed = False
+
+        output_file = os.environ.get('ITK_OUTPUT_FILE')
+        if output_file:
+            raw = {'all_passed': all_passed, 'results': merged_results}
+            with open(output_file, 'w') as f:
+                json.dump(raw, f, indent=2)
+            logger.info('Results written to %s', output_file)
 
         if not all_passed:
             logger.error('One or more test scenarios failed.')
