@@ -96,6 +96,7 @@ Within these transport scenarios, the following A2A features can be tested:
 - `itk_service.py`: FastAPI orchestration service for remote test execution.
 - `notifications_app.py`: Dedicated mock server for ingesting and verifying SDK push notifications.
 - `run_tests.py`: CLI orchestrator for running concurrent test scenarios.
+- `scenarios.yaml`: Default scenarios consumed by `run_tests.py` (see [Scenario File Format](#-scenario-file-format) below).
 - `testlib.py`: Core logic for cluster lifecycle, port management, and test execution.
 - `Dockerfile`: Container environment definition for the ITK service.
 
@@ -114,6 +115,11 @@ Run the standard integration suite locally using purely the stable reference bas
 uv run run_tests.py
 ```
 
+The runner loads scenarios from `scenarios.yaml` next to `run_tests.py` by default. To run a custom suite (for example a consuming SDK's PR-gating subset or its nightly matrix), pass `--scenarios`:
+```bash
+uv run run_tests.py --scenarios /path/to/my_scenarios.yaml
+```
+
 ### 2. Setting up PR Testing & Nightly Runs
 To gate **Pull Requests** or schedule automated **nightly runs** against an in-development SDK repository (e.g., `a2a-python` or `a2a-go`), consuming codebases mount their local source directly into ITK's validation container runtime.
 
@@ -125,16 +131,64 @@ To gate **Pull Requests** or schedule automated **nightly runs** against an in-d
 
 2. **Custom Scenario Definitions**:
    - Consuming repositories supply customized scenario suites tuned to the desired depth of testing:
-     - **PR Testing (`scenarios.json`)**: Shorter, optimized validation paths focused on rapid compatibility verification.
-     - **Nightly Runs (`scenario_full.json`)**: Comprehensive, multi-hop matrix configurations evaluating edge-case behavior and transport stability across protocol matrix boundaries.
-   - **Scenario Schema & Fields**: Configuration files define a root object containing a `tests` array. Each scenario object specifies:
-     - `name` *(String, Required)*: Descriptive display title for the test scenario.
-     - `sdks` *(Array of Strings, Required)*: Target agent identifiers participating in the cluster (e.g., `["current", "python_v10", "go_v03"]`). The array index dictates node IDs for routing.
-     - `protocols` *(Array of Strings, Required)*: Transport mechanisms executed under this topology (`"jsonrpc"`, `"grpc"`, `"http_json"`).
-     - `behavior` *(String, Required)*: Verification interaction mode (`"send_message"`, `"push_notification"`, `"resubscribe"`).
-     - `edges` *(Array of Strings, Optional)*: Custom directed communication edge pairs using zero-based SDK indices (e.g., `["0->1", "1->0"]`). If omitted, defaults to a complete digraph (n-to-n) topology.
-     - `streaming` *(Boolean, Optional)*: If set to `true`, activates streaming message payload delivery. Defaults to `false`.
-     - `build_subtests` *(Boolean, Optional)*: If set to `true`, instructs the test runner to extract and execute targeted sub-graphs or individual edges as distinct validation subtests. Defaults to `false`.
+     - **PR Testing (`scenarios.yaml`)**: Shorter, optimized validation paths focused on rapid compatibility verification.
+     - **Nightly Runs (`scenarios_full.yaml`)**: Comprehensive, multi-hop matrix configurations evaluating edge-case behavior and transport stability across protocol matrix boundaries.
+   - See [Scenario File Format](#-scenario-file-format) below for the full schema.
+
+---
+
+## 📑 Scenario File Format
+
+Scenario files are YAML documents with a top-level `tests` list. Each entry is a **test case** composed of one or more **steps**, where each step describes a single traversal execution. The default suite ships in [`scenarios.yaml`](scenarios.yaml).
+
+The full schema (defined by `TestCase` and `TestStep` in [`itk_service.py`](itk_service.py)):
+
+```yaml
+tests:
+  - name: my-scenario              # (Required) Unique scenario identifier.
+    expected: pass                 # (Optional) "pass" (default) or "fail".
+                                   # When "fail", the case is reported as
+                                   # passing iff at least one step fails.
+    steps:                         # One or more traversal executions, run
+                                   # sequentially against the same cluster.
+      - sdks: [python_v10, go_v10]            # (Required) SDK identifiers.
+        behavior: send_message                # (Required) send_message |
+                                              #            push_notification |
+                                              #            resubscribe
+        protocols: [jsonrpc, grpc, http_json] # (Optional) Transports to test.
+                                              #            Omit for all.
+        edges: ['0->1', '1->0']               # (Optional) Custom topology.
+                                              #            Omit for n-to-n.
+        streaming: false                      # (Optional) Default: false.
+        build_subtests: false                 # (Optional) When true, individual
+                                              #            edges are extracted
+                                              #            and executed as
+                                              #            subtests too.
+```
+
+The **legacy flat form** (no `steps:` block; `sdks` / `behavior` / etc. at the top level of the test entry) is still accepted and is automatically normalised into a single-step list:
+
+```yaml
+tests:
+  - name: legacy-single-step
+    sdks: [python_v10, go_v10]
+    behavior: send_message
+    protocols: [jsonrpc]
+```
+
+### Field reference
+
+| Field | Where | Type | Required | Description |
+|---|---|---|---|---|
+| `name` | TestCase | string | yes | Unique scenario identifier. Result keys are derived from this. |
+| `expected` | TestCase | `"pass"` \| `"fail"` | no (default `"pass"`) | Marks a scenario as expected-to-fail. The runner inverts the pass/fail flag for reporting. |
+| `steps` | TestCase | list[TestStep] | yes (unless legacy flat form is used) | One or more traversal executions run sequentially. |
+| `sdks` | TestStep | list[string] | yes | SDK identifiers participating in the cluster (e.g. `python_v10`, `go_v03`, `current`). The array index dictates node IDs for routing in custom-edge topologies. |
+| `behavior` | TestStep | string | yes | One of `send_message`, `push_notification`, `resubscribe`. |
+| `protocols` | TestStep | list[string] | no | Transports under test: `jsonrpc`, `grpc`, `http_json`. Omit to use all. |
+| `edges` | TestStep | list[string] | no | Custom directed edges using zero-based SDK indices (e.g. `"0->1"`). Omit for a complete (n-to-n) digraph. |
+| `streaming` | TestStep | bool | no (default `false`) | Use streaming message delivery for this traversal. |
+| `build_subtests` | TestStep | bool | no (default `false`) | When true, individual subgraphs / edges are extracted and executed as additional subtests. |
 
 3. **Automated Orchestration Wrapper**:
    - The target codebase maintains a runner script (e.g., `run_itk.sh`) that exports `A2A_ITK_REVISION`, clones the test suite, compiles the core test container, dynamically mounts the workspace source as the `current` agent context, and verifies execution outputs.

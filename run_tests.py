@@ -1,16 +1,21 @@
+"""ITK integration test orchestrator.
+
+Loads test scenarios from a YAML file and runs them sequentially against a
+freshly started cluster of SDK agents. The default scenarios file is
+``scenarios.yaml`` next to this script. Consuming SDK repositories can point
+the runner at their own scenarios file via ``--scenarios``.
+"""
+
+import argparse
 import asyncio
+import collections
 import logging
-import os
-import subprocess
+import pathlib
 import sys
 
-import httpx
-from testlib import (
-    execute_itk_test,
-    start_itk_cluster,
-    start_notification_server,
-    stop_itk_cluster,
-)
+import yaml
+from itk_service import TestCase, _run_test_case
+from testlib import start_itk_cluster, stop_itk_cluster
 
 
 logging.basicConfig(
@@ -18,248 +23,130 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Hardcoded test case definitions
-TEST_CASES = [
-    {
-        'name': 'resubscribe-jsonrpc',
-        'sdks': ['python_v10', 'go_v03'],
-        'protocols': ['jsonrpc'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-     {
-        'name': 'resubscribe-grpc',
-        'sdks': ['python_v03', 'python_v10', 'go_v03'],
-        'protocols': ['grpc'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'resubscribe-python-all-protocols',
-        'sdks': ['python_v03', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'resubscribe-v10-all-protocols',
-        'sdks': ['python_v10', 'go_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'resubscribe-v03-grpc',
-        'sdks': ['python_v03', 'go_v03'],
-        'protocols': ['grpc'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'go-v03-v10-push-notification',
-        'sdks': ['go_v03', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': None,
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'python-v10-and-v03-sdks-push-notifications',
-        'sdks': ['python_v10', 'python_v03', 'go_v03', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': None,
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'python-v10-and-v03-sdks-push-notifications-grpc-http-json',
-        'sdks': ['python_v10', 'python_v03'],
-        'protocols': ['grpc', 'http_json'],
-        'edges': None,
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'v03-core',
-        'sdks': ['python_v03', 'go_v03'],
-        'edges': None,
-        'protocols': ['jsonrpc', 'grpc'],
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'v03-core-streaming',
-        'sdks': ['python_v03', 'go_v03'],
-        'edges': None,
-        'protocols': ['jsonrpc', 'grpc'],
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'v10-core',
-        'sdks': ['python_v10', 'go_v10'],
-        'protocols': ['http_json', 'jsonrpc', 'grpc'],
-        'edges': None,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'v10-core-streaming',
-        'sdks': ['python_v10', 'go_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'python-v03-v10-all-transports',
-        'sdks': ['python_v03', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'python-v03-v10-all-transports-streaming',
-        'sdks': ['python_v03', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'python-v03-go-v03-python-v10-hub-all-common-transports',
-        'sdks': ['python_v03', 'go_v03', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc'],
-        'edges': ['2->0', '2->1', '0->2', '1->2'],
-        'behavior': 'send_message',
-        'build_subtests': True,
-    },
-    {
-        'name': 'python-v03-go-v03-python-v10-hub-all-common-transports-streaming',
-        'sdks': ['python_v03', 'go_v03', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc'],
-        'edges': ['2->0', '2->1', '0->2', '1->2'],
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'full-backwards-compat-with-jsonrpc',
-        'sdks': ['python_v03', 'go_v03', 'python_v10', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': [
-            '3->0',
-            '3->1',
-            '2->0',
-            '2->1',
-            '0->2',
-            '0->3',
-            '1->2',
-            '1->3',
-        ],
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'full-backwards-compat-with-jsonrpc-streaming',
-        'sdks': ['python_v03', 'go_v03', 'python_v10', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': [
-            '3->0',
-            '3->1',
-            '2->0',
-            '2->1',
-            '0->2',
-            '0->3',
-            '1->2',
-            '1->3',
-        ],
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'disconnected-components',
-        'sdks': ['python_v03', 'go_v03', 'python_v10', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': ['1->3', '3->1', '2->0', '0->2'],
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'failing-go-v03-http-json',
-        'sdks': ['python_v03', 'python_v10', 'go_v03'],
-        'protocols': ['http_json'],
-        'edges': None,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'failing-go-v10-grpc',
-        'sdks': ['go_v03', 'go_v10'],
-        'protocols': ['grpc'],
-        'edges': None,
-        'behavior': 'send_message',
-    },
-]
+DEFAULT_SCENARIOS_PATH = (
+    pathlib.Path(__file__).parent / 'scenarios.yaml'
+)
 
 
-async def main_async() -> None:
-    """Execute hardcoded integration test scenarios concurrently."""
-    # 1. Identify all unique SDKs needed across all test cases
-    all_required_sdks = set()
-    for case in TEST_CASES:
-        all_required_sdks.update(case['sdks'])
+def load_scenarios(path: pathlib.Path) -> list[TestCase]:
+    """Load and validate a scenarios file.
 
-    # Convert to sorted list for deterministic port assignment
-    # (Though AGENT_DEFS currently have static ports anyway)
-    sdk_list = sorted(all_required_sdks)
+    The file is expected to be a YAML mapping with a top-level
+    ``tests:`` list, each entry of which conforms to :class:`TestCase`
+    (either the multi-step or legacy flat form). On any failure
+    (missing file, YAML parse error, wrong shape, schema violation, or
+    duplicate test names) the runner logs the cause and exits with
+    status 1 instead of raising an unhandled exception.
+    """
+    if not path.exists():
+        logger.error('Scenarios file not found: %s', path)
+        sys.exit(1)
+    try:
+        with path.open() as f:
+            data = yaml.safe_load(f)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            logger.error(
+                'Scenarios file %s must contain a YAML mapping at the '
+                'top level; got %s.',
+                path,
+                type(data).__name__,
+            )
+            sys.exit(1)
+        raw_tests = data.get('tests')
+        if not isinstance(raw_tests, list) or not raw_tests:
+            logger.error(
+                "Scenarios file %s must contain a non-empty 'tests' list.",
+                path,
+            )
+            sys.exit(1)
+        tests = [TestCase.model_validate(entry) for entry in raw_tests]
+        name_counts = collections.Counter(t.name for t in tests)
+        duplicates = sorted(n for n, c in name_counts.items() if c > 1)
+        if duplicates:
+            logger.error(
+                'Duplicate test case names in %s: %s',
+                path,
+                ', '.join(duplicates),
+            )
+            sys.exit(1)
+        return tests
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception('Failed to parse scenarios from %s', path)
+        sys.exit(1)
 
-    # 2. Start the shared cluster
-    procs = []
-    ports = []
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description='Run ITK integration test scenarios.'
+    )
+    parser.add_argument(
+        '--scenarios',
+        type=pathlib.Path,
+        default=DEFAULT_SCENARIOS_PATH,
+        help=(
+            'Path to the scenarios YAML file '
+            '(default: scenarios.yaml next to this script).'
+        ),
+    )
+    return parser.parse_args()
+
+
+async def main_async(scenarios_path: pathlib.Path) -> int:
+    """Execute scenarios sequentially; returns a shell-style exit code."""
+    test_cases = load_scenarios(scenarios_path)
+    logger.info(
+        'Loaded %d scenario(s) from %s', len(test_cases), scenarios_path
+    )
+
+    # 1. Identify all unique SDKs needed across all steps of all tests.
+    sdk_set: set[str] = set()
+    for case in test_cases:
+        sdk_set.update(case.all_sdks())
+    sdk_list = sorted(sdk_set)
+
+    # 2. Start the shared cluster.
     procs, _uris, ports = await start_itk_cluster(sdk_list)
 
     try:
-        # 3. Run all scenarios sequentially to prevent overwhelming the shared cluster
+        # 3. Run all scenarios sequentially to prevent overwhelming the
+        # shared cluster.
         logger.info('Starting sequential scenario execution...')
-        results = []
-        for case in TEST_CASES:
-            logger.info("Executing parent scenario '%s'...", case['name'])
-            res_dict = await execute_itk_test(
-                sdks=case['sdks'],
-                behavior=case['behavior'],
-                edges=case['edges'],
-                scenario_name=case['name'],
-                protocols=case.get('protocols'),
-                streaming=case.get('streaming', False),
-                build_subtests=case.get('build_subtests', False),
-            )
-            results.append(res_dict)
-
-        # Merge the results dictionaries
-        merged_results = {}
-        for res_dict in results:
+        merged_results: dict[str, dict] = {}
+        for case in test_cases:
+            res_dict = await _run_test_case(case)
             merged_results.update(res_dict)
 
-        # 5. Report results
+        # 4. Report results.
         all_passed = True
         for idx, (name, details) in enumerate(merged_results.items()):
             passed = details['passed']
             status = 'PASSED' if passed else 'FAILED'
+            note = ''
+            if details.get('expected') == 'fail':
+                note = ' (expected to fail)'
             logger.info(
-                "Scenario %s/%s '%s': %s",
+                "Scenario %s/%s '%s': %s%s",
                 idx + 1,
                 len(merged_results),
                 name,
                 status,
+                note,
             )
             if not passed:
                 all_passed = False
 
         if not all_passed:
             logger.error('One or more test scenarios failed.')
-        else:
-            logger.info('All test scenarios passed.')
-
+            return 1
+        logger.info('All test scenarios passed.')
+        return 0
     except Exception:
         logger.exception('Concurrent test execution encountered an error.')
-        sys.exit(1)
+        return 1
     finally:
         logger.info('Decommissioning shared agent cluster...')
         stop_itk_cluster(procs, ports)
@@ -267,7 +154,8 @@ async def main_async() -> None:
 
 def main() -> None:
     """Entry point for the integration test orchestrator."""
-    asyncio.run(main_async())
+    args = parse_args()
+    sys.exit(asyncio.run(main_async(args.scenarios)))
 
 
 if __name__ == '__main__':
