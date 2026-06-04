@@ -215,11 +215,45 @@ document.addEventListener("DOMContentLoaded", () => {
         pairwiseList.innerHTML = "";
 
         const scenarios = run.scenarios || [];
+        const failedScenarios = scenarios.filter((s) => !s.passed);
+
+        const scenarioIncludesActiveSdk = (scenario) => {
+            const sdks = (scenario.sdks || []).map((s) =>
+                (s || "").toLowerCase()
+            );
+            if (activeSDK === "ts") {
+                return sdks.includes("current") || sdks.some((s) => s.startsWith("ts"));
+            }
+            return sdks.some((s) => s.startsWith(activeSDK.toLowerCase()));
+        };
 
         if (scenarios.length === 0) {
             summaryContainer.innerHTML =
                 '<div class="panel glass topology-card"><p>No test scenarios executed in this run.</p></div>';
             return;
+        }
+
+        if (failedScenarios.length > 0) {
+            const failedPanel = document.createElement("div");
+            failedPanel.className = "panel glass topology-card";
+
+            const failItems = failedScenarios
+                .map((s) => {
+                    const sdks = (s.sdks || []).map(formatSdkName).join(" ↔ ");
+                    const protocols = (s.protocols || []).join(", ");
+                    const behaviorLabel = s.streaming
+                        ? `${s.behavior} (streaming)`
+                        : s.behavior;
+                    return `<li><strong>${s.name}</strong> <span style="color: var(--text-muted)">(${sdks}; ${behaviorLabel}; ${protocols})</span></li>`;
+                })
+                .join("");
+
+            failedPanel.innerHTML = `
+                <div style="margin-bottom: 8px; font-weight: 700; color: #fca5a5;">Failed Scenarios (${failedScenarios.length})</div>
+                <ul style="margin: 0; padding-left: 18px; display: grid; gap: 6px;">${failItems}</ul>
+            `;
+
+            summaryContainer.appendChild(failedPanel);
         }
 
         // 1. Identify the top-level (maximum node count) topology key and its matching scenarios
@@ -238,9 +272,28 @@ document.addEventListener("DOMContentLoaded", () => {
             : [];
 
         if (summaryTopologyKey) {
-            const summaryScenarios = scenarios.filter(
+            const summaryParents = scenarios.filter(
                 (s) => (s.sdks || []).join(",") === summaryTopologyKey
             );
+
+            // Summary should reflect parent + derived subtests for matrix-style scenarios.
+            const summaryScenarios = [...summaryParents];
+            summaryParents
+                .filter((s) => s.build_subtests)
+                .forEach((parent) => {
+                    const subPrefix = `${parent.name}-sub-`;
+                    scenarios
+                        .filter((s) => (s.name || "").startsWith(subPrefix))
+                        .forEach((subScenario) => {
+                            if (
+                                !summaryScenarios.some(
+                                    (x) => x.name === subScenario.name
+                                )
+                            ) {
+                                summaryScenarios.push(subScenario);
+                            }
+                        });
+                });
 
             if (summaryScenarios.length > 0) {
                 const edges = summaryScenarios[0].edges || [];
@@ -263,11 +316,11 @@ document.addEventListener("DOMContentLoaded", () => {
                         <div class="topology-graph-canvas" id="${cardId}">
                             <svg id="${svgId}" viewBox="0 0 400 300">
                                 <defs>
-                                    <marker id="arrow-end-${svgId}" viewBox="0 0 10 10" refX="10" refY="5" 
+                                    <marker id="arrow-end-${svgId}" viewBox="0 0 10 10" refX="10" refY="5"
                                         markerWidth="6" markerHeight="6" orient="auto">
                                         <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(255, 255, 255, 0.3)" />
                                     </marker>
-                                    <marker id="arrow-start-${svgId}" viewBox="0 0 10 10" refX="0" refY="5" 
+                                    <marker id="arrow-start-${svgId}" viewBox="0 0 10 10" refX="0" refY="5"
                                         markerWidth="6" markerHeight="6" orient="auto">
                                         <path d="M 10 0 L 0 5 L 10 10 z" fill="rgba(255, 255, 255, 0.3)" />
                                     </marker>
@@ -294,9 +347,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 summaryContainer.appendChild(card);
 
-                // Draw node graph and render fully filled behavior rows vs protocol columns compatibility matrix
+                // Draw node graph and render behavior/protocol matrix aggregated for the active SDK
+                // (not only max-topology scenarios) to avoid showing '-' for valid pairwise coverage.
+                const summaryMatrixScenarios = scenarios.filter(
+                    scenarioIncludesActiveSdk
+                );
                 drawTopologyGraph(svgId, summarySdks, edges);
-                renderGroupMatrix(`matrix-body-${svgId}`, summaryScenarios);
+                renderGroupMatrix(
+                    `matrix-body-${svgId}`,
+                    summaryMatrixScenarios
+                );
             }
         } else {
             summaryContainer.innerHTML =
@@ -304,19 +364,34 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         // 2. Identify all unique pairwise (exactly 2 nodes) topology keys and render their fully-filled grids
+        // Normalize key order so [A,B] and [B,A] are grouped together.
+        const makeCanonicalPairKey = (sdks) =>
+            [...(sdks || [])]
+                .map((s) => (s || "").toLowerCase())
+                .sort()
+                .join(",");
+
         const uniquePairwiseKeys = [];
         scenarios.forEach((scenario) => {
             const sdks = scenario.sdks || [];
             if (sdks.length === 2) {
-                const key = sdks.join(",");
+                const key = makeCanonicalPairKey(sdks);
                 if (!uniquePairwiseKeys.includes(key)) {
                     uniquePairwiseKeys.push(key);
                 }
             }
         });
 
+        // For Rust tab, only show pairwise combinations that include Rust.
+        const visiblePairwiseKeys = uniquePairwiseKeys.filter((key) => {
+            if (activeSDK !== "rust") return true;
+            return key
+                .split(",")
+                .some((sdk) => sdk.toLowerCase().startsWith("rust"));
+        });
+
         // Sort pairwise keys deterministically based on the order of SDKs in the summary visualization
-        uniquePairwiseKeys.sort((keyA, keyB) => {
+        visiblePairwiseKeys.sort((keyA, keyB) => {
             const getRank = (key) => {
                 const sdks = key.split(",");
                 const ranks = sdks.map((s) => {
@@ -336,15 +411,40 @@ document.addEventListener("DOMContentLoaded", () => {
             return rankA[1] - rankB[1];
         });
 
-        if (uniquePairwiseKeys.length > 0) {
-            uniquePairwiseKeys.forEach((key, idx) => {
-                const pairwiseSdks = key.split(",");
-                const pairwiseScenarios = scenarios.filter(
-                    (s) => (s.sdks || []).join(",") === key
-                );
+        if (visiblePairwiseKeys.length > 0) {
+            visiblePairwiseKeys.forEach((key, idx) => {
+                const keySdks = key.split(",");
+                const pairwiseScenarios = scenarios.filter((s) => {
+                    const sdks = s.sdks || [];
+                    return (
+                        sdks.length === 2 &&
+                        makeCanonicalPairKey(sdks) === key
+                    );
+                });
+
+                const pairwiseSdks = [...keySdks].sort((a, b) => {
+                    const ia = summarySdks.findIndex(
+                        (sumSdk) => sumSdk.toLowerCase() === a
+                    );
+                    const ib = summarySdks.findIndex(
+                        (sumSdk) => sumSdk.toLowerCase() === b
+                    );
+                    const ra = ia !== -1 ? ia : 999;
+                    const rb = ib !== -1 ? ib : 999;
+                    return ra - rb;
+                });
 
                 if (pairwiseScenarios.length > 0) {
-                    const edges = pairwiseScenarios[0].edges || [];
+                    const edges =
+                        pairwiseScenarios.find(
+                            (s) =>
+                                ((s.sdks || [])[0] || "").toLowerCase() ===
+                                    pairwiseSdks[0] &&
+                                ((s.sdks || [])[1] || "").toLowerCase() ===
+                                    pairwiseSdks[1]
+                        )?.edges ||
+                        pairwiseScenarios[0].edges ||
+                        [];
                     const card = document.createElement("div");
                     card.className = "panel glass topology-card pairwise-card";
 
@@ -357,11 +457,11 @@ document.addEventListener("DOMContentLoaded", () => {
                             <div class="topology-graph-canvas" id="${cardId}">
                                 <svg id="${svgId}" viewBox="0 105 400 90">
                                     <defs>
-                                        <marker id="arrow-end-${svgId}" viewBox="0 0 10 10" refX="10" refY="5" 
+                                        <marker id="arrow-end-${svgId}" viewBox="0 0 10 10" refX="10" refY="5"
                                             markerWidth="6" markerHeight="6" orient="auto">
                                             <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(255, 255, 255, 0.3)" />
                                         </marker>
-                                        <marker id="arrow-start-${svgId}" viewBox="0 0 10 10" refX="0" refY="5" 
+                                        <marker id="arrow-start-${svgId}" viewBox="0 0 10 10" refX="0" refY="5"
                                             markerWidth="6" markerHeight="6" orient="auto">
                                             <path d="M 10 0 L 0 5 L 10 10 z" fill="rgba(255, 255, 255, 0.3)" />
                                         </marker>
@@ -435,6 +535,9 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         if (str.startsWith("go")) {
             return { fill: "#083344", stroke: "#06b6d4", text: "#cffafe" }; // Cyan
+        }
+        if (str.startsWith("rust")) {
+            return { fill: "#451a03", stroke: "#f59e0b", text: "#ffedd5" }; // Amber
         }
         if (str.startsWith("java")) {
             return { fill: "#450a0a", stroke: "#ef4444", text: "#fee2e2" }; // Red/Orange
@@ -712,9 +815,12 @@ document.addEventListener("DOMContentLoaded", () => {
                 });
 
                 if (matchingScenarios.length > 0) {
-                    // Determine if all matching scenarios passed
-                    const allPassed = matchingScenarios.every((s) => s.passed);
-                    if (allPassed) {
+                    const anyPassed = matchingScenarios.some((s) => s.passed);
+                    const anyFailed = matchingScenarios.some((s) => !s.passed);
+                    if (anyPassed && anyFailed) {
+                        td.className = "cell-partial";
+                        td.textContent = "MIXED";
+                    } else if (anyPassed) {
                         td.className = "cell-pass";
                         td.textContent = "PASS";
                     } else {

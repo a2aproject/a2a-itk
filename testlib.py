@@ -586,7 +586,11 @@ async def _execute_single_itk_test(  # noqa: PLR0913
 
         target_url = test_suite.get_agent_card_uri(first_sdk)
         is_go_env = os.path.exists('/app/agents/repo/itk/go.mod')
-        if 'go' in first_sdk or (first_sdk == 'current' and is_go_env):
+        if (
+            'go' in first_sdk
+            or first_sdk.startswith('rust_')
+            or (first_sdk == 'current' and is_go_env)
+        ):
             target_url = target_url.rstrip('/')
         else:
             target_url = target_url.rstrip('/') + '/'

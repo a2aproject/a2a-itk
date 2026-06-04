@@ -274,6 +274,14 @@ TEST_CASES = [
         'behavior': 'send_message',
     },
     {
+        'name': 'rust-v10-streaming-http-json',
+        'sdks': ['rust_v10', 'python_v10'],
+        'protocols': ['http_json'],
+        'edges': None,
+        'streaming': True,
+        'behavior': 'send_message',
+    },
+    {
         'name': 'rust-v10-push-notification-jsonrpc',
         'sdks': ['rust_v10', 'python_v10'],
         'protocols': ['jsonrpc'],
@@ -281,9 +289,31 @@ TEST_CASES = [
         'behavior': 'push_notification',
     },
     {
+        'name': 'rust-v10-push-notification-grpc',
+        'sdks': ['rust_v10', 'python_v10'],
+        'protocols': ['grpc'],
+        'edges': None,
+        'behavior': 'push_notification',
+    },
+    {
+        'name': 'rust-v10-push-notification-http-json',
+        'sdks': ['rust_v10', 'python_v10'],
+        'protocols': ['http_json'],
+        'edges': None,
+        'behavior': 'push_notification',
+    },
+    {
         'name': 'rust-v10-resubscribe-jsonrpc',
         'sdks': ['rust_v10', 'python_v10'],
         'protocols': ['jsonrpc'],
+        'edges': None,
+        'streaming': True,
+        'behavior': 'resubscribe',
+    },
+    {
+        'name': 'rust-v10-resubscribe-http-json',
+        'sdks': ['rust_v10', 'python_v10'],
+        'protocols': ['http_json'],
         'edges': None,
         'streaming': True,
         'behavior': 'resubscribe',
@@ -297,17 +327,78 @@ TEST_CASES = [
         'behavior': 'resubscribe',
     },
     {
+        'name': 'rust-v10-go-v10-push-notification-jsonrpc',
+        'sdks': ['rust_v10', 'go_v10'],
+        'protocols': ['jsonrpc'],
+        'edges': ['0->1', '1->0'],
+        'behavior': 'push_notification',
+    },
+    {
+        'name': 'rust-v10-go-v10-push-notification-grpc',
+        'sdks': ['rust_v10', 'go_v10'],
+        'protocols': ['grpc'],
+        'edges': ['0->1', '1->0'],
+        'behavior': 'push_notification',
+    },
+    {
+        'name': 'rust-v10-go-v10-push-notification-http-json',
+        'sdks': ['rust_v10', 'go_v10'],
+        'protocols': ['http_json'],
+        'edges': ['0->1', '1->0'],
+        'behavior': 'push_notification',
+    },
+    {
+        'name': 'rust-v10-go-v10-resubscribe-jsonrpc',
+        'sdks': ['rust_v10', 'go_v10'],
+        'protocols': ['jsonrpc'],
+        'edges': ['0->1', '1->0'],
+        'streaming': True,
+        'behavior': 'resubscribe',
+    },
+    {
+        'name': 'rust-v10-go-v10-resubscribe-grpc',
+        'sdks': ['rust_v10', 'go_v10'],
+        'protocols': ['grpc'],
+        'edges': ['0->1', '1->0'],
+        'streaming': True,
+        'behavior': 'resubscribe',
+    },
+    {
+        'name': 'rust-v10-go-v10-resubscribe-http-json',
+        'sdks': ['rust_v10', 'go_v10'],
+        'protocols': ['http_json'],
+        'edges': ['0->1', '1->0'],
+        'streaming': True,
+        'behavior': 'resubscribe',
+    },
+    {
         'name': 'rust-v10-go-v10-all-transports',
         'sdks': ['rust_v10', 'go_v10'],
         'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'behavior': 'send_message',
     },
     {
         'name': 'rust-v10-go-v10-all-transports-streaming',
         'sdks': ['rust_v10', 'go_v10'],
         'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
+        'streaming': True,
+        'behavior': 'send_message',
+    },
+    {
+        'name': 'python-v10-go-v10-rust-v10-hub-all-transports',
+        'sdks': ['python_v10', 'go_v10', 'rust_v10'],
+        'protocols': ['jsonrpc', 'grpc', 'http_json'],
+        'edges': ['2->0', '2->1', '0->2', '1->2'],
+        'behavior': 'send_message',
+        'build_subtests': True,
+    },
+    {
+        'name': 'python-v10-go-v10-rust-v10-hub-all-transports-streaming',
+        'sdks': ['python_v10', 'go_v10', 'rust_v10'],
+        'protocols': ['jsonrpc', 'grpc', 'http_json'],
+        'edges': ['2->0', '2->1', '0->2', '1->2'],
         'streaming': True,
         'behavior': 'send_message',
     },
@@ -323,16 +414,16 @@ def parse_args():
 Examples:
   # Run all tests
   uv run run_tests.py
-  
+
   # Run only tests involving Python v1.0, Go v1.0, and Rust v1.0
   uv run run_tests.py --sdks python_v10,go_v10,rust_v10
-  
+
   # Run only Rust v1.0 and Python v1.0 tests
   uv run run_tests.py --sdks rust_v10,python_v10
-  
+
   # Run only v0.3 agents
   uv run run_tests.py --sdks python_v03,go_v03
-  
+
   # List available SDKs
   uv run run_tests.py --list-sdks
         '''
@@ -363,16 +454,16 @@ def get_available_sdks():
 
 def filter_test_cases(selected_sdks=None):
     """Filter TEST_CASES to only include cases using selected SDKs.
-    
+
     Args:
         selected_sdks: Set of SDK names to include, or None to include all.
-    
+
     Returns:
         Filtered list of test cases.
     """
     if selected_sdks is None:
         return TEST_CASES
-    
+
     filtered = []
     for case in TEST_CASES:
         # Include test if all its SDKs are in the selected set
@@ -384,7 +475,7 @@ def filter_test_cases(selected_sdks=None):
 async def main_async() -> None:
     """Execute hardcoded integration test scenarios concurrently."""
     args = parse_args()
-    
+
     # Handle --list-sdks flag
     if args.list_sdks:
         available = get_available_sdks()
@@ -392,7 +483,7 @@ async def main_async() -> None:
         for sdk in available:
             print(f'  - {sdk}')
         sys.exit(0)
-    
+
     # Parse and validate selected SDKs
     selected_sdks = None
     if args.sdks:
@@ -407,19 +498,20 @@ async def main_async() -> None:
             )
             sys.exit(1)
         logger.info('Filtering tests to SDKs: %s', ', '.join(sorted(selected_sdks)))
-    
+
     # Filter test cases based on selected SDKs
     test_cases = filter_test_cases(selected_sdks)
+
     num_original = len(TEST_CASES)
     num_filtered = len(test_cases)
-    
+
     if num_filtered < num_original:
         logger.info(
             'Running %d/%d test cases (filtered by SDKs)',
             num_filtered,
             num_original
         )
-    
+
     # 1. Identify all unique SDKs needed across filtered test cases
     all_required_sdks = set()
     for case in test_cases:

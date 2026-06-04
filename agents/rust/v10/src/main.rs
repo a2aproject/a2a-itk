@@ -705,18 +705,17 @@ async fn main() {
     //   /jsonrpc  → JSON-RPC handler + agent card
     //   /rest     → HTTP+JSON REST handler + agent card
     //
-    // testlib always appends a trailing slash to non-Go agent URLs.
-    // NormalizePath middleware strips the trailing slash before routing so that
-    // both /jsonrpc and /jsonrpc/ resolve to the same handler.
-    let jsonrpc_sub = Router::new()
-        .merge(a2a_server::jsonrpc::jsonrpc_router(handler.clone()))
-        .merge(a2a_server::agent_card::agent_card_router(card_producer.clone()));
+    // Use canonical non-trailing prefixes.
+    let jsonrpc_calls = a2a_server::jsonrpc::jsonrpc_router(handler.clone());
+    let jsonrpc_card = a2a_server::agent_card::agent_card_router(card_producer.clone());
     let rest_sub = Router::new()
         .merge(a2a_server::rest::rest_router(handler.clone()))
         .merge(a2a_server::agent_card::agent_card_router(card_producer));
     let http_app = Router::new()
-        .nest("/jsonrpc/", jsonrpc_sub)
-        .nest("/rest/", rest_sub)
+        .nest("/jsonrpc", jsonrpc_calls.clone())
+        .nest("/jsonrpc/", jsonrpc_calls)
+        .nest("/jsonrpc", jsonrpc_card)
+        .nest("/rest", rest_sub)
         .layer(tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash());
 
     // gRPC service
