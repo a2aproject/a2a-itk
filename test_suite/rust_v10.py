@@ -55,6 +55,7 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
             stderr=subprocess.STDOUT,
             text=True,
         )
+        stdout_file.close()
         return p
     else:
         return subprocess.Popen(  # noqa: S603

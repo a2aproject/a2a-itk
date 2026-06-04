@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use axum::Router;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
+use futures::FutureExt;
 use prost::Message as _;
 use tokio::net::TcpListener;
 use tokio::time::sleep;
@@ -151,25 +152,27 @@ impl ItkExecutor {
         Self::handle_instruction_inner(inst).await
     }
 
-    async fn handle_instruction_inner(inst: &Instruction) -> Result<Vec<String>, String> {
-        match &inst.step {
-            Some(Step::ReturnResponse(r)) => Ok(vec![r.response.clone()]),
+    fn handle_instruction_inner(inst: &Instruction) -> futures::future::BoxFuture<'_, Result<Vec<String>, String>> {
+        async move {
+            match &inst.step {
+                Some(Step::ReturnResponse(r)) => Ok(vec![r.response.clone()]),
 
-            Some(Step::CallAgent(call)) => {
-                Self::handle_call_agent(call).await
-            }
-
-            Some(Step::Steps(series)) => {
-                let mut all = Vec::new();
-                for sub in &series.instructions {
-                    let mut results = Box::pin(Self::handle_instruction_inner(sub)).await?;
-                    all.append(&mut results);
+                Some(Step::CallAgent(call)) => {
+                    Self::handle_call_agent(call).await
                 }
-                Ok(all)
-            }
 
-            None => Err("empty instruction step".to_string()),
-        }
+                Some(Step::Steps(series)) => {
+                    let mut all = Vec::new();
+                    for sub in &series.instructions {
+                        let mut results = Self::handle_instruction_inner(sub).await?;
+                        all.append(&mut results);
+                    }
+                    Ok(all)
+                }
+
+                None => Err("empty instruction step".to_string()),
+            }
+        }.boxed()
     }
 
     async fn handle_call_agent(call: &itk_proto::CallAgent) -> Result<Vec<String>, String> {
@@ -706,16 +709,18 @@ async fn main() {
     //   /rest     → HTTP+JSON REST handler + agent card
     //
     // Use canonical non-trailing prefixes.
-    let jsonrpc_calls = a2a_server::jsonrpc::jsonrpc_router(handler.clone());
-    let jsonrpc_card = a2a_server::agent_card::agent_card_router(card_producer.clone());
+    // Register both with and without trailing slash to support all client conventions.
+    let jsonrpc_sub = Router::new()
+        .merge(a2a_server::jsonrpc::jsonrpc_router(handler.clone()))
+        .merge(a2a_server::agent_card::agent_card_router(card_producer.clone()));
     let rest_sub = Router::new()
         .merge(a2a_server::rest::rest_router(handler.clone()))
         .merge(a2a_server::agent_card::agent_card_router(card_producer));
     let http_app = Router::new()
-        .nest("/jsonrpc", jsonrpc_calls.clone())
-        .nest("/jsonrpc/", jsonrpc_calls)
-        .nest("/jsonrpc", jsonrpc_card)
-        .nest("/rest", rest_sub)
+        .nest("/jsonrpc", jsonrpc_sub.clone())
+        .nest("/jsonrpc/", jsonrpc_sub)
+        .nest("/rest", rest_sub.clone())
+        .nest("/rest/", rest_sub)
         .layer(tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash());
 
     // gRPC service
