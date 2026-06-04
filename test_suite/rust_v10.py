@@ -43,10 +43,7 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
     log_level = os.environ.get('ITK_LOG_LEVEL', 'INFO')
     if log_level.upper() == 'DEBUG':
         logs_dir = _ROOT_DIR / 'logs'
-        if not logs_dir.exists():
-            raise RuntimeError(
-                f"Logs directory '{logs_dir}' does not exist. Please create it or mount it."
-            )
+        logs_dir.mkdir(parents=True, exist_ok=True)
         with open(logs_dir / 'agent_rust_v10.log', 'w') as stdout_file:  # noqa: WPS515
             p = subprocess.Popen(  # noqa: S603
                 args,
