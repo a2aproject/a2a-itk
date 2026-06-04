@@ -5,3 +5,5 @@ __pycache__/
 bin/
 .ruff_cache/
 /agents/java/v10/target/
+agents/rust/v10/target/
+target/

@@ -66,9 +66,9 @@ ITK is structured to validate in-development SDK codebases against a cluster of 
 | **Python** | ✅ | ✅ | ✅ |
 | **Go** | ✅ | ✅ | ✅ |
 | **TypeScript** | ❌ | ❌ | ✅ |
+| **Java** | ❌ | ✅ | ⚠️ |
+| **Rust** | ❌ | ✅ | ❌ |
 | **.NET** | ❌ | ❌ | ⚠️ |
-| **Java** | ❌ | ❌ | ⚠️ |
-| **Rust** | ❌ | ❌ | ❌ |
 
 > [!NOTE]
 > ⚠️ *Indicates preliminary integration layout utilizing initial placeholders for current SDK state *
