@@ -104,8 +104,8 @@ fn extract_instruction(message: &Message) -> Result<Instruction, String> {
 
             // Text part - could be base64-encoded protobuf
             a2a::PartContent::Text(text) => {
-                // Try base64 decode first
-                if let Ok(raw) = BASE64.decode(text) {
+                // Try base64 decode first (trim whitespace to avoid decode failures)
+                if let Ok(raw) = BASE64.decode(text.trim()) {
                     if let Ok(inst) = Instruction::decode(raw.as_slice()) {
                         info!("Decoded instruction from base64-encoded text part");
                         return Ok(inst);
@@ -739,10 +739,7 @@ async fn main() {
     });
 
     let grpc_server = tokio::spawn(async move {
-        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", args.grpc_port)
-            .parse()
-            .expect("gRPC address should parse");
-        let listener = TcpListener::bind(&addr)
+        let listener = TcpListener::bind(("127.0.0.1", args.grpc_port))
             .await
             .expect("gRPC listener should bind");
         let stream = tokio_stream::wrappers::TcpListenerStream::new(listener);

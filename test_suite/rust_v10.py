@@ -47,15 +47,13 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
             raise RuntimeError(
                 f"Logs directory '{logs_dir}' does not exist. Please create it or mount it."
             )
-        stdout_file = open(logs_dir / 'agent_rust_v10.log', 'w')  # noqa: WPS515
-
-        p = subprocess.Popen(  # noqa: S603
-            args,
-            stdout=stdout_file,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        stdout_file.close()
+        with open(logs_dir / 'agent_rust_v10.log', 'w') as stdout_file:  # noqa: WPS515
+            p = subprocess.Popen(  # noqa: S603
+                args,
+                stdout=stdout_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
         return p
     else:
         return subprocess.Popen(  # noqa: S603
