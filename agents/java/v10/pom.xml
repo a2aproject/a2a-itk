@@ -19,7 +19,7 @@
         <a2a.java.version>1.0.0.CR1</a2a.java.version>
         <quarkus.platform.version>3.35.2</quarkus.platform.version>
         <protobuf-java.version>4.33.2</protobuf-java.version>
-        <maven.compiler.release>21</maven.compiler.release>
+        <maven.compiler.release>17</maven.compiler.release>
     </properties>
 
     <dependencyManagement>
