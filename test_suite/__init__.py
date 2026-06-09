@@ -92,7 +92,7 @@ def get_agent_card_uri(sdk_name: str) -> str:
     agent_def = _AGENT_DEFS.get(sdk_name)
     if not agent_def:
         raise ValueError(f'Unknown SDK: {sdk_name}')
-    return f'http://{_HOST}:{agent_def["httpPort"]}/jsonrpc'
+    return f'http://{_HOST}:{agent_def["httpPort"]}'
 
 
 def get_agent_def(sdk_name: str) -> dict:
@@ -247,7 +247,7 @@ def _traversal_to_instruction(
             raise ValueError(f'Unknown SDK: {v}')
 
         port = agent_def.get('httpPort')
-        agent_card_uri = f'http://{_HOST}:{port}/jsonrpc'
+        agent_card_uri = f'http://{_HOST}:{port}'
 
         call_step.call_agent.agent_card_uri = agent_card_uri
         call_step.call_agent.transport = transport

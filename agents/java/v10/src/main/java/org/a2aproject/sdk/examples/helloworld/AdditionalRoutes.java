@@ -12,12 +12,6 @@ public class AdditionalRoutes {
     private static final Logger log = LoggerFactory.getLogger(AdditionalRoutes.class);
 
     void addPrefixedRoutes(@Observes Router router) {
-        router.get("/jsonrpc/.well-known/agent-card.json")
-                .handler(ctx -> {
-                    log.info("Rerouting GET /jsonrpc/.well-known/agent-card.json -> /.well-known/agent-card.json");
-                    ctx.reroute("/.well-known/agent-card.json");
-                });
-
         router.route("/jsonrpc/*").handler(ctx -> {
             log.info("Rerouting /jsonrpc -> /");
             ctx.reroute("/");
