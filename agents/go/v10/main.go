@@ -494,14 +494,12 @@ func run() error {
 	)
 
 	mux := http.NewServeMux()
-	agentCardRoute := fmt.Sprintf("/jsonrpc%s", a2asrv.WellKnownAgentCardPath)
 	mux.Handle("/", a2av0.NewJSONRPCHandler(requestHandler))
 	mux.Handle("/jsonrpc", a2asrv.NewJSONRPCHandler(requestHandler))
 	mux.Handle("/rest/", http.StripPrefix("/rest", a2asrv.NewRESTHandler(requestHandler)))
 
 	cardProducer := a2av0.NewStaticAgentCardProducer(agentCard)
 	cardHandler := a2asrv.NewAgentCardHandler(cardProducer)
-	mux.Handle(agentCardRoute, cardHandler)
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardHandler)
 
 	httpServer := &http.Server{

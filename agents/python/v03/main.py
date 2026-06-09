@@ -544,6 +544,10 @@ def create_http_server(
     """
     app = FastAPI(title='ITK v03 Agent Server (Consolidated)')
 
+    @app.get('/.well-known/agent-card.json')
+    def get_agent_card():
+        return agent_card
+
     app.mount(
         '/jsonrpc', A2AFastAPIApplication(agent_card, request_handler).build()
     )

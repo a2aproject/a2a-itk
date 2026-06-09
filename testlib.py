@@ -99,11 +99,7 @@ async def _check_agent_ready(
         bool: True if card fetched successfully within the timeout, otherwise False.
     """
     start = time.time()
-    base_url = url.rstrip('/')
-    if not base_url.endswith('/jsonrpc'):
-        target_url = f'{base_url}/jsonrpc/.well-known/agent-card.json'
-    else:
-        target_url = f'{base_url}/.well-known/agent-card.json'
+    target_url = f'{url.rstrip("/")}/.well-known/agent-card.json'
 
     async with httpx.AsyncClient(timeout=5) as http_client:
         while time.time() - start < timeout_seconds:
@@ -584,7 +580,8 @@ async def _execute_single_itk_test(  # noqa: PLR0913
         first_sdk = sdks[0]
         is_v0 = 'v03' in first_sdk
 
-        target_url = test_suite.get_agent_card_uri(first_sdk)
+        base_uri = test_suite.get_agent_card_uri(first_sdk)
+        target_url = f'{base_uri.rstrip("/")}/jsonrpc'
         is_go_env = os.path.exists('/app/agents/repo/itk/go.mod')
         if 'go' in first_sdk or (first_sdk == 'current' and is_go_env):
             target_url = target_url.rstrip('/')
