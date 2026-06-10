@@ -31,11 +31,8 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
 
     if is_debug:
         logs_dir = _ROOT_DIR / 'logs'
-        if not logs_dir.exists():
-            raise RuntimeError(
-                f"Logs directory '{logs_dir}' does not exist. Please create it or mount it."
-            )
-        stdout_file = open(logs_dir / 'agent_current.log', 'w')
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        stdout_file = open(logs_dir / 'agent_current.log', 'w')  # noqa: WPS515
 
     def popen_with_logs(args, cwd, stdout_override=None):
         if is_debug:
@@ -46,11 +43,13 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
                 stderr=subprocess.STDOUT,
                 text=True,
             )
+            p._log_file = stdout_file  # noqa: SLF001
             return p
         else:
             kwargs = {
                 'cwd': cwd,
-                'stderr': subprocess.STDOUT,
+                'stdout': subprocess.DEVNULL,
+                'stderr': subprocess.DEVNULL,
                 'text': True,
             }
             if stdout_override:
