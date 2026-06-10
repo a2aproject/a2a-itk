@@ -13,6 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     psmisc=23.6-1 \
     git=1:2.39.5-0+deb12u3 \
     openjdk-17-jdk-headless \
+    build-essential \
+    cmake \
+    pkg-config \
+    protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go 1.25.0
@@ -37,8 +41,10 @@ ENV PATH=$PATH:/root/.cargo/bin
 
 # Pre-build the Rust v1.0 agent so the binary is cached in the image layer.
 # This avoids a cold Cargo compile at test runtime.
-COPY agents/rust/v10 /tmp/rust_v10_prebuild
-WORKDIR /tmp/rust_v10_prebuild
+# Mirror the repo structure so build.rs can resolve ../../../protos correctly.
+COPY protos /tmp/protos
+COPY agents/rust/v10 /tmp/agents/rust/v10
+WORKDIR /tmp/agents/rust/v10
 RUN cargo build --release
 RUN mkdir -p /app/agents/rust/v10/target/release && \
     cp target/release/itk-rust-v10-agent /app/agents/rust/v10/target/release/
