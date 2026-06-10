@@ -45,9 +45,10 @@ ENV PATH=$PATH:/root/.cargo/bin
 COPY protos /tmp/protos
 COPY agents/rust/v10 /tmp/agents/rust/v10
 WORKDIR /tmp/agents/rust/v10
-RUN cargo build --release
-RUN mkdir -p /app/agents/rust/v10/target/release && \
-    cp target/release/itk-rust-v10-agent /app/agents/rust/v10/target/release/
+RUN cargo build --release && \
+    mkdir -p /app/agents/rust/v10/target/release && \
+    cp target/release/itk-rust-v10-agent /app/agents/rust/v10/target/release/ && \
+    rm -rf target
 WORKDIR /app
 
 # Install Maven 3.9.9 (to satisfy protobuf-maven-plugin 3.9.6+ requirement)
