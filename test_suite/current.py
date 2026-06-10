@@ -31,11 +31,8 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
 
     if is_debug:
         logs_dir = _ROOT_DIR / 'logs'
-        if not logs_dir.exists():
-            raise RuntimeError(
-                f"Logs directory '{logs_dir}' does not exist. Please create it or mount it."
-            )
-        stdout_file = open(logs_dir / 'agent_current.log', 'w')
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        stdout_file = open(logs_dir / 'agent_current.log', 'w')  # noqa: WPS515
 
     def popen_with_logs(args, cwd, stdout_override=None):
         if is_debug:
@@ -46,11 +43,13 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
                 stderr=subprocess.STDOUT,
                 text=True,
             )
+            p._log_file = stdout_file  # noqa: SLF001
             return p
         else:
             kwargs = {
                 'cwd': cwd,
-                'stderr': subprocess.STDOUT,
+                'stdout': subprocess.DEVNULL,
+                'stderr': subprocess.DEVNULL,
                 'text': True,
             }
             if stdout_override:
@@ -129,7 +128,32 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
         ]
         return popen_with_logs(args, current_dir)
 
+    if (current_dir / 'Cargo.toml').exists():
+        # Rust agent: build release binary then run it
+        binary = current_dir / 'target' / 'release' / 'itk-current-agent'
+        candidates = list((current_dir / 'target' / 'release').glob('itk-*')) if (current_dir / 'target' / 'release').exists() else []
+        if not binary.exists() and candidates:
+            binary = candidates[0]
+        if not binary.exists():
+            subprocess.run(  # noqa: S603
+                ['cargo', 'build', '--release'],  # noqa: S607
+                cwd=current_dir,
+                check=True,
+            )
+            built = list((current_dir / 'target' / 'release').glob('itk-*'))
+            if not built:
+                raise RuntimeError(f'cargo build succeeded but no itk-* binary found in {current_dir / "target/release"}')
+            binary = built[0]
+        args = [  # noqa: S607
+            str(binary),
+            '--httpPort',
+            str(http_port),
+            '--grpcPort',
+            str(grpc_port),
+        ]
+        return popen_with_logs(args, current_dir)
+
     raise RuntimeError(
         f'Could not determine agent type in {current_dir}. '
-        'Neither main.go, main.py, package.json, .csproj nor pom.xml found.'
+        'Neither main.go, main.py, package.json, .csproj, pom.xml nor Cargo.toml found.'
     )

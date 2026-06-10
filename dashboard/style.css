@@ -254,6 +254,10 @@ a:hover {
     background-color: #00add8;
 }
 
+.sdk-icon.rust {
+    background-color: #d97706;
+}
+
 .sdk-icon.dotnet {
     background-color: #a855f7;
 }
@@ -581,6 +585,14 @@ a:hover {
     animation: pulse-red 2s infinite ease-in-out;
 }
 
+.matrix-table td.cell-partial {
+    background: rgb(245 158 11 / 12%);
+    border: 1px solid rgb(245 158 11 / 35%);
+    color: #fde68a;
+    font-weight: 600;
+    position: relative;
+}
+
 .matrix-table td.cell-disabled {
     background: var(--disabled-bg);
     border: 1px solid var(--disabled-border);
@@ -707,6 +719,11 @@ a:hover {
 .legend-color.pass {
     background: rgb(16 185 129 / 12%);
     border: 1px solid rgb(16 185 129 / 30%);
+}
+
+.legend-color.partial {
+    background: rgb(245 158 11 / 12%);
+    border: 1px solid rgb(245 158 11 / 35%);
 }
 
 .legend-color.fail {
