@@ -155,5 +155,5 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
 
     raise RuntimeError(
         f'Could not determine agent type in {current_dir}. '
-        'Neither main.go, main.py, package.json, .csproj nor pom.xml found.'
+        'Neither main.go, main.py, package.json, .csproj, pom.xml nor Cargo.toml found.'
     )
