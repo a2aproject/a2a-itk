@@ -129,6 +129,31 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
         ]
         return popen_with_logs(args, current_dir)
 
+    if (current_dir / 'Cargo.toml').exists():
+        # Rust agent: build release binary then run it
+        binary = current_dir / 'target' / 'release' / 'itk-current-agent'
+        candidates = list((current_dir / 'target' / 'release').glob('itk-*')) if (current_dir / 'target' / 'release').exists() else []
+        if not binary.exists() and candidates:
+            binary = candidates[0]
+        if not binary.exists():
+            subprocess.run(  # noqa: S603
+                ['cargo', 'build', '--release'],  # noqa: S607
+                cwd=current_dir,
+                check=True,
+            )
+            built = list((current_dir / 'target' / 'release').glob('itk-*'))
+            if not built:
+                raise RuntimeError(f'cargo build succeeded but no itk-* binary found in {current_dir / "target/release"}')
+            binary = built[0]
+        args = [  # noqa: S607
+            str(binary),
+            '--httpPort',
+            str(http_port),
+            '--grpcPort',
+            str(grpc_port),
+        ]
+        return popen_with_logs(args, current_dir)
+
     raise RuntimeError(
         f'Could not determine agent type in {current_dir}. '
         'Neither main.go, main.py, package.json, .csproj nor pom.xml found.'

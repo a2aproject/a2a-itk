@@ -435,16 +435,27 @@ document.addEventListener("DOMContentLoaded", () => {
                 });
 
                 if (pairwiseScenarios.length > 0) {
-                    const edges =
-                        pairwiseScenarios.find(
-                            (s) =>
-                                ((s.sdks || [])[0] || "").toLowerCase() ===
-                                    pairwiseSdks[0] &&
-                                ((s.sdks || [])[1] || "").toLowerCase() ===
-                                    pairwiseSdks[1]
-                        )?.edges ||
-                        pairwiseScenarios[0].edges ||
-                        [];
+                    const matchedScenario = pairwiseScenarios.find(
+                        (s) =>
+                            ((s.sdks || [])[0] || "").toLowerCase() ===
+                                pairwiseSdks[0] &&
+                            ((s.sdks || [])[1] || "").toLowerCase() ===
+                                pairwiseSdks[1]
+                    );
+                    const fallbackScenario = pairwiseScenarios[0];
+                    let edges = (matchedScenario || fallbackScenario).edges || [];
+                    // When using the fallback scenario, its SDK order may differ from
+                    // pairwiseSdks — swap edge indices 0↔1 to correct arrow direction.
+                    if (!matchedScenario) {
+                        const fallbackSdk0 = ((fallbackScenario.sdks || [])[0] || "").toLowerCase();
+                        if (fallbackSdk0 !== pairwiseSdks[0]) {
+                            edges = edges.map((e) =>
+                                e.replace(/(\d+)->(\d+)/, (_, f, t) =>
+                                    `${f === "0" ? "1" : "0"}->${t === "0" ? "1" : "0"}`
+                                )
+                            );
+                        }
+                    }
                     const card = document.createElement("div");
                     card.className = "panel glass topology-card pairwise-card";
 

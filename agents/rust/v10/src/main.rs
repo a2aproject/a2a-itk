@@ -46,11 +46,11 @@ fn build_agent_card(http_port: u16, grpc_port: u16) -> AgentCard {
         version: "1.0.0".to_string(),
         supported_interfaces: vec![
             AgentInterface::new(
-                format!("http://127.0.0.1:{http_port}/jsonrpc/"),
+                format!("http://127.0.0.1:{http_port}/jsonrpc"),
                 TRANSPORT_PROTOCOL_JSONRPC,
             ),
             AgentInterface::new(
-                format!("http://127.0.0.1:{http_port}/rest/"),
+                format!("http://127.0.0.1:{http_port}/rest"),
                 TRANSPORT_PROTOCOL_HTTP_JSON,
             ),
             AgentInterface::new(
@@ -717,10 +717,8 @@ async fn main() {
         .merge(a2a_server::rest::rest_router(handler.clone()))
         .merge(a2a_server::agent_card::agent_card_router(card_producer));
     let http_app = Router::new()
-        .nest("/jsonrpc", jsonrpc_sub.clone())
-        .nest("/jsonrpc/", jsonrpc_sub)
-        .nest("/rest", rest_sub.clone())
-        .nest("/rest/", rest_sub)
+        .nest("/jsonrpc", jsonrpc_sub)
+        .nest("/rest", rest_sub)
         .layer(tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash());
 
     // gRPC service
@@ -738,11 +736,12 @@ async fn main() {
             .expect("HTTP server should run");
     });
 
+    let grpc_listener = TcpListener::bind(("127.0.0.1", args.grpc_port))
+        .await
+        .expect("gRPC listener should bind");
+
     let grpc_server = tokio::spawn(async move {
-        let listener = TcpListener::bind(("127.0.0.1", args.grpc_port))
-            .await
-            .expect("gRPC listener should bind");
-        let stream = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let stream = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
 
         Server::builder()
             .add_service(grpc_service)
