@@ -41,6 +41,8 @@ jobs:
           curl -L -f -o dashboard/itk_go.json https://github.com/a2aproject/a2a-go/releases/download/nightly-metrics/itk_go.json || echo "{}" > dashboard/itk_go.json
           # Download Rust Metrics directly into the dashboard directory
           curl -L -f -o dashboard/itk_rust.json https://github.com/a2aproject/a2a-rust/releases/download/nightly-metrics/itk_rust.json || echo "{}" > dashboard/itk_rust.json
+          # Download Java Metrics directly into the dashboard directory
+          curl -L -f -o dashboard/itk_java.json https://github.com/a2aproject/a2a-java/releases/download/nightly-metrics/itk_java.json || echo "{}" > dashboard/itk_java.json
           echo "Metrics synchronized successfully!"
 
       - name: Prepare static site structure
