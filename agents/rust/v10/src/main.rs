@@ -715,8 +715,9 @@ async fn main() {
         .merge(a2a_server::agent_card::agent_card_router(card_producer.clone()));
     let rest_sub = Router::new()
         .merge(a2a_server::rest::rest_router(handler.clone()))
-        .merge(a2a_server::agent_card::agent_card_router(card_producer));
+        .merge(a2a_server::agent_card::agent_card_router(card_producer.clone()));
     let http_app = Router::new()
+        .merge(a2a_server::agent_card::agent_card_router(card_producer))
         .nest("/jsonrpc", jsonrpc_sub)
         .nest("/rest", rest_sub)
         .layer(tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash());
