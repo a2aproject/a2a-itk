@@ -221,10 +221,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const sdks = (scenario.sdks || []).map((s) =>
                 (s || "").toLowerCase()
             );
-            if (activeSDK === "ts") {
-                return sdks.includes("current") || sdks.some((s) => s.startsWith("ts"));
-            }
-            return sdks.some((s) => s.startsWith(activeSDK.toLowerCase()));
+            return sdks.includes("current") || sdks.some((s) => s.startsWith(activeSDK.toLowerCase()));
         };
 
         if (scenarios.length === 0) {
@@ -382,13 +379,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         });
 
-        // For Rust tab, only show pairwise combinations that include Rust.
-        const visiblePairwiseKeys = uniquePairwiseKeys.filter((key) => {
-            if (activeSDK !== "rust") return true;
-            return key
-                .split(",")
-                .some((sdk) => sdk.toLowerCase().startsWith("rust"));
-        });
+        const visiblePairwiseKeys = uniquePairwiseKeys;
 
         // Sort pairwise keys deterministically based on the order of SDKs in the summary visualization
         visiblePairwiseKeys.sort((keyA, keyB) => {
