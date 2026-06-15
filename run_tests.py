@@ -238,118 +238,118 @@ TEST_CASES = [
     # --- Rust v1.0 (current-mount) scenarios ---
     {
         'name': 'rust-v10-send-message-jsonrpc',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['jsonrpc'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'behavior': 'send_message',
     },
     {
         'name': 'rust-v10-send-message-grpc',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['grpc'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'behavior': 'send_message',
     },
     {
         'name': 'rust-v10-send-message-http-json',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['http_json'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'behavior': 'send_message',
     },
     {
         'name': 'rust-v10-streaming-jsonrpc',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['jsonrpc'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'streaming': True,
         'behavior': 'send_message',
     },
     {
         'name': 'rust-v10-streaming-grpc',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['grpc'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'streaming': True,
         'behavior': 'send_message',
     },
     {
         'name': 'rust-v10-streaming-http-json',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['http_json'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'streaming': True,
         'behavior': 'send_message',
     },
     {
         'name': 'rust-v10-push-notification-jsonrpc',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['jsonrpc'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'behavior': 'push_notification',
     },
     {
         'name': 'rust-v10-push-notification-grpc',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['grpc'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'behavior': 'push_notification',
     },
     {
         'name': 'rust-v10-push-notification-http-json',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['http_json'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'behavior': 'push_notification',
     },
     {
         'name': 'rust-v10-resubscribe-jsonrpc',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['jsonrpc'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'streaming': True,
         'behavior': 'resubscribe',
     },
     {
         'name': 'rust-v10-resubscribe-http-json',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['http_json'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'streaming': True,
         'behavior': 'resubscribe',
     },
     {
         'name': 'rust-v10-resubscribe-grpc',
-        'sdks': ['rust_v10', 'python_v10'],
+        'sdks': ['current', 'python_v10'],
         'protocols': ['grpc'],
-        'edges': None,
+        'edges': ['0->1', '1->0'],
         'streaming': True,
         'behavior': 'resubscribe',
     },
     {
         'name': 'rust-v10-go-v10-push-notification-jsonrpc',
-        'sdks': ['rust_v10', 'go_v10'],
+        'sdks': ['current', 'go_v10'],
         'protocols': ['jsonrpc'],
         'edges': ['0->1', '1->0'],
         'behavior': 'push_notification',
     },
     {
         'name': 'rust-v10-go-v10-push-notification-grpc',
-        'sdks': ['rust_v10', 'go_v10'],
+        'sdks': ['current', 'go_v10'],
         'protocols': ['grpc'],
         'edges': ['0->1', '1->0'],
         'behavior': 'push_notification',
     },
     {
         'name': 'rust-v10-go-v10-push-notification-http-json',
-        'sdks': ['rust_v10', 'go_v10'],
+        'sdks': ['current', 'go_v10'],
         'protocols': ['http_json'],
         'edges': ['0->1', '1->0'],
         'behavior': 'push_notification',
     },
     {
         'name': 'rust-v10-go-v10-resubscribe-jsonrpc',
-        'sdks': ['rust_v10', 'go_v10'],
+        'sdks': ['current', 'go_v10'],
         'protocols': ['jsonrpc'],
         'edges': ['0->1', '1->0'],
         'streaming': True,
@@ -357,7 +357,7 @@ TEST_CASES = [
     },
     {
         'name': 'rust-v10-go-v10-resubscribe-grpc',
-        'sdks': ['rust_v10', 'go_v10'],
+        'sdks': ['current', 'go_v10'],
         'protocols': ['grpc'],
         'edges': ['0->1', '1->0'],
         'streaming': True,
@@ -365,7 +365,7 @@ TEST_CASES = [
     },
     {
         'name': 'rust-v10-go-v10-resubscribe-http-json',
-        'sdks': ['rust_v10', 'go_v10'],
+        'sdks': ['current', 'go_v10'],
         'protocols': ['http_json'],
         'edges': ['0->1', '1->0'],
         'streaming': True,
@@ -373,14 +373,14 @@ TEST_CASES = [
     },
     {
         'name': 'rust-v10-go-v10-all-transports',
-        'sdks': ['rust_v10', 'go_v10'],
+        'sdks': ['current', 'go_v10'],
         'protocols': ['jsonrpc', 'grpc', 'http_json'],
         'edges': ['0->1', '1->0'],
         'behavior': 'send_message',
     },
     {
         'name': 'rust-v10-go-v10-all-transports-streaming',
-        'sdks': ['rust_v10', 'go_v10'],
+        'sdks': ['current', 'go_v10'],
         'protocols': ['jsonrpc', 'grpc', 'http_json'],
         'edges': ['0->1', '1->0'],
         'streaming': True,
@@ -388,7 +388,7 @@ TEST_CASES = [
     },
     {
         'name': 'python-v10-go-v10-rust-v10-hub-all-transports',
-        'sdks': ['python_v10', 'go_v10', 'rust_v10'],
+        'sdks': ['python_v10', 'go_v10', 'current'],
         'protocols': ['jsonrpc', 'grpc', 'http_json'],
         'edges': ['2->0', '2->1', '0->2', '1->2'],
         'behavior': 'send_message',
@@ -396,7 +396,7 @@ TEST_CASES = [
     },
     {
         'name': 'python-v10-go-v10-rust-v10-hub-all-transports-streaming',
-        'sdks': ['python_v10', 'go_v10', 'rust_v10'],
+        'sdks': ['python_v10', 'go_v10', 'current'],
         'protocols': ['jsonrpc', 'grpc', 'http_json'],
         'edges': ['2->0', '2->1', '0->2', '1->2'],
         'streaming': True,
@@ -416,10 +416,10 @@ Examples:
   uv run run_tests.py
 
   # Run only tests involving Python v1.0, Go v1.0, and Rust v1.0
-  uv run run_tests.py --sdks python_v10,go_v10,rust_v10
+  uv run run_tests.py --sdks python_v10,go_v10,current
 
   # Run only Rust v1.0 and Python v1.0 tests
-  uv run run_tests.py --sdks rust_v10,python_v10
+  uv run run_tests.py --sdks current,python_v10
 
   # Run only v0.3 agents
   uv run run_tests.py --sdks python_v03,go_v03
