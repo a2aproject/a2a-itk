@@ -221,10 +221,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const sdks = (scenario.sdks || []).map((s) =>
                 (s || "").toLowerCase()
             );
-            if (activeSDK === "ts" || activeSDK === "rust") {
-                return sdks.includes("current") || sdks.some((s) => s.startsWith(activeSDK.toLowerCase()));
-            }
-            return sdks.some((s) => s.startsWith(activeSDK.toLowerCase()));
+            return sdks.includes("current") || sdks.some((s) => s.startsWith(activeSDK.toLowerCase()));
         };
 
         if (scenarios.length === 0) {
