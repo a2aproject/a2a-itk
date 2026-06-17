@@ -44,7 +44,7 @@ jobs:
           # Download Java Metrics directly into the dashboard directory
           curl -L -f -o dashboard/itk_java.json https://github.com/a2aproject/a2a-java/releases/download/nightly-metrics/itk_java.json || echo "{}" > dashboard/itk_java.json
           # Download JavaScript Metrics directly into the dashboard directory
-          curl -L -f -o dashboard/itk_js.json https://github.com/a2aproject/a2a-js/releases/download/nightly-metrics/itk_js.json || echo "{}" > dashboard/itk_js.json
+          curl -L -f -o dashboard/itk_ts.json https://github.com/a2aproject/a2a-js/releases/download/nightly-metrics/itk_js.json || echo "{}" > dashboard/itk_ts.json
           echo "Metrics synchronized successfully!"
 
       - name: Prepare static site structure
