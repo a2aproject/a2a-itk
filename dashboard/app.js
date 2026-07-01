@@ -9,6 +9,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const summaryContainer = document.getElementById("summary-container");
     const pairwiseList = document.getElementById("pairwise-list");
 
+    // Maps a tab's SDK id to its GitHub repo name where it differs from a2a-<sdk>.
+    const SDK_REPOS = { ts: "a2a-js" };
+
     // List of protocols and behaviors to draw the matrix grid
     const PROTOCOLS = ["jsonrpc", "grpc", "http_json"];
     const BEHAVIORS = [
@@ -300,7 +303,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 const cardId = "topology-card-summary";
                 const svgId = "svg-canvas-summary";
 
-                const commitLink = `<a href="https://github.com/a2aproject/a2a-${activeSDK}/commit/${run.commit_sha}" target="_blank" class="mono">${run.commit_sha.substring(0, 7)}</a>`;
+                const repo = SDK_REPOS[activeSDK] || `a2a-${activeSDK}`;
+                const commitLink = `<a href="https://github.com/a2aproject/${repo}/commit/${run.commit_sha}" target="_blank" class="mono">${run.commit_sha.substring(0, 7)}</a>`;
                 const runDateStr = new Date(run.timestamp).toLocaleString();
 
                 card.innerHTML = `
