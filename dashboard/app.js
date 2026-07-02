@@ -10,7 +10,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const pairwiseList = document.getElementById("pairwise-list");
 
     // Maps a tab's SDK id to its GitHub repo name where it differs from a2a-<sdk>.
-    const SDK_REPOS = { ts: "a2a-js" };
+    const SDK_REPOS = { ts: "a2a-js", rust: "a2a-rs" };
 
     // List of protocols and behaviors to draw the matrix grid
     const PROTOCOLS = ["jsonrpc", "grpc", "http_json"];
