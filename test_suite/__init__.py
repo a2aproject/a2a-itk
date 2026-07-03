@@ -12,16 +12,22 @@ from test_suite.java_v10 import spawn_agent as spawn_agent_java_v10
 from test_suite.python_v03 import spawn_agent as spawn_agent_python_v03
 from test_suite.python_v10 import spawn_agent as spawn_agent_python_v10
 from test_suite.rust_v10 import spawn_agent as spawn_agent_rust_v10
+from test_suite.ts_v03 import spawn_agent as spawn_agent_ts_v03
+from test_suite.ts_v10 import spawn_agent as spawn_agent_ts_v10
 
 
 _AGENT_DEFS = {
     'go_v03': {'launcher': spawn_agent_go_v03},
     'python_v03': {'launcher': spawn_agent_python_v03},
+    'ts_v03': {'launcher': spawn_agent_ts_v03},
+    'ts_v03_2': {'launcher': spawn_agent_ts_v03},
     'go_v10': {'launcher': spawn_agent_go_v10},
     'java_v10': {'launcher': spawn_agent_java_v10},
     'python_v10': {'launcher': spawn_agent_python_v10},
     'python_v10_2': {'launcher': spawn_agent_python_v10},
     'rust_v10': {'launcher': spawn_agent_rust_v10},
+    'ts_v10': {'launcher': spawn_agent_ts_v10},
+    'ts_v10_2': {'launcher': spawn_agent_ts_v10},
     'current': {'launcher': spawn_agent_current},
 }
 

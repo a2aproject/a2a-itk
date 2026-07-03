@@ -65,7 +65,7 @@ ITK is structured to validate in-development SDK codebases against a cluster of 
 | :--- | :---: | :---: | :---: |
 | **Python** | ✅ | ✅ | ✅ |
 | **Go** | ✅ | ✅ | ✅ |
-| **TypeScript** | ❌ | ❌ | ✅ |
+| **TypeScript** | ✅ | ✅ | ✅ |
 | **Java** | ❌ | ✅ | ⚠️ |
 | **Rust** | ❌ | ✅ | ❌ |
 | **.NET** | ❌ | ❌ | ⚠️ |
@@ -200,14 +200,12 @@ Incorporate traversal test strategies evaluating additional native client API co
 
 ### 4. Missing Stable Baseline Implementations
 Package stable agents images for:
-- [ ] **TypeScript** baseline agents
 - [ ] **.NET** baseline agents
 - [ ] **Java** baseline agents
 - [ ] **Rust** baseline agents
 
 ### 5. Client SDK Repository Orchestration
 Integrate full continuous integration orchestration pipelines and custom instruction handlers across client SDK repositories to transition them from placeholders to active validation status:
-- [ ] **TypeScript SDK**: Configure automated scheduled **nightly runs** pipeline publishing validation JSON payloads to dashboard `nightly-metrics` releases.
 - [ ] **Java SDK**: Implement functional instruction handling agents and scenario orchestration scripts to replace existing basic `current` placeholders.
 - [ ] **.NET SDK**: Implement functional instruction handling agents and scenario orchestration scripts to replace existing basic `current` placeholders.
 - [ ] **Rust SDK**: Set up core mounting configuration, custom handlers, and full repository verification workflows.
