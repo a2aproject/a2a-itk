@@ -1,22 +1,5 @@
 /**
- * ITK TypeScript v0.3 baseline agent, built on @a2a-js/sdk@0.3.13.
- *
- * Mirrors the semantic contract of agents/python/v03/main.py and
- * agents/go/v03/main.go: expose `/jsonrpc`, `/rest`, and gRPC endpoints,
- * accept an ITK Instruction protobuf wrapped as a base64 FilePart, and
- * recursively dispatch call_agent / return_response / steps. Supports
- * the three ITK behaviors (send_message, push_notification, resubscribe)
- * and the hold_task flag.
- *
- * Differences from agents/ts/v10/main.ts (1.0.0-beta.0):
- *   - Lowercase kind discriminators everywhere (`'text'`/`'file'`,
- *     `'task'`/`'status-update'`, TaskState `'working'`/`'completed'`).
- *   - Role is a plain lowercase string (`'user'`/`'agent'`).
- *   - `AgentCard` uses a flat `url` + `preferredTransport` + optional
- *     `additionalInterfaces[]` (there is no per-interface protocolVersion).
- *   - No `AgentEvent.task(...)` factories — publish plain objects.
- *   - No `legacyCompat` option on transports or Express handlers.
- *   - No `LegacyA2AService` — v0.3.13 exposes only one gRPC service.
+ * ITK TypeScript v0.3 baseline agent
  */
 import express from 'express';
 import * as grpc from '@grpc/grpc-js';
@@ -91,7 +74,7 @@ export class ItkV03AgentExecutor implements AgentExecutor {
     console.log(`[ItkV03] Executing task ${taskId}`);
 
     // 1) Register the task with the ResultManager so subsequent
-    //    status-update events are routed correctly. Mirrors python:384-391.
+    //    status-update events are routed correctly.
     eventBus.publish({
       kind: 'task',
       id: taskId,
@@ -176,7 +159,7 @@ export class ItkV03AgentExecutor implements AgentExecutor {
       // v0.3 wire shape: {kind:'file', file:{bytes, mimeType, name}}.
       // Per spec, `bytes` is a base64-encoded string regardless of
       // transport, so a single base64-decode gives the raw proto payload.
-      if (part.kind === 'file' && 'bytes' in part.file) {
+      if (part.kind === 'file' && part.file && 'bytes' in part.file) {
         try {
           return Instruction.decode(Buffer.from(part.file.bytes, 'base64'));
         } catch {
@@ -247,7 +230,7 @@ export class ItkV03AgentExecutor implements AgentExecutor {
     // Push notification config — v0.3 shape (no root taskId).
     let pnc: PushNotificationConfig | undefined;
     if (call.behavior?.$case === 'pushNotification') {
-      let url = call.behavior.value.url;
+      let url = call.behavior.value?.url;
       if (!url) throw new Error('URL not specified in push_notification behavior');
       if (!url.startsWith('http://') && !url.startsWith('https://')) {
         url = `http://${url}`;
@@ -321,9 +304,9 @@ export class ItkV03AgentExecutor implements AgentExecutor {
       }
     } else {
       const result = await client.sendMessage(req);
-      if ((result as Message).kind === 'message') {
+      if (result && (result as Message).kind === 'message') {
         this.collectText(result as Message, results);
-      } else {
+      } else if (result) {
         const task = result as Task;
         if (task.status?.message) this.collectText(task.status.message, results);
         for (const m of task.history ?? []) {
@@ -582,7 +565,7 @@ async function main(): Promise<void> {
     capabilities: {
       streaming: true,
       // MUST be true or DefaultRequestHandler won't persist push configs
-      // that arrive on send_message (see server/index.js:714).
+      // that arrive on send_message.
       pushNotifications: true,
     },
     defaultInputModes: ['text/plain', 'application/x-protobuf'],

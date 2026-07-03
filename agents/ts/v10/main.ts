@@ -1,11 +1,5 @@
 /**
  * ITK TypeScript v1.0 baseline agent.
- *
- * Standalone equivalent of a2a-js/itk/itk_agent.ts, but imports from the
- * published `@a2a-js/sdk` public entry points instead of `../src/...`, so
- * it can be bundled inside the a2a-itk repo as one of the fixed baseline
- * agents (like python_v10, go_v10, rust_v10, java_v10) rather than being
- * mounted as the "current" slot from a consuming SDK repo.
  */
 import express from 'express';
 import * as grpc from '@grpc/grpc-js';
@@ -360,7 +354,7 @@ export class ItkAgentExecutor implements AgentExecutor {
 
     let pushNotificationConfig: TaskPushNotificationConfig | undefined;
     if (call.behavior?.$case === 'pushNotification') {
-      let url = call.behavior.value.url;
+      let url = call.behavior.value?.url;
       if (!url) throw new Error('URL not specified in push_notification behavior');
       if (!url.startsWith('http://') && !url.startsWith('https://')) {
         url = `http://${url}`;
@@ -438,9 +432,9 @@ export class ItkAgentExecutor implements AgentExecutor {
         }
       } else {
         const response = await client.sendMessage(request);
-        if ('parts' in response) {
+        if (response && 'parts' in response) {
           processMessage(response as Message);
-        } else if ('status' in response) {
+        } else if (response && 'status' in response) {
           const task = response as Task;
           processMessage(task.status?.message);
           task.history?.forEach(processMessage);

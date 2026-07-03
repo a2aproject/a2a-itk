@@ -1,7 +1,5 @@
 #!/bin/bash
 # Regenerates pb/instruction.ts from ../../../protos/instruction.proto.
-# Same mechanics as agents/ts/v10/build_protos.sh — see that file for
-# the rationale of the stage-and-cleanup dance.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"

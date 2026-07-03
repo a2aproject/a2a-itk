@@ -46,7 +46,7 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
     if log_level.upper() == 'DEBUG':
         logs_dir = _ROOT_DIR / 'logs'
         logs_dir.mkdir(parents=True, exist_ok=True)
-        stdout_file = open(logs_dir / 'agent_ts_v10.log', 'w')  # noqa: WPS515
+        stdout_file = open(logs_dir / 'agent_ts_v10.log', 'w', encoding='utf-8')  # noqa: WPS515
         p = subprocess.Popen(  # noqa: S603
             args,
             cwd=_AGENT_DIR,
