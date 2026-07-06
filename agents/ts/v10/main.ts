@@ -196,6 +196,7 @@ export class ItkAgentExecutor implements AgentExecutor {
           await this.sleep(HOLD_TASK_TICK_MS, canceller.signal);
         } catch (e) {
           if (canceller.signal.aborted) return true;
+          console.error('[ItkAgent] holdTask sleep failed unexpectedly:', e);
           throw e;
         }
         eventBus.publish(
@@ -279,14 +280,14 @@ export class ItkAgentExecutor implements AgentExecutor {
         if (part.content?.$case === 'raw') {
           try {
             return Instruction.decode(part.content.value);
-          } catch {
-            /* fallthrough */
+          } catch (e) {
+            console.debug('[ItkAgent] raw Instruction.decode failed:', e);
           }
         } else if (part.content?.$case === 'text') {
           try {
             return Instruction.decode(Buffer.from(part.content.value, 'base64'));
-          } catch {
-            /* fallthrough */
+          } catch (e) {
+            console.debug('[ItkAgent] x-protobuf text/base64 Instruction.decode failed:', e);
           }
         }
       }
@@ -294,8 +295,8 @@ export class ItkAgentExecutor implements AgentExecutor {
       if (part.content?.$case === 'text') {
         try {
           return Instruction.decode(Buffer.from(part.content.value, 'base64'));
-        } catch {
-          /* fallthrough */
+        } catch (e) {
+          console.debug('[ItkAgent] fallback text/base64 Instruction.decode failed:', e);
         }
       }
     }
@@ -462,7 +463,10 @@ export class ItkAgentExecutor implements AgentExecutor {
         if (taskId) break;
       }
     } catch (e) {
-      if (!initController.signal.aborted) throw e;
+      if (!initController.signal.aborted) {
+        console.error('[ItkAgent] resubscribe init sendMessageStream failed:', e);
+        throw e;
+      }
     } finally {
       initController.abort();
     }

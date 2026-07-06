@@ -162,16 +162,16 @@ export class ItkV03AgentExecutor implements AgentExecutor {
       if (part.kind === 'file' && part.file && 'bytes' in part.file) {
         try {
           return Instruction.decode(Buffer.from(part.file.bytes, 'base64'));
-        } catch {
-          /* fall through */
+        } catch (e) {
+          console.debug('[ItkV03] file/bytes Instruction.decode failed:', e);
         }
       }
       // Rare fallback: base64-in-text-part.
       if (part.kind === 'text' && part.text) {
         try {
           return Instruction.decode(Buffer.from(part.text, 'base64'));
-        } catch {
-          /* ignore */
+        } catch (e) {
+          console.debug('[ItkV03] text/base64 Instruction.decode failed:', e);
         }
       }
     }
@@ -331,7 +331,10 @@ export class ItkV03AgentExecutor implements AgentExecutor {
         if (taskId) break;
       }
     } catch (e) {
-      if (!initAbort.signal.aborted) throw e;
+      if (!initAbort.signal.aborted) {
+        console.error('[ItkV03] resubscribe init send_message failed:', e);
+        throw e;
+      }
     } finally {
       initAbort.abort();
     }
@@ -487,7 +490,11 @@ export class ItkV03AgentExecutor implements AgentExecutor {
       for (let i = 0; i < HOLD_TASK_TICK_COUNT; i++) {
         try {
           await this.sleep(HOLD_TASK_TICK_MS, canceller.signal);
-        } catch {
+        } catch (e) {
+          // Expected on cancel — abort signal fires and sleep rejects.
+          if (!canceller.signal.aborted) {
+            console.error('[ItkV03] holdTask sleep failed unexpectedly:', e);
+          }
           return true;
         }
         eventBus.publish({
