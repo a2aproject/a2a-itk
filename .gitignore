@@ -7,3 +7,4 @@ bin/
 /agents/java/v10/target/
 agents/rust/v10/target/
 target/
+**/node_modules
