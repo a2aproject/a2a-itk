@@ -157,27 +157,16 @@ export class ItkV03AgentExecutor implements AgentExecutor {
     if (!msg?.parts) return null;
     for (const part of msg.parts) {
       if (part.kind === 'file' && part.file && 'bytes' in part.file) {
-        // First attempt: single-decode (spec-compliant sender).
         try {
-          const inst = Instruction.decode(Buffer.from(part.file.bytes, 'base64'));
-          if (inst.step) return inst;
+          return Instruction.decode(Buffer.from(part.file.bytes, 'base64'));
         } catch (e) {
-          console.debug('[ItkV03] file/bytes single-decode failed:', e);
-        }
-        // Second attempt: double-decode (utf8-of-base64 sender).
-        try {
-          const once = Buffer.from(part.file.bytes, 'base64').toString('utf8');
-          const inst = Instruction.decode(Buffer.from(once, 'base64'));
-          if (inst.step) return inst;
-        } catch (e) {
-          console.debug('[ItkV03] file/bytes double-decode failed:', e);
+          console.debug('[ItkV03] file/bytes Instruction.decode failed:', e);
         }
       }
       // Rare fallback: base64-in-text-part.
       if (part.kind === 'text' && part.text) {
         try {
-          const inst = Instruction.decode(Buffer.from(part.text, 'base64'));
-          if (inst.step) return inst;
+          return Instruction.decode(Buffer.from(part.text, 'base64'));
         } catch (e) {
           console.debug('[ItkV03] text/base64 Instruction.decode failed:', e);
         }
