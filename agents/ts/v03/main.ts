@@ -156,14 +156,19 @@ export class ItkV03AgentExecutor implements AgentExecutor {
   private extractInstruction(msg: Message): Instruction | null {
     if (!msg?.parts) return null;
     for (const part of msg.parts) {
-      // v0.3 wire shape: {kind:'file', file:{bytes, mimeType, name}}.
-      // Per spec, `bytes` is a base64-encoded string regardless of
-      // transport, so a single base64-decode gives the raw proto payload.
       if (part.kind === 'file' && part.file && 'bytes' in part.file) {
+        // First attempt: single-decode (spec-compliant sender).
         try {
           return Instruction.decode(Buffer.from(part.file.bytes, 'base64'));
         } catch (e) {
-          console.debug('[ItkV03] file/bytes Instruction.decode failed:', e);
+          console.debug('[ItkV03] file/bytes single-decode failed:', e);
+        }
+        // Second attempt: double-decode (utf8-of-base64 sender).
+        try {
+          const once = Buffer.from(part.file.bytes, 'base64').toString('utf8');
+          return Instruction.decode(Buffer.from(once, 'base64'));
+        } catch (e) {
+          console.debug('[ItkV03] file/bytes double-decode failed:', e);
         }
       }
       // Rare fallback: base64-in-text-part.
@@ -286,10 +291,10 @@ export class ItkV03AgentExecutor implements AgentExecutor {
       message: nestedMsg,
       configuration: pnc
         ? {
-            blocking: true,
-            pushNotificationConfig: pnc,
-            acceptedOutputModes: ['text'],
-          }
+          blocking: true,
+          pushNotificationConfig: pnc,
+          acceptedOutputModes: ['text'],
+        }
         : { blocking: true, acceptedOutputModes: ['text'] },
     };
 
@@ -629,6 +634,11 @@ async function main(): Promise<void> {
       userBuilder: UserBuilder.noAuthentication,
     })
   );
+  // GET /rest/v1/tasks/:taskId:subscribe → POST rewrite shim.
+  app.get(`${restPath}/v1/tasks/:taskId\\:subscribe`, (req, _res, next) => {
+    req.method = 'POST';
+    next();
+  });
   app.use(
     restPath,
     restHandler({
