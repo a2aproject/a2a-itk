@@ -156,9 +156,6 @@ export class ItkV03AgentExecutor implements AgentExecutor {
   private extractInstruction(msg: Message): Instruction | null {
     if (!msg?.parts) return null;
     for (const part of msg.parts) {
-      // v0.3 wire shape: {kind:'file', file:{bytes, mimeType, name}}.
-      // Per spec, `bytes` is a base64-encoded string regardless of
-      // transport, so a single base64-decode gives the raw proto payload.
       if (part.kind === 'file' && part.file && 'bytes' in part.file) {
         try {
           return Instruction.decode(Buffer.from(part.file.bytes, 'base64'));
@@ -286,10 +283,10 @@ export class ItkV03AgentExecutor implements AgentExecutor {
       message: nestedMsg,
       configuration: pnc
         ? {
-            blocking: true,
-            pushNotificationConfig: pnc,
-            acceptedOutputModes: ['text'],
-          }
+          blocking: true,
+          pushNotificationConfig: pnc,
+          acceptedOutputModes: ['text'],
+        }
         : { blocking: true, acceptedOutputModes: ['text'] },
     };
 
