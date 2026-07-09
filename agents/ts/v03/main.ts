@@ -626,11 +626,6 @@ async function main(): Promise<void> {
       userBuilder: UserBuilder.noAuthentication,
     })
   );
-  // GET /rest/v1/tasks/:taskId:subscribe → POST rewrite shim.
-  app.get(`${restPath}/v1/tasks/:taskId\\:subscribe`, (req, _res, next) => {
-    req.method = 'POST';
-    next();
-  });
   app.use(
     restPath,
     restHandler({
