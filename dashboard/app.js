@@ -256,112 +256,137 @@ document.addEventListener("DOMContentLoaded", () => {
             summaryContainer.appendChild(failedPanel);
         }
 
-        // 1. Identify the top-level (maximum node count) topology key and its matching scenarios
-        let maxNodes = 0;
-        let summaryTopologyKey = "";
-        scenarios.forEach((scenario) => {
-            const size = (scenario.sdks || []).length;
-            if (size > maxNodes) {
-                maxNodes = size;
-                summaryTopologyKey = (scenario.sdks || []).join(",");
+        // 1. Build the summary topology.
+        //
+        // Two run shapes exist in the wild:
+        //   (a) one giant star scenario per
+        //       (protocol × behavior) that lists every peer, optionally
+        //       expanded into subtests via `build_subtests: true`.
+        //   (b) one pairwise (2-node) scenario per
+        //       (peer × behavior) with `protocols` merged; no giant
+        //       star scenario exists.
+        //
+        // Picking a single scenario's SDK list works for (a) but degrades
+        // to "just one pair" for (b). Instead, synthesize a combined
+        // topology: `current` plus the union of every other SDK observed
+        // across ALL scenarios in this run. That reduces to the giant
+        // star for (a) and produces a proper star-of-all-peers for (b).
+        const currentLabel = (() => {
+            for (const s of scenarios) {
+                const found = (s.sdks || []).find(
+                    (n) => (n || "").toLowerCase() === "current"
+                );
+                if (found) return found;
             }
+            return "current";
+        })();
+
+        const peerSet = new Map(); // preserves first-seen order
+        scenarios.forEach((scenario) => {
+            (scenario.sdks || []).forEach((sdk) => {
+                if (!sdk) return;
+                if (sdk.toLowerCase() === "current") return;
+                if (!peerSet.has(sdk)) peerSet.set(sdk, true);
+            });
         });
 
-        const summarySdks = summaryTopologyKey
-            ? summaryTopologyKey.split(",")
-            : [];
-
-        if (summaryTopologyKey) {
-            const summaryParents = scenarios.filter(
-                (s) => (s.sdks || []).join(",") === summaryTopologyKey
+        // If the run also has a giant-star scenario, prefer its SDK
+        // ordering (keeps historical Python/Go/Java dashboards visually
+        // identical). Otherwise fall back to first-seen order.
+        let biggestScenarioSdks = [];
+        scenarios.forEach((scenario) => {
+            const sdks = scenario.sdks || [];
+            if (sdks.length > biggestScenarioSdks.length) {
+                biggestScenarioSdks = [...sdks];
+            }
+        });
+        const expectedSize = 1 + peerSet.size;
+        const useBiggestOrder =
+            biggestScenarioSdks.length === expectedSize &&
+            biggestScenarioSdks.some(
+                (n) => (n || "").toLowerCase() === "current"
             );
 
-            // Summary should reflect parent + derived subtests for matrix-style scenarios.
-            const summaryScenarios = [...summaryParents];
-            summaryParents
-                .filter((s) => s.build_subtests)
-                .forEach((parent) => {
-                    const subPrefix = `${parent.name}-sub-`;
-                    scenarios
-                        .filter((s) => (s.name || "").startsWith(subPrefix))
-                        .forEach((subScenario) => {
-                            if (
-                                !summaryScenarios.some(
-                                    (x) => x.name === subScenario.name
-                                )
-                            ) {
-                                summaryScenarios.push(subScenario);
-                            }
-                        });
-                });
+        const summarySdks = useBiggestOrder
+            ? biggestScenarioSdks
+            : [currentLabel, ...peerSet.keys()];
 
-            if (summaryScenarios.length > 0) {
-                const edges = summaryScenarios[0].edges || [];
-                const card = document.createElement("div");
-                card.className = "panel glass topology-card";
+        if (summarySdks.length > 1) {
+            // Derive bilateral edges: current ↔ every peer.
+            const currentIdx = summarySdks.findIndex(
+                (n) => (n || "").toLowerCase() === "current"
+            );
+            const edges = [];
+            summarySdks.forEach((_, idx) => {
+                if (idx === currentIdx) return;
+                edges.push(`${currentIdx}->${idx}`);
+                edges.push(`${idx}->${currentIdx}`);
+            });
 
-                const cardId = "topology-card-summary";
-                const svgId = "svg-canvas-summary";
+            const card = document.createElement("div");
+            card.className = "panel glass topology-card";
 
-                const repo = SDK_REPOS[activeSDK] || `a2a-${activeSDK}`;
-                const commitLink = `<a href="https://github.com/a2aproject/${repo}/commit/${run.commit_sha}" target="_blank" class="mono">${run.commit_sha.substring(0, 7)}</a>`;
-                const runDateStr = new Date(run.timestamp).toLocaleString();
+            const cardId = "topology-card-summary";
+            const svgId = "svg-canvas-summary";
 
-                card.innerHTML = `
-                    <div class="summary-card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-size: 13px; color: var(--text-muted);">
-                        <div class="run-time-info">Nightly Run: <span class="value" style="color: var(--text-main); font-weight: 500;">${runDateStr}</span></div>
-                        <div class="commit-info">Commit SHA: ${commitLink}</div>
+            const repo = SDK_REPOS[activeSDK] || `a2a-${activeSDK}`;
+            const commitLink = `<a href="https://github.com/a2aproject/${repo}/commit/${run.commit_sha}" target="_blank" class="mono">${run.commit_sha.substring(0, 7)}</a>`;
+            const runDateStr = new Date(run.timestamp).toLocaleString();
+
+            card.innerHTML = `
+                <div class="summary-card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-size: 13px; color: var(--text-muted);">
+                    <div class="run-time-info">Nightly Run: <span class="value" style="color: var(--text-main); font-weight: 500;">${runDateStr}</span></div>
+                    <div class="commit-info">Commit SHA: ${commitLink}</div>
+                </div>
+                <div class="topology-visual-grid">
+                    <!-- Graph Drawing Canvas -->
+                    <div class="topology-graph-canvas" id="${cardId}">
+                        <svg id="${svgId}" viewBox="0 0 400 300">
+                            <defs>
+                                <marker id="arrow-end-${svgId}" viewBox="0 0 10 10" refX="10" refY="5"
+                                    markerWidth="6" markerHeight="6" orient="auto">
+                                    <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(255, 255, 255, 0.3)" />
+                                </marker>
+                                <marker id="arrow-start-${svgId}" viewBox="0 0 10 10" refX="0" refY="5"
+                                    markerWidth="6" markerHeight="6" orient="auto">
+                                    <path d="M 10 0 L 0 5 L 10 10 z" fill="rgba(255, 255, 255, 0.3)" />
+                                </marker>
+                            </defs>
+                        </svg>
                     </div>
-                    <div class="topology-visual-grid">
-                        <!-- Graph Drawing Canvas -->
-                        <div class="topology-graph-canvas" id="${cardId}">
-                            <svg id="${svgId}" viewBox="0 0 400 300">
-                                <defs>
-                                    <marker id="arrow-end-${svgId}" viewBox="0 0 10 10" refX="10" refY="5"
-                                        markerWidth="6" markerHeight="6" orient="auto">
-                                        <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(255, 255, 255, 0.3)" />
-                                    </marker>
-                                    <marker id="arrow-start-${svgId}" viewBox="0 0 10 10" refX="0" refY="5"
-                                        markerWidth="6" markerHeight="6" orient="auto">
-                                        <path d="M 10 0 L 0 5 L 10 10 z" fill="rgba(255, 255, 255, 0.3)" />
-                                    </marker>
-                                </defs>
-                            </svg>
-                        </div>
 
-                        <!-- Compatibility Matrix Grid -->
-                        <div class="matrix-container">
-                            <table class="matrix-table">
-                                <thead>
-                                    <tr>
-                                        <th>Behavior / Feature</th>
-                                        ${PROTOCOLS.map((p) => `<th>${p}</th>`).join("")}
-                                    </tr>
-                                </thead>
-                                <tbody id="matrix-body-${svgId}">
-                                    <!-- Populated dynamically -->
-                                </tbody>
-                            </table>
-                        </div>
+                    <!-- Compatibility Matrix Grid -->
+                    <div class="matrix-container">
+                        <table class="matrix-table">
+                            <thead>
+                                <tr>
+                                    <th>Behavior / Feature</th>
+                                    ${PROTOCOLS.map((p) => `<th>${p}</th>`).join("")}
+                                </tr>
+                            </thead>
+                            <tbody id="matrix-body-${svgId}">
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
                     </div>
-                `;
+                </div>
+            `;
 
-                summaryContainer.appendChild(card);
+            summaryContainer.appendChild(card);
 
-                // Draw node graph and render behavior/protocol matrix aggregated for the active SDK
-                // (not only max-topology scenarios) to avoid showing '-' for valid pairwise coverage.
-                const summaryMatrixScenarios = scenarios.filter(
-                    scenarioIncludesActiveSdk
-                );
-                drawTopologyGraph(svgId, summarySdks, edges);
-                renderGroupMatrix(
-                    `matrix-body-${svgId}`,
-                    summaryMatrixScenarios
-                );
-            }
+            // Draw node graph and render behavior/protocol matrix aggregated for the active SDK
+            // (not only max-topology scenarios) to avoid showing '-' for valid pairwise coverage.
+            const summaryMatrixScenarios = scenarios.filter(
+                scenarioIncludesActiveSdk
+            );
+            drawTopologyGraph(svgId, summarySdks, edges);
+            renderGroupMatrix(
+                `matrix-body-${svgId}`,
+                summaryMatrixScenarios
+            );
         } else {
             summaryContainer.innerHTML =
-                '<div class="panel glass topology-card"><p>No summary scenario found.</p></div>';
+                '<div class="panel glass topology-card"><p>No peer SDKs found in this run.</p></div>';
         }
 
         // 2. Identify all unique pairwise (exactly 2 nodes) topology keys and render their fully-filled grids
@@ -550,6 +575,9 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         if (str.startsWith("dotnet")) {
             return { fill: "#2e1065", stroke: "#a855f7", text: "#f3e8ff" }; // Purple
+        }
+        if (str.startsWith("ts")) {
+            return { fill: "#0b2545", stroke: "#3178c6", text: "#e0ecff" }; // TypeScript brand blue
         }
         return { fill: "#1e293b", stroke: "#64748b", text: "#f8fafc" }; // Slate Default
     }
