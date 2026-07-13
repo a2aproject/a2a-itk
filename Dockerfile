@@ -6,12 +6,12 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl=7.88.1-10+deb12u14 \
-    xz-utils=5.4.1-1 \
-    ca-certificates=20230311+deb12u1 \
-    procps=2:4.0.2-3 \
-    psmisc=23.6-1 \
-    git=1:2.39.5-0+deb12u3 \
+    curl \
+    xz-utils \
+    ca-certificates \
+    procps \
+    psmisc \
+    git \
     openjdk-17-jdk-headless \
     build-essential \
     cmake \
