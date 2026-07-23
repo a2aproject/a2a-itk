@@ -27,7 +27,12 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "ruff>=0.15.5",
+    "pytest>=8.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 extend = "../.ruff.toml"
@@ -37,6 +42,6 @@ exclude = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["a2a", "agents.python.v03.pyproto", "test_suite"]
+known-first-party = ["a2a", "agents.python.v03.pyproto", "scripts", "test_suite"]
 
 
