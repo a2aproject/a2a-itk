@@ -115,8 +115,8 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
         return popen_with_logs(args, current_dir)
 
     if (current_dir / 'pom.xml').exists():
-        # Synchronously build and install 'itk' sibling SDK dependencies to the local maven repo
-        compile_args = ['mvn', '-pl', 'itk', '-am', 'install', '-DskipTests', '-Dmaven.javadoc.skip=true']  # noqa: S607
+        # Synchronously build and install 'itk' sibling SDK dependencies to the local maven repo.
+        compile_args = ['mvn', '-Pitk', '-pl', 'itk', '-am', 'install', '-DskipTests', '-Dmaven.javadoc.skip=true']  # noqa: S607
         subprocess.run(compile_args, cwd=current_dir.parent, check=True)
 
         # Asynchronously spawn the 'itk' mock agent directly within its module directory
