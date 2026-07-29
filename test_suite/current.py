@@ -57,10 +57,12 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
             return subprocess.Popen(args, **kwargs)  # noqa: S603
 
     if (current_dir / 'main.go').exists():
-        # Go agent
+        # Go agent. `-mod=readonly` builds strictly from the committed
+        # go.mod/go.sum and fails if they are stale, rather than updating them.
         args = [  # noqa: S607
             'go',
             'run',
+            '-mod=readonly',
             'main.go',
             '--httpPort',
             str(http_port),
@@ -72,10 +74,12 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
         )
 
     if (current_dir / 'main.py').exists():
-        # Python agent
+        # Python agent. `--locked` resolves strictly from the committed uv.lock
+        # and fails if it is stale, rather than silently re-resolving.
         args = [  # noqa: S607
             'uv',
             'run',
+            '--locked',
             'main.py',
             '--httpPort',
             str(http_port),
@@ -135,8 +139,10 @@ def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
         if not binary.exists() and candidates:
             binary = candidates[0]
         if not binary.exists():
+            # `--locked` builds strictly from the committed Cargo.lock and fails
+            # if it is stale, rather than silently updating it.
             subprocess.run(  # noqa: S603
-                ['cargo', 'build', '--release'],  # noqa: S607
+                ['cargo', 'build', '--locked', '--release'],  # noqa: S607
                 cwd=current_dir,
                 check=True,
             )
