@@ -108,10 +108,16 @@ class RunReport:
     infra_failures: list[str] = dataclasses.field(default_factory=list)
     behavioral_divergences: list[str] = dataclasses.field(default_factory=list)
     suppressed_count: int = 0  # accepted deltas that would otherwise divergence
+    # Per-side (``"new"`` / ``"old"``) list of result keys that matched no
+    # known scenario. See ``_log_orphan_keys``. Purely observational; does
+    # not affect ``is_clean``.
+    orphan_result_keys: dict[str, list[str]] = dataclasses.field(
+        default_factory=lambda: {'new': [], 'old': []}
+    )
 
     @property
     def is_clean(self) -> bool:
-        """The cutover-gate day-level definition (IMPL_DETAILS §C).
+        """The cutover-gate day-level definition.
 
         Clean ⇔ zero real_failures, zero infra_failures, zero
         un-adjudicated behavioral_divergences.
@@ -260,6 +266,33 @@ def evaluate(scenario: Scenario, old: Outcome, new: Outcome) -> Result:
 # -----------------------------------------------------------------------------
 
 
+# `-sub-<sdks>` suffix produced by testlib.execute_itk_test when a scenario has
+# ``build_subtests=True``. See testlib.py:719 (producer) and
+# scripts/process_results.py:151 (existing consumer using the same convention).
+_SUBTEST_SEP = '-sub-'
+
+
+def _result_keys_for_scenario(name: str, outcomes: dict[str, Outcome]) -> list[str]:
+    """Return every outcome key that belongs to a scenario.
+
+    A scenario with ``build_subtests=True`` produces multiple result entries
+    (``<name>-sub-<sdk1>-<sdk2>...``) plus optionally the base ``<name>`` key
+    when the full-SDK subgraph is included. This resolver returns *all* such
+    keys so the classifier evaluates every sub-outcome, not just the base one.
+    """
+    keys = []
+    if name in outcomes:
+        keys.append(name)
+    sub_prefix = f'{name}{_SUBTEST_SEP}'
+    keys.extend(sorted(k for k in outcomes if k.startswith(sub_prefix)))
+    return keys
+
+
+def _parent_scenario_name(result_key: str) -> str:
+    """Strip the ``-sub-<sdks>`` suffix, matching process_results.py:151."""
+    return result_key.split(_SUBTEST_SEP, 1)[0]
+
+
 def classify_run(
     sdk: str,
     line: str,
@@ -268,60 +301,119 @@ def classify_run(
     new: dict[str, Outcome],
     accepted_deltas: set[AcceptedKey],
 ) -> RunReport:
-    """Classify every scenario and roll up into a RunReport.
+    """Classify every scenario (including sub-tests) and roll up into a RunReport.
+
+    Sub-tests (``<name>-sub-<sdks>`` keys, see testlib.py:719) are matched
+    back to their parent scenario and each is classified against the parent's
+    ``expected_pass`` oracle. Any real failure in a sub-test makes the parent
+    real-failing, matching how ``itk_service.py`` treats the aggregate result.
 
     Missing outcomes are treated as infra failures on the responsible side:
     if NEW is missing entirely (runner never produced a result), that's a
     transient infra problem from the classifier's point of view — retry
     upstream. If OLD is missing but NEW satisfies the oracle, still infra
     on OLD (we can't cross-check).
+
+    Orphan result keys (present in NEW/OLD but matching no known scenario) are
+    logged at WARNING and counted; they mirror
+    ``process_results.py``'s ``'No matching base scenario found for result
+    key: %s'`` so both consumers surface the same drift signal.
     """
     report = RunReport(sdk=sdk, line=line)
-    for name, scenario in scenarios.items():
-        new_outcome = new.get(name)
-        old_outcome = old.get(name)
-        if new_outcome is None:
-            report.infra_failures.append(name)
-            continue
-        if old_outcome is None:
-            # No baseline to cross-check. Only judge NEW vs oracle.
-            old_outcome = Outcome(error='baseline outcome missing', transient=True)
 
-        result = evaluate(scenario, old_outcome, new_outcome)
-        if result is Result.MATCH:
-            report.matches.append(name)
-        elif result is Result.REAL_FAILURE:
-            report.real_failures.append(name)
-        elif result is Result.INFRA_FAILURE:
-            report.infra_failures.append(name)
-        elif result is Result.BEHAVIORAL_DIVERGENCE:
-            if (sdk, line, name) in accepted_deltas:
-                report.suppressed_count += 1
-                report.matches.append(name)  # treated as clean going forward
-            else:
-                report.behavioral_divergences.append(name)
-        else:  # pragma: no cover - exhaustive above
-            raise AssertionError(f'unreachable Result: {result!r}')
+    # Determine which result keys belong to a scenario (base + any sub-tests).
+    for name, scenario in scenarios.items():
+        result_keys = _result_keys_for_scenario(name, new) or [name]
+        for key in result_keys:
+            new_outcome = new.get(key)
+            old_outcome = old.get(key)
+            if new_outcome is None:
+                report.infra_failures.append(key)
+                continue
+            if old_outcome is None:
+                # No baseline to cross-check. Only judge NEW vs oracle.
+                old_outcome = Outcome(error='baseline outcome missing', transient=True)
+
+            result = evaluate(scenario, old_outcome, new_outcome)
+            if result is Result.MATCH:
+                report.matches.append(key)
+            elif result is Result.REAL_FAILURE:
+                report.real_failures.append(key)
+            elif result is Result.INFRA_FAILURE:
+                report.infra_failures.append(key)
+            elif result is Result.BEHAVIORAL_DIVERGENCE:
+                # Adjudication is per parent scenario — a sub-test drift is
+                # covered by the parent's accepted-delta entry.
+                if (sdk, line, name) in accepted_deltas:
+                    report.suppressed_count += 1
+                    report.matches.append(key)  # treated as clean going forward
+                else:
+                    report.behavioral_divergences.append(key)
+            else:  # pragma: no cover - exhaustive above
+                raise AssertionError(f'unreachable Result: {result!r}')
+
+    # Orphan-key detection: any NEW/OLD result key that doesn't map to a
+    # known scenario. Mirrors process_results.py's warning pattern so the two
+    # consumers of raw_results.json flag drift the same way, and covers the
+    # "new and old have different number of outcomes" case (either side's
+    # orphan is reported).
+    _log_orphan_keys('new', new, scenarios, report)
+    _log_orphan_keys('old', old, scenarios, report)
+
     return report
 
 
+def _log_orphan_keys(
+    side: str,
+    outcomes: dict[str, Outcome],
+    scenarios: dict[str, Scenario],
+    report: RunReport,
+) -> None:
+    """Warn about result keys with no matching scenario and record the count.
+
+    A missing scenario for a produced result is usually one of:
+    - a scenario was renamed/deleted upstream but the runner still emits it
+    - a sub-test suffix format changed without the classifier being updated
+    - the two paths produced different sets of scenarios (drift between OLD
+      and NEW schedulers).
+
+    Any of those is worth a loud log rather than silent ignore.
+    """
+    orphans = [
+        key for key in outcomes if _parent_scenario_name(key) not in scenarios
+    ]
+    for key in orphans:
+        logger.warning(
+            'No matching base scenario found for %s result key: %s', side, key
+        )
+    report.orphan_result_keys[side] = orphans
+
+
 # -----------------------------------------------------------------------------
-# Cutover streak (N clean days per SDK, persisted JSON).
+# Cutover streak (N clean RUNS per SDK, persisted JSON).
 #
-# Storage shape (published as a GitHub Release asset alongside the ITK
-# nightly history — same durable-store pattern process_results.py uses):
+# The comparison itself is a pure function over saved result files, so the
+# gate is defined over the *last N invocations* of this tool — not calendar
+# days. Each ``main()`` invocation appends one entry per SDK to a rolling
+# log; a bounded history keeps the file from growing forever.
+#
+# Storage shape:
 #
 #     {
 #       "python": [
-#         {"date": "2026-07-20", "clean": true},
-#         {"date": "2026-07-21", "clean": false},
+#         {"run_id": "2026-07-30T07:52:51+00:00", "clean": true},
+#         {"run_id": "manual-2026-07-30-b", "clean": false},
 #         ...
 #       ],
 #       "go": [...]
 #     }
 #
-# Deliberately human-readable (release-asset consumers are humans).
+# ``run_id`` is opaque metadata used only for logging and debugging (defaults
+# to an ISO-8601 UTC timestamp). The gate check only reads ``clean``.
 # -----------------------------------------------------------------------------
+
+
+DEFAULT_HISTORY_LIMIT = 50
 
 
 def _read_streak_file(path: pathlib.Path) -> dict[str, list[dict]]:
@@ -336,23 +428,37 @@ def _write_streak_file(path: pathlib.Path, data: dict[str, list[dict]]) -> None:
 
 
 def record_run(
-    streak_file: pathlib.Path, *, sdk: str, run_date: str, clean: bool
+    streak_file: pathlib.Path,
+    *,
+    sdk: str,
+    clean: bool,
+    run_id: str | None = None,
+    history_limit: int = DEFAULT_HISTORY_LIMIT,
 ) -> None:
-    """Append (or overwrite same-date) one day's cleanliness for one SDK.
+    """Append one run's outcome to the SDK's rolling history.
 
-    Idempotent per ``(sdk, run_date)``: nightly re-runs and manual re-runs
-    for the same date overwrite rather than double-count.
+    Each invocation appends a fresh entry — no dedup, no calendar-date
+    idempotency. Callers that re-run the classifier on identical inputs
+    will get identical entries; that's intentional (each invocation IS a
+    distinct comparison event, even if the underlying data hasn't changed).
+
+    ``history_limit`` bounds the per-SDK log length so the file doesn't grow
+    forever; older entries are dropped FIFO.
     """
     data = _read_streak_file(streak_file)
-    entries = [e for e in data.get(sdk, []) if e['date'] != run_date]
-    entries.append({'date': run_date, 'clean': clean})
-    entries.sort(key=lambda e: e['date'])
+    entries = list(data.get(sdk, []))
+    entries.append({
+        'run_id': run_id or _default_run_id(),
+        'clean': clean,
+    })
+    if len(entries) > history_limit:
+        entries = entries[-history_limit:]
     data[sdk] = entries
     _write_streak_file(streak_file, data)
 
 
-def current_streak_days(streak_file: pathlib.Path, *, sdk: str) -> int:
-    """Return the length of the current trailing streak of clean days."""
+def current_streak_runs(streak_file: pathlib.Path, *, sdk: str) -> int:
+    """Return the length of the current trailing streak of clean runs."""
     data = _read_streak_file(streak_file)
     entries = data.get(sdk, [])
     streak = 0
@@ -365,14 +471,14 @@ def current_streak_days(streak_file: pathlib.Path, *, sdk: str) -> int:
 
 
 def cutover_gate_passes(
-    streak_file: pathlib.Path, *, sdk: str, required_days: int = 7
+    streak_file: pathlib.Path, *, sdk: str, required_runs: int = 7
 ) -> bool:
-    """Cutover gate: N consecutive clean days ⇒ safe to delete baseline.
+    """Cutover gate: N consecutive clean runs ⇒ safe to delete baseline.
 
     Only when this returns True for every in-scope SDK may
     ``a2a-itk/agents/<sdk>/*`` be deleted.
     """
-    return current_streak_days(streak_file, sdk=sdk) >= required_days
+    return current_streak_runs(streak_file, sdk=sdk) >= required_runs
 
 
 # -----------------------------------------------------------------------------
@@ -384,15 +490,16 @@ def _load_raw(path: pathlib.Path) -> dict[str, Outcome]:
     return raw_to_outcomes(json.loads(pathlib.Path(path).read_text()))
 
 
-def _default_run_date() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+def _default_run_id() -> str:
+    """Opaque per-run identifier; the ISO-8601 UTC timestamp is a fine default."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             'Comparison harness: classify NEW vs OLD ITK results against '
-            'the scenario oracle and update the cutover-streak file.'
+            'the scenario oracle and update the rolling cutover-streak log.'
         )
     )
     parser.add_argument('--sdk', required=True, help='SDK being adjudicated (python, go, java, rust, ts).')
@@ -400,7 +507,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--scenarios', required=True, type=pathlib.Path, help='Path to scenarios.json.')
     parser.add_argument('--old', required=True, type=pathlib.Path, help='OLD path raw_results.json.')
     parser.add_argument('--new', required=True, type=pathlib.Path, help='NEW path raw_results.json.')
-    parser.add_argument('--streak-file', required=True, type=pathlib.Path, help='Cutover-streak persistence file.')
+    parser.add_argument('--streak-file', required=True, type=pathlib.Path, help='Rolling per-run streak persistence file.')
     parser.add_argument(
         '--accepted-deltas',
         type=pathlib.Path,
@@ -408,15 +515,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help='Path to accepted_deltas.json (optional; missing ⇒ none accepted).',
     )
     parser.add_argument(
-        '--run-date',
+        '--run-id',
         default=None,
-        help='ISO date (YYYY-MM-DD) to record this run under. Defaults to today (UTC).',
+        help='Opaque identifier for this run (for logging/debugging). Defaults to the current UTC ISO timestamp.',
     )
     parser.add_argument(
-        '--required-days',
+        '--required-runs',
         type=int,
         default=7,
-        help='Cutover-gate threshold in clean days (default: 7).',
+        help='Cutover-gate threshold in consecutive clean runs (default: 7).',
+    )
+    parser.add_argument(
+        '--history-limit',
+        type=int,
+        default=DEFAULT_HISTORY_LIMIT,
+        help=f'Max per-SDK entries retained in the streak file (default: {DEFAULT_HISTORY_LIMIT}).',
     )
     parser.add_argument(
         '--report-file',
@@ -427,7 +540,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _report_to_dict(report: RunReport) -> dict:
+def _report_to_dict(
+    report: RunReport,
+    *,
+    streak_runs: int,
+    gate_passes: bool,
+    required_runs: int,
+) -> dict:
     return {
         'sdk': report.sdk,
         'line': report.line,
@@ -437,6 +556,12 @@ def _report_to_dict(report: RunReport) -> dict:
         'infra_failures': report.infra_failures,
         'behavioral_divergences': report.behavioral_divergences,
         'suppressed_count': report.suppressed_count,
+        'orphan_result_keys': report.orphan_result_keys,
+        'cutover_gate': {
+            'streak_runs': streak_runs,
+            'required_runs': required_runs,
+            'passes': gate_passes,
+        },
     }
 
 
@@ -461,11 +586,21 @@ def main(argv: list[str] | None = None) -> int:
         accepted_deltas=accepted,
     )
 
-    run_date = args.run_date or _default_run_date()
-    record_run(args.streak_file, sdk=args.sdk, run_date=run_date, clean=report.is_clean)
+    record_run(
+        args.streak_file,
+        sdk=args.sdk,
+        clean=report.is_clean,
+        run_id=args.run_id,
+        history_limit=args.history_limit,
+    )
+
+    streak_runs = current_streak_runs(args.streak_file, sdk=args.sdk)
+    gate_passes = cutover_gate_passes(
+        args.streak_file, sdk=args.sdk, required_runs=args.required_runs
+    )
 
     logger.info(
-        'Comparison report — sdk=%s line=%s clean=%s matches=%d real=%d infra=%d div=%d suppressed=%d streak=%dd',
+        'Comparison report — sdk=%s line=%s clean=%s matches=%d real=%d infra=%d div=%d suppressed=%d streak=%d run(s) gate=%s (need %d)',
         report.sdk,
         report.line,
         report.is_clean,
@@ -474,7 +609,9 @@ def main(argv: list[str] | None = None) -> int:
         len(report.infra_failures),
         len(report.behavioral_divergences),
         report.suppressed_count,
-        current_streak_days(args.streak_file, sdk=args.sdk),
+        streak_runs,
+        'PASS' if gate_passes else 'HOLD',
+        args.required_runs,
     )
 
     if report.real_failures:
@@ -488,9 +625,20 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.report_file is not None:
-        args.report_file.write_text(json.dumps(_report_to_dict(report), indent=2, sort_keys=True))
+        args.report_file.write_text(
+            json.dumps(
+                _report_to_dict(
+                    report,
+                    streak_runs=streak_runs,
+                    gate_passes=gate_passes,
+                    required_runs=args.required_runs,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+        )
 
-    # Exit code: clean ⇒ 0; dirty ⇒ 1. Cutover gate (N-day streak) is
+    # Exit code: clean ⇒ 0; dirty ⇒ 1. Cutover gate (N-run streak) is
     # checked separately by CI at baseline-deletion time.
     return 0 if report.is_clean else 1
 

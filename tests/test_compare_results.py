@@ -327,57 +327,223 @@ class TestClassifyRun:
 
 
 # -----------------------------------------------------------------------------
-# Cutover streak (N=7 clean days per SDK; JSON persisted).
+# Sub-test expansion — scenarios with ``build_subtests=True`` emit multiple
+# result keys of the form ``<name>-sub-<sdks>`` (testlib.py:719). The
+# classifier MUST evaluate every such key against the parent scenario's
+# oracle, not silently drop them.
+# -----------------------------------------------------------------------------
+
+
+class TestSubTestExpansion:
+    def test_sub_test_keys_are_matched_to_parent_scenario(self):
+        # Scenario "foo" (build_subtests=True) produced no base "foo" outcome,
+        # only sub-test keys. Each must be evaluated against foo's oracle.
+        scenarios = {'foo': _scn('foo', expected_pass=True)}
+        old = {
+            'foo-sub-python-go': cr.Outcome(passed=True),
+            'foo-sub-python-java': cr.Outcome(passed=True),
+        }
+        new = {
+            'foo-sub-python-go': cr.Outcome(passed=True),
+            'foo-sub-python-java': cr.Outcome(passed=True),
+        }
+        report = cr.classify_run(
+            sdk='python', line='v10', scenarios=scenarios, old=old, new=new, accepted_deltas=set()
+        )
+        assert report.is_clean is True
+        assert set(report.matches) == {'foo-sub-python-go', 'foo-sub-python-java'}
+        assert report.infra_failures == []
+
+    def test_sub_test_failure_marks_run_dirty(self):
+        # If ANY sub-test fails, the run is dirty — matches how
+        # itk_service.py aggregates: `all(res_dict.values())`.
+        scenarios = {'foo': _scn('foo', expected_pass=True)}
+        old = {
+            'foo-sub-python-go': cr.Outcome(passed=True),
+            'foo-sub-python-java': cr.Outcome(passed=True),
+        }
+        new = {
+            'foo-sub-python-go': cr.Outcome(passed=True),
+            'foo-sub-python-java': cr.Outcome(passed=False),
+        }
+        report = cr.classify_run(
+            sdk='python', line='v10', scenarios=scenarios, old=old, new=new, accepted_deltas=set()
+        )
+        assert report.is_clean is False
+        assert report.real_failures == ['foo-sub-python-java']
+
+    def test_base_and_sub_test_keys_are_both_evaluated(self):
+        # testlib.py:716-719: when the sub-graph == full sdks, the outcome
+        # uses the bare ``label``; otherwise it's ``<label>-sub-…``. Both can
+        # co-exist for a single scenario across a run.
+        scenarios = {'foo': _scn('foo', expected_pass=True)}
+        old = {
+            'foo': cr.Outcome(passed=True),
+            'foo-sub-python-go': cr.Outcome(passed=True),
+        }
+        new = {
+            'foo': cr.Outcome(passed=True),
+            'foo-sub-python-go': cr.Outcome(passed=True),
+        }
+        report = cr.classify_run(
+            sdk='python', line='v10', scenarios=scenarios, old=old, new=new, accepted_deltas=set()
+        )
+        assert set(report.matches) == {'foo', 'foo-sub-python-go'}
+
+    def test_accepted_delta_on_parent_suppresses_sub_test_divergence(self):
+        # Adjudication is at parent-scenario granularity — a
+        # (sdk, line, parent) entry suppresses any sub-test's divergence.
+        scenarios = {'foo': _scn('foo', expected_pass=True)}
+        old = {'foo-sub-python-go': cr.Outcome(passed=False)}
+        new = {'foo-sub-python-go': cr.Outcome(passed=True)}
+        accepted = {('python', 'v10', 'foo')}
+        report = cr.classify_run(
+            sdk='python', line='v10', scenarios=scenarios, old=old, new=new, accepted_deltas=accepted
+        )
+        assert report.behavioral_divergences == []
+        assert report.suppressed_count == 1
+
+
+# -----------------------------------------------------------------------------
+# Orphan result keys — matches ``process_results.py``'s existing warning
+# pattern ("No matching base scenario found for result key: %s"). Also
+# surfaces new-vs-old count mismatch: whichever side has extra keys, its
+# orphans are recorded so the drift is not silent.
+# -----------------------------------------------------------------------------
+
+
+class TestOrphanResultKeys:
+    def test_orphan_key_in_new_is_recorded_and_warned(self, caplog):
+        scenarios = {'known': _scn('known', True)}
+        old = {'known': cr.Outcome(passed=True)}
+        new = {'known': cr.Outcome(passed=True), 'ghost': cr.Outcome(passed=True)}
+        with caplog.at_level('WARNING'):
+            report = cr.classify_run(
+                sdk='python', line='v10', scenarios=scenarios, old=old, new=new, accepted_deltas=set()
+            )
+        assert report.orphan_result_keys['new'] == ['ghost']
+        assert any('ghost' in rec.message for rec in caplog.records)
+
+    def test_orphan_key_in_old_is_recorded_and_warned(self, caplog):
+        # NEW has one extra scenario removed since the OLD run; OLD's key is
+        # orphaned in the current scenario map. We still flag it.
+        scenarios = {'known': _scn('known', True)}
+        old = {'known': cr.Outcome(passed=True), 'stale': cr.Outcome(passed=True)}
+        new = {'known': cr.Outcome(passed=True)}
+        with caplog.at_level('WARNING'):
+            report = cr.classify_run(
+                sdk='python', line='v10', scenarios=scenarios, old=old, new=new, accepted_deltas=set()
+            )
+        assert report.orphan_result_keys['old'] == ['stale']
+        assert any('stale' in rec.message for rec in caplog.records)
+
+    def test_orphans_do_not_affect_is_clean(self):
+        # Orphans are observational — they don't reset the streak on their
+        # own (that would be too aggressive; they're likely renames/drift).
+        scenarios = {'known': _scn('known', True)}
+        old = {'known': cr.Outcome(passed=True)}
+        new = {'known': cr.Outcome(passed=True), 'ghost': cr.Outcome(passed=True)}
+        report = cr.classify_run(
+            sdk='python', line='v10', scenarios=scenarios, old=old, new=new, accepted_deltas=set()
+        )
+        assert report.is_clean is True
+
+    def test_sub_test_keys_are_not_orphans(self):
+        # A ``<name>-sub-…`` key whose parent IS a known scenario must not
+        # be flagged as an orphan.
+        scenarios = {'foo': _scn('foo', True)}
+        old = {'foo-sub-python-go': cr.Outcome(passed=True)}
+        new = {'foo-sub-python-go': cr.Outcome(passed=True)}
+        report = cr.classify_run(
+            sdk='python', line='v10', scenarios=scenarios, old=old, new=new, accepted_deltas=set()
+        )
+        assert report.orphan_result_keys == {'new': [], 'old': []}
+
+
+# -----------------------------------------------------------------------------
+# Cutover streak (N=7 clean RUNS per SDK; JSON persisted).
+#
+# The gate is defined over the last N invocations of the classifier, not
+# calendar days. Each ``record_run`` call appends one entry; the file is a
+# bounded rolling log.
 # -----------------------------------------------------------------------------
 
 
 class TestCutoverStreak:
-    def test_clean_day_extends_streak(self, tmp_path: pathlib.Path):
+    def test_clean_run_extends_streak(self, tmp_path: pathlib.Path):
         streak_file = tmp_path / 'streak.json'
-        cr.record_run(streak_file, sdk='python', run_date='2026-07-20', clean=True)
-        cr.record_run(streak_file, sdk='python', run_date='2026-07-21', clean=True)
-        assert cr.current_streak_days(streak_file, sdk='python') == 2
+        cr.record_run(streak_file, sdk='python', clean=True)
+        cr.record_run(streak_file, sdk='python', clean=True)
+        assert cr.current_streak_runs(streak_file, sdk='python') == 2
 
-    def test_dirty_day_resets_streak(self, tmp_path: pathlib.Path):
+    def test_dirty_run_resets_streak(self, tmp_path: pathlib.Path):
         streak_file = tmp_path / 'streak.json'
-        cr.record_run(streak_file, sdk='python', run_date='2026-07-20', clean=True)
-        cr.record_run(streak_file, sdk='python', run_date='2026-07-21', clean=False)
-        cr.record_run(streak_file, sdk='python', run_date='2026-07-22', clean=True)
-        assert cr.current_streak_days(streak_file, sdk='python') == 1
+        cr.record_run(streak_file, sdk='python', clean=True)
+        cr.record_run(streak_file, sdk='python', clean=False)
+        cr.record_run(streak_file, sdk='python', clean=True)
+        assert cr.current_streak_runs(streak_file, sdk='python') == 1
 
     def test_streak_is_per_sdk(self, tmp_path: pathlib.Path):
         streak_file = tmp_path / 'streak.json'
-        cr.record_run(streak_file, sdk='python', run_date='2026-07-20', clean=True)
-        cr.record_run(streak_file, sdk='go', run_date='2026-07-20', clean=False)
-        assert cr.current_streak_days(streak_file, sdk='python') == 1
-        assert cr.current_streak_days(streak_file, sdk='go') == 0
+        cr.record_run(streak_file, sdk='python', clean=True)
+        cr.record_run(streak_file, sdk='go', clean=False)
+        assert cr.current_streak_runs(streak_file, sdk='python') == 1
+        assert cr.current_streak_runs(streak_file, sdk='go') == 0
 
-    def test_cutover_gate_requires_seven_days(self, tmp_path: pathlib.Path):
+    def test_cutover_gate_requires_seven_runs(self, tmp_path: pathlib.Path):
         streak_file = tmp_path / 'streak.json'
-        for day in range(20, 26):  # 6 days
-            cr.record_run(streak_file, sdk='python', run_date=f'2026-07-{day:02d}', clean=True)
-        assert cr.cutover_gate_passes(streak_file, sdk='python', required_days=7) is False
+        for _ in range(6):
+            cr.record_run(streak_file, sdk='python', clean=True)
+        assert cr.cutover_gate_passes(streak_file, sdk='python', required_runs=7) is False
 
-        cr.record_run(streak_file, sdk='python', run_date='2026-07-26', clean=True)
-        assert cr.cutover_gate_passes(streak_file, sdk='python', required_days=7) is True
+        cr.record_run(streak_file, sdk='python', clean=True)
+        assert cr.cutover_gate_passes(streak_file, sdk='python', required_runs=7) is True
 
-    def test_idempotent_same_day_record(self, tmp_path: pathlib.Path):
-        # Nightly might record twice on the same date (retry, manual re-run);
-        # the second record for the same (sdk, date) should overwrite, not
-        # double-count.
+    def test_repeated_invocations_each_append_an_entry(self, tmp_path: pathlib.Path):
+        # Each classifier invocation IS a distinct comparison event — no
+        # dedup by run_id, no calendar-date collapse. Running the tool 5
+        # times with the same inputs yields 5 entries.
         streak_file = tmp_path / 'streak.json'
-        cr.record_run(streak_file, sdk='python', run_date='2026-07-20', clean=True)
-        cr.record_run(streak_file, sdk='python', run_date='2026-07-20', clean=False)
-        assert cr.current_streak_days(streak_file, sdk='python') == 0
-
-    def test_streak_file_survives_json_round_trip(self, tmp_path: pathlib.Path):
-        streak_file = tmp_path / 'streak.json'
-        cr.record_run(streak_file, sdk='python', run_date='2026-07-20', clean=True)
+        for _ in range(5):
+            cr.record_run(streak_file, sdk='python', clean=True, run_id='fixed')
         raw = json.loads(streak_file.read_text())
-        assert 'python' in raw
-        # Must be a stable, human-readable format (this file lives in a
-        # GitHub Release asset — humans inspect it).
+        assert len(raw['python']) == 5
+        assert cr.current_streak_runs(streak_file, sdk='python') == 5
+
+    def test_history_limit_bounds_the_log(self, tmp_path: pathlib.Path):
+        # Keep the file from growing forever: only the most recent
+        # ``history_limit`` entries per SDK are retained (FIFO drop).
+        streak_file = tmp_path / 'streak.json'
+        for i in range(10):
+            cr.record_run(
+                streak_file,
+                sdk='python',
+                clean=True,
+                run_id=f'r{i}',
+                history_limit=3,
+            )
+        raw = json.loads(streak_file.read_text())
+        assert [e['run_id'] for e in raw['python']] == ['r7', 'r8', 'r9']
+
+    def test_streak_file_shape(self, tmp_path: pathlib.Path):
+        streak_file = tmp_path / 'streak.json'
+        cr.record_run(streak_file, sdk='python', clean=True, run_id='run-x')
+        raw = json.loads(streak_file.read_text())
         assert isinstance(raw['python'], list)
+        assert raw['python'][0]['run_id'] == 'run-x'
+        assert raw['python'][0]['clean'] is True
+
+    def test_default_run_id_is_utc_iso_timestamp(self, tmp_path: pathlib.Path):
+        # No run_id provided → the entry gets an ISO-8601 UTC timestamp.
+        # Purely metadata — the gate check doesn't use it.
+        streak_file = tmp_path / 'streak.json'
+        cr.record_run(streak_file, sdk='python', clean=True)
+        raw = json.loads(streak_file.read_text())
+        run_id = raw['python'][0]['run_id']
+        # Round-trip via datetime.fromisoformat is the shape contract.
+        import datetime as _dt
+        parsed = _dt.datetime.fromisoformat(run_id)
+        assert parsed.tzinfo is not None  # UTC-aware
 
 
 # -----------------------------------------------------------------------------
@@ -460,7 +626,7 @@ class TestCLI:
                 '--new', str(new),
                 '--streak-file', str(streak),
                 '--accepted-deltas', str(accepted),
-                '--run-date', '2026-07-23',
+                '--run-id', 'test-run-clean',
             ]
         )
         assert rc == 0
@@ -483,7 +649,121 @@ class TestCLI:
                 '--old', str(old),
                 '--new', str(new),
                 '--streak-file', str(streak),
-                '--run-date', '2026-07-23',
+                '--run-id', 'test-run-dirty',
             ]
         )
         assert rc != 0
+
+    def test_cli_report_includes_cutover_gate(self, tmp_path: pathlib.Path):
+        # cutover_gate_passes() must be surfaced in the CLI report so the
+        # downstream baseline-deletion workflow can consume it without a
+        # separate call.
+        scenarios = tmp_path / 'scenarios.json'
+        old = tmp_path / 'old.json'
+        new = tmp_path / 'new.json'
+        streak = tmp_path / 'streak.json'
+        report_file = tmp_path / 'report.json'
+
+        self._write_scenarios(scenarios, ['a'])
+        self._write_raw(old, {'a': True})
+        self._write_raw(new, {'a': True})
+
+        rc = cr.main(
+            [
+                '--sdk', 'python',
+                '--line', 'v10',
+                '--scenarios', str(scenarios),
+                '--old', str(old),
+                '--new', str(new),
+                '--streak-file', str(streak),
+                '--run-id', 'test-run-gate',
+                '--report-file', str(report_file),
+                '--required-runs', '3',
+            ]
+        )
+        assert rc == 0
+        report = json.loads(report_file.read_text())
+        assert report['cutover_gate']['streak_runs'] == 1
+        assert report['cutover_gate']['required_runs'] == 3
+        assert report['cutover_gate']['passes'] is False
+
+
+# -----------------------------------------------------------------------------
+# Self-comparison plumbing check: any raw_results.json fed as both --old and
+# --new MUST report clean iff every outcome matches its oracle. Validates
+# the end-to-end wiring (loader → adapter → classifier → report) without
+# needing a separate NEW path — running the OLD path against itself must
+# always report "identical".
+# -----------------------------------------------------------------------------
+
+
+class TestPlumbingSelfComparison:
+    """Same raw_results.json on both sides ⇒ zero divergence, zero infra."""
+
+    def _raw(self, outcomes: dict[str, bool]) -> dict:
+        return {
+            'all_passed': all(outcomes.values()),
+            'results': {n: {'passed': p, 'sdks': ['current']} for n, p in outcomes.items()},
+        }
+
+    def test_all_passing_self_comparison_reports_clean(self):
+        # Feeding the same file as both --old and --new must report
+        # identical (no divergence, no infra failure, all matches).
+        raw = self._raw({'a': True, 'b': True, 'c': True})
+        outcomes = cr.raw_to_outcomes(raw)
+        scenarios = {n: _scn(n, expected_pass=True) for n in outcomes}
+        report = cr.classify_run(
+            sdk='python', line='v10', scenarios=scenarios, old=outcomes, new=outcomes, accepted_deltas=set()
+        )
+        assert report.is_clean is True
+        assert report.behavioral_divergences == []
+        assert report.infra_failures == []
+        assert set(report.matches) == set(outcomes)
+
+    def test_self_comparison_with_expected_failures_still_reports_clean(self):
+        # Some scenarios are designed to fail (expected_pass=False). Feeding
+        # the SAME results on both sides still produces zero divergence
+        # because OLD == NEW; anything expected-to-fail that DID fail is a
+        # correct outcome, so it also matches its oracle.
+        raw = self._raw({'ok': True, 'expected_to_fail': False})
+        outcomes = cr.raw_to_outcomes(raw)
+        scenarios = {
+            'ok': _scn('ok', expected_pass=True),
+            'expected_to_fail': _scn('expected_to_fail', expected_pass=False),
+        }
+        report = cr.classify_run(
+            sdk='python', line='v10', scenarios=scenarios, old=outcomes, new=outcomes, accepted_deltas=set()
+        )
+        assert report.is_clean is True
+        assert set(report.matches) == {'ok', 'expected_to_fail'}
+
+    def test_self_comparison_with_shared_regression_still_flagged(self):
+        # The absolute-oracle invariant: agreement of two wrongs is still
+        # wrong. Even if OLD == NEW, a scenario supposed to pass that fails
+        # on both sides is a REAL_FAILURE — the plumbing test must not mask
+        # a real regression baked into the OLD path.
+        raw = self._raw({'a': False})  # supposed to pass but doesn't
+        outcomes = cr.raw_to_outcomes(raw)
+        scenarios = {'a': _scn('a', expected_pass=True)}
+        report = cr.classify_run(
+            sdk='python', line='v10', scenarios=scenarios, old=outcomes, new=outcomes, accepted_deltas=set()
+        )
+        assert report.real_failures == ['a']
+
+    def test_self_comparison_with_subtests(self):
+        # Self-comparison must also work when a scenario expands into
+        # multiple sub-test result keys (``<name>-sub-<sdks>``).
+        raw = {
+            'all_passed': True,
+            'results': {
+                'foo-sub-python-go': {'passed': True, 'sdks': ['python', 'go']},
+                'foo-sub-python-java': {'passed': True, 'sdks': ['python', 'java']},
+            },
+        }
+        outcomes = cr.raw_to_outcomes(raw)
+        scenarios = {'foo': _scn('foo', expected_pass=True)}
+        report = cr.classify_run(
+            sdk='python', line='v10', scenarios=scenarios, old=outcomes, new=outcomes, accepted_deltas=set()
+        )
+        assert report.is_clean is True
+        assert set(report.matches) == {'foo-sub-python-go', 'foo-sub-python-java'}
