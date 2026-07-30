@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import datetime
 import enum
 import json
 import logging
@@ -390,99 +389,7 @@ def _log_orphan_keys(
 
 
 # -----------------------------------------------------------------------------
-# Cutover streak (N clean RUNS per SDK, persisted JSON).
-#
-# The comparison itself is a pure function over saved result files, so the
-# gate is defined over the *last N invocations* of this tool — not calendar
-# days. Each ``main()`` invocation appends one entry per SDK to a rolling
-# log; a bounded history keeps the file from growing forever.
-#
-# Storage shape:
-#
-#     {
-#       "python": [
-#         {"run_id": "2026-07-30T07:52:51+00:00", "clean": true},
-#         {"run_id": "manual-2026-07-30-b", "clean": false},
-#         ...
-#       ],
-#       "go": [...]
-#     }
-#
-# ``run_id`` is opaque metadata used only for logging and debugging (defaults
-# to an ISO-8601 UTC timestamp). The gate check only reads ``clean``.
-# -----------------------------------------------------------------------------
-
-
-DEFAULT_HISTORY_LIMIT = 50
-
-
-def _read_streak_file(path: pathlib.Path) -> dict[str, list[dict]]:
-    p = pathlib.Path(path)
-    if not p.exists():
-        return {}
-    return json.loads(p.read_text())
-
-
-def _write_streak_file(path: pathlib.Path, data: dict[str, list[dict]]) -> None:
-    pathlib.Path(path).write_text(json.dumps(data, indent=2, sort_keys=True))
-
-
-def record_run(
-    streak_file: pathlib.Path,
-    *,
-    sdk: str,
-    clean: bool,
-    run_id: str | None = None,
-    history_limit: int = DEFAULT_HISTORY_LIMIT,
-) -> None:
-    """Append one run's outcome to the SDK's rolling history.
-
-    Each invocation appends a fresh entry — no dedup, no calendar-date
-    idempotency. Callers that re-run the classifier on identical inputs
-    will get identical entries; that's intentional (each invocation IS a
-    distinct comparison event, even if the underlying data hasn't changed).
-
-    ``history_limit`` bounds the per-SDK log length so the file doesn't grow
-    forever; older entries are dropped FIFO.
-    """
-    data = _read_streak_file(streak_file)
-    entries = list(data.get(sdk, []))
-    entries.append({
-        'run_id': run_id or _default_run_id(),
-        'clean': clean,
-    })
-    if len(entries) > history_limit:
-        entries = entries[-history_limit:]
-    data[sdk] = entries
-    _write_streak_file(streak_file, data)
-
-
-def current_streak_runs(streak_file: pathlib.Path, *, sdk: str) -> int:
-    """Return the length of the current trailing streak of clean runs."""
-    data = _read_streak_file(streak_file)
-    entries = data.get(sdk, [])
-    streak = 0
-    for entry in reversed(entries):
-        if entry['clean']:
-            streak += 1
-        else:
-            break
-    return streak
-
-
-def cutover_gate_passes(
-    streak_file: pathlib.Path, *, sdk: str, required_runs: int = 7
-) -> bool:
-    """Cutover gate: N consecutive clean runs ⇒ safe to delete baseline.
-
-    Only when this returns True for every in-scope SDK may
-    ``a2a-itk/agents/<sdk>/*`` be deleted.
-    """
-    return current_streak_runs(streak_file, sdk=sdk) >= required_runs
-
-
-# -----------------------------------------------------------------------------
-# CLI entry point — used by the shadow CI job and per-SDK cutover checks.
+# CLI entry point — one-shot: read OLD + NEW, classify, exit 0/1.
 # -----------------------------------------------------------------------------
 
 
@@ -490,24 +397,18 @@ def _load_raw(path: pathlib.Path) -> dict[str, Outcome]:
     return raw_to_outcomes(json.loads(pathlib.Path(path).read_text()))
 
 
-def _default_run_id() -> str:
-    """Opaque per-run identifier; the ISO-8601 UTC timestamp is a fine default."""
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            'Comparison harness: classify NEW vs OLD ITK results against '
-            'the scenario oracle and update the rolling cutover-streak log.'
+            'Classify NEW vs OLD ITK results against the scenario oracle. '
+            'Exits 0 if clean, 1 otherwise.'
         )
     )
-    parser.add_argument('--sdk', required=True, help='SDK being adjudicated (python, go, java, rust, ts).')
+    parser.add_argument('--sdk', required=True, help='SDK being classified (python, go, java, rust, ts).')
     parser.add_argument('--line', required=True, help='Version line (v10 | v03).')
     parser.add_argument('--scenarios', required=True, type=pathlib.Path, help='Path to scenarios.json.')
     parser.add_argument('--old', required=True, type=pathlib.Path, help='OLD path raw_results.json.')
     parser.add_argument('--new', required=True, type=pathlib.Path, help='NEW path raw_results.json.')
-    parser.add_argument('--streak-file', required=True, type=pathlib.Path, help='Rolling per-run streak persistence file.')
     parser.add_argument(
         '--accepted-deltas',
         type=pathlib.Path,
@@ -515,38 +416,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help='Path to accepted_deltas.json (optional; missing ⇒ none accepted).',
     )
     parser.add_argument(
-        '--run-id',
-        default=None,
-        help='Opaque identifier for this run (for logging/debugging). Defaults to the current UTC ISO timestamp.',
-    )
-    parser.add_argument(
-        '--required-runs',
-        type=int,
-        default=7,
-        help='Cutover-gate threshold in consecutive clean runs (default: 7).',
-    )
-    parser.add_argument(
-        '--history-limit',
-        type=int,
-        default=DEFAULT_HISTORY_LIMIT,
-        help=f'Max per-SDK entries retained in the streak file (default: {DEFAULT_HISTORY_LIMIT}).',
-    )
-    parser.add_argument(
         '--report-file',
         type=pathlib.Path,
         default=None,
-        help='Optional path to write a JSON report of this run for CI artifact upload.',
+        help='Optional path to write the JSON report for CI artifact upload.',
     )
     return parser
 
 
-def _report_to_dict(
-    report: RunReport,
-    *,
-    streak_runs: int,
-    gate_passes: bool,
-    required_runs: int,
-) -> dict:
+def _report_to_dict(report: RunReport) -> dict:
     return {
         'sdk': report.sdk,
         'line': report.line,
@@ -557,11 +435,6 @@ def _report_to_dict(
         'behavioral_divergences': report.behavioral_divergences,
         'suppressed_count': report.suppressed_count,
         'orphan_result_keys': report.orphan_result_keys,
-        'cutover_gate': {
-            'streak_runs': streak_runs,
-            'required_runs': required_runs,
-            'passes': gate_passes,
-        },
     }
 
 
@@ -586,21 +459,8 @@ def main(argv: list[str] | None = None) -> int:
         accepted_deltas=accepted,
     )
 
-    record_run(
-        args.streak_file,
-        sdk=args.sdk,
-        clean=report.is_clean,
-        run_id=args.run_id,
-        history_limit=args.history_limit,
-    )
-
-    streak_runs = current_streak_runs(args.streak_file, sdk=args.sdk)
-    gate_passes = cutover_gate_passes(
-        args.streak_file, sdk=args.sdk, required_runs=args.required_runs
-    )
-
     logger.info(
-        'Comparison report — sdk=%s line=%s clean=%s matches=%d real=%d infra=%d div=%d suppressed=%d streak=%d run(s) gate=%s (need %d)',
+        'Comparison report — sdk=%s line=%s clean=%s matches=%d real=%d infra=%d div=%d suppressed=%d',
         report.sdk,
         report.line,
         report.is_clean,
@@ -609,13 +469,10 @@ def main(argv: list[str] | None = None) -> int:
         len(report.infra_failures),
         len(report.behavioral_divergences),
         report.suppressed_count,
-        streak_runs,
-        'PASS' if gate_passes else 'HOLD',
-        args.required_runs,
     )
 
     if report.real_failures:
-        logger.error('REAL_FAILURE scenarios (block cutover): %s', report.real_failures)
+        logger.error('REAL_FAILURE scenarios: %s', report.real_failures)
     if report.infra_failures:
         logger.warning('INFRA_FAILURE scenarios (retry upstream): %s', report.infra_failures)
     if report.behavioral_divergences:
@@ -626,20 +483,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.report_file is not None:
         args.report_file.write_text(
-            json.dumps(
-                _report_to_dict(
-                    report,
-                    streak_runs=streak_runs,
-                    gate_passes=gate_passes,
-                    required_runs=args.required_runs,
-                ),
-                indent=2,
-                sort_keys=True,
-            )
+            json.dumps(_report_to_dict(report), indent=2, sort_keys=True)
         )
 
-    # Exit code: clean ⇒ 0; dirty ⇒ 1. Cutover gate (N-run streak) is
-    # checked separately by CI at baseline-deletion time.
     return 0 if report.is_clean else 1
 
 

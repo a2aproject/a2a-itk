@@ -461,92 +461,6 @@ class TestOrphanResultKeys:
 
 
 # -----------------------------------------------------------------------------
-# Cutover streak (N=7 clean RUNS per SDK; JSON persisted).
-#
-# The gate is defined over the last N invocations of the classifier, not
-# calendar days. Each ``record_run`` call appends one entry; the file is a
-# bounded rolling log.
-# -----------------------------------------------------------------------------
-
-
-class TestCutoverStreak:
-    def test_clean_run_extends_streak(self, tmp_path: pathlib.Path):
-        streak_file = tmp_path / 'streak.json'
-        cr.record_run(streak_file, sdk='python', clean=True)
-        cr.record_run(streak_file, sdk='python', clean=True)
-        assert cr.current_streak_runs(streak_file, sdk='python') == 2
-
-    def test_dirty_run_resets_streak(self, tmp_path: pathlib.Path):
-        streak_file = tmp_path / 'streak.json'
-        cr.record_run(streak_file, sdk='python', clean=True)
-        cr.record_run(streak_file, sdk='python', clean=False)
-        cr.record_run(streak_file, sdk='python', clean=True)
-        assert cr.current_streak_runs(streak_file, sdk='python') == 1
-
-    def test_streak_is_per_sdk(self, tmp_path: pathlib.Path):
-        streak_file = tmp_path / 'streak.json'
-        cr.record_run(streak_file, sdk='python', clean=True)
-        cr.record_run(streak_file, sdk='go', clean=False)
-        assert cr.current_streak_runs(streak_file, sdk='python') == 1
-        assert cr.current_streak_runs(streak_file, sdk='go') == 0
-
-    def test_cutover_gate_requires_seven_runs(self, tmp_path: pathlib.Path):
-        streak_file = tmp_path / 'streak.json'
-        for _ in range(6):
-            cr.record_run(streak_file, sdk='python', clean=True)
-        assert cr.cutover_gate_passes(streak_file, sdk='python', required_runs=7) is False
-
-        cr.record_run(streak_file, sdk='python', clean=True)
-        assert cr.cutover_gate_passes(streak_file, sdk='python', required_runs=7) is True
-
-    def test_repeated_invocations_each_append_an_entry(self, tmp_path: pathlib.Path):
-        # Each classifier invocation IS a distinct comparison event — no
-        # dedup by run_id, no calendar-date collapse. Running the tool 5
-        # times with the same inputs yields 5 entries.
-        streak_file = tmp_path / 'streak.json'
-        for _ in range(5):
-            cr.record_run(streak_file, sdk='python', clean=True, run_id='fixed')
-        raw = json.loads(streak_file.read_text())
-        assert len(raw['python']) == 5
-        assert cr.current_streak_runs(streak_file, sdk='python') == 5
-
-    def test_history_limit_bounds_the_log(self, tmp_path: pathlib.Path):
-        # Keep the file from growing forever: only the most recent
-        # ``history_limit`` entries per SDK are retained (FIFO drop).
-        streak_file = tmp_path / 'streak.json'
-        for i in range(10):
-            cr.record_run(
-                streak_file,
-                sdk='python',
-                clean=True,
-                run_id=f'r{i}',
-                history_limit=3,
-            )
-        raw = json.loads(streak_file.read_text())
-        assert [e['run_id'] for e in raw['python']] == ['r7', 'r8', 'r9']
-
-    def test_streak_file_shape(self, tmp_path: pathlib.Path):
-        streak_file = tmp_path / 'streak.json'
-        cr.record_run(streak_file, sdk='python', clean=True, run_id='run-x')
-        raw = json.loads(streak_file.read_text())
-        assert isinstance(raw['python'], list)
-        assert raw['python'][0]['run_id'] == 'run-x'
-        assert raw['python'][0]['clean'] is True
-
-    def test_default_run_id_is_utc_iso_timestamp(self, tmp_path: pathlib.Path):
-        # No run_id provided → the entry gets an ISO-8601 UTC timestamp.
-        # Purely metadata — the gate check doesn't use it.
-        streak_file = tmp_path / 'streak.json'
-        cr.record_run(streak_file, sdk='python', clean=True)
-        raw = json.loads(streak_file.read_text())
-        run_id = raw['python'][0]['run_id']
-        # Round-trip via datetime.fromisoformat is the shape contract.
-        import datetime as _dt
-        parsed = _dt.datetime.fromisoformat(run_id)
-        assert parsed.tzinfo is not None  # UTC-aware
-
-
-# -----------------------------------------------------------------------------
 # Runner integration — classify a raw_results.json pair (OLD vs NEW)
 # -----------------------------------------------------------------------------
 
@@ -610,7 +524,6 @@ class TestCLI:
         scenarios = tmp_path / 'scenarios.json'
         old = tmp_path / 'old.json'
         new = tmp_path / 'new.json'
-        streak = tmp_path / 'streak.json'
         accepted = tmp_path / 'accepted.json'
 
         self._write_scenarios(scenarios, ['a'])
@@ -624,9 +537,7 @@ class TestCLI:
                 '--scenarios', str(scenarios),
                 '--old', str(old),
                 '--new', str(new),
-                '--streak-file', str(streak),
                 '--accepted-deltas', str(accepted),
-                '--run-id', 'test-run-clean',
             ]
         )
         assert rc == 0
@@ -635,7 +546,6 @@ class TestCLI:
         scenarios = tmp_path / 'scenarios.json'
         old = tmp_path / 'old.json'
         new = tmp_path / 'new.json'
-        streak = tmp_path / 'streak.json'
 
         self._write_scenarios(scenarios, ['a'])
         self._write_raw(old, {'a': True})
@@ -648,20 +558,14 @@ class TestCLI:
                 '--scenarios', str(scenarios),
                 '--old', str(old),
                 '--new', str(new),
-                '--streak-file', str(streak),
-                '--run-id', 'test-run-dirty',
             ]
         )
         assert rc != 0
 
-    def test_cli_report_includes_cutover_gate(self, tmp_path: pathlib.Path):
-        # cutover_gate_passes() must be surfaced in the CLI report so the
-        # downstream baseline-deletion workflow can consume it without a
-        # separate call.
+    def test_cli_report_file_contains_full_report(self, tmp_path: pathlib.Path):
         scenarios = tmp_path / 'scenarios.json'
         old = tmp_path / 'old.json'
         new = tmp_path / 'new.json'
-        streak = tmp_path / 'streak.json'
         report_file = tmp_path / 'report.json'
 
         self._write_scenarios(scenarios, ['a'])
@@ -675,17 +579,15 @@ class TestCLI:
                 '--scenarios', str(scenarios),
                 '--old', str(old),
                 '--new', str(new),
-                '--streak-file', str(streak),
-                '--run-id', 'test-run-gate',
                 '--report-file', str(report_file),
-                '--required-runs', '3',
             ]
         )
         assert rc == 0
         report = json.loads(report_file.read_text())
-        assert report['cutover_gate']['streak_runs'] == 1
-        assert report['cutover_gate']['required_runs'] == 3
-        assert report['cutover_gate']['passes'] is False
+        assert report['is_clean'] is True
+        assert report['matches'] == ['a']
+        assert report['real_failures'] == []
+        assert report['orphan_result_keys'] == {'new': [], 'old': []}
 
 
 # -----------------------------------------------------------------------------
