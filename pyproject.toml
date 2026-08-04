@@ -31,7 +31,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["v2/tests"]
 pythonpath = ["."]
 
 [tool.ruff]
@@ -42,6 +42,6 @@ exclude = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["a2a", "agents.python.v03.pyproto", "scripts", "test_suite"]
+known-first-party = ["a2a", "agents.python.v03.pyproto", "scripts", "test_suite", "v2"]
 
 

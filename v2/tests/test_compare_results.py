@@ -12,7 +12,7 @@ import pathlib
 
 import pytest
 
-from scripts import compare_results as cr
+from v2.scripts import compare_results as cr
 
 
 # -----------------------------------------------------------------------------
