@@ -187,6 +187,68 @@ class TestRetryBehaviour:
         assert calls['n'] >= 2
 
 
+class TestResolveRefRefPreference:
+    """Regression: an unqualified ref like ``main`` must resolve to
+    ``refs/heads/main``, not to ``refs/for/main`` (Gerrit review),
+    ``refs/pull/N/head``, or any other namespace the server exposes.
+    Discovered against a real GitHub mirror of a2a-python.
+    """
+
+    def test_prefers_heads_over_review_ref(self, monkeypatch, fast_backoff):  # noqa: ARG002
+        heads_sha = 'a' * 40
+
+        def fake(args, cwd=None, timeout=None):  # noqa: ARG001
+            # With --heads --tags, servers only return refs/heads/* and
+            # refs/tags/* — refs/for/* is filtered out at the server side.
+            out = f'{heads_sha}\trefs/heads/main\n'
+            return subprocess.CompletedProcess(args, 0, stdout=out, stderr='')
+
+        monkeypatch.setattr(fetch, '_run_git', fake)
+        assert fetch.resolve_ref('x/y', 'main') == heads_sha
+
+    def test_pick_sha_prefers_heads(self):
+        out = (
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/for/main\n'
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/main\n'
+            'cccccccccccccccccccccccccccccccccccccccc\trefs/tags/main\n'
+        )
+        assert fetch._pick_sha(out) == 'a' * 40  # noqa: SLF001
+
+    def test_pick_sha_prefers_tags_when_no_head(self):
+        out = (
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/for/main\n'
+            'cccccccccccccccccccccccccccccccccccccccc\trefs/tags/main\n'
+        )
+        assert fetch._pick_sha(out) == 'c' * 40  # noqa: SLF001
+
+    def test_pick_sha_falls_back_to_head_ref(self):
+        out = 'dddddddddddddddddddddddddddddddddddddddd\tHEAD\n'
+        assert fetch._pick_sha(out) == 'd' * 40  # noqa: SLF001
+
+    def test_pick_sha_empty(self):
+        assert fetch._pick_sha('') is None
+        assert fetch._pick_sha('malformed line\n') is None
+
+    def test_head_falls_back_to_unfiltered(self, monkeypatch, fast_backoff):  # noqa: ARG002
+        """``HEAD`` isn't matched by --heads --tags; the fallback query kicks in."""
+        head_sha = 'e' * 40
+        calls: list[list[str]] = []
+
+        def fake(args, cwd=None, timeout=None):  # noqa: ARG001
+            calls.append(list(args))
+            if '--heads' in args:
+                return subprocess.CompletedProcess(args, 0, stdout='', stderr='')
+            return subprocess.CompletedProcess(
+                args, 0, stdout=f'{head_sha}\tHEAD\n', stderr='',
+            )
+
+        monkeypatch.setattr(fetch, '_run_git', fake)
+        assert fetch.resolve_ref('x/y', 'HEAD') == head_sha
+        assert len(calls) == 2
+        assert '--heads' in calls[0]
+        assert '--heads' not in calls[1]
+
+
 class TestResolveRefRetry:
     def test_transient_ls_remote_retries(self, monkeypatch, fast_backoff):  # noqa: ARG002
         monkeypatch.setenv('ITK_RETRIES', '3')

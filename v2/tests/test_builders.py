@@ -4,6 +4,11 @@ Every builder is a ``subprocess.run`` invocation — we patch ``subprocess.run``
 and record the argv/cwd, so no real toolchain is required. The purpose is
 locking down: (a) detection precedence matches :mod:`.spawn`, and (b) the
 exact commands and lockfile flags.
+
+These tests pass ``skip_codegen=True`` to isolate the SDK-build step from
+the codegen preparer (that lives in :mod:`v2.launcher.codegen` and has its
+own test module). The end-to-end order (codegen ↔ build) is tested in
+:class:`TestCodegenOrdering` at the bottom of this file.
 """
 
 from __future__ import annotations
@@ -101,7 +106,7 @@ class TestDetectLanguage:
 class TestPythonBuilder:
     def test_uv_sync_locked(self, tmp_path, rec):
         (tmp_path / 'main.py').touch()
-        builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert rec.calls[0][0] == ['uv', 'sync', '--locked']
         assert rec.calls[0][1] == tmp_path
 
@@ -109,7 +114,7 @@ class TestPythonBuilder:
 class TestGoBuilder:
     def test_go_build_uses_readonly_mode(self, tmp_path, rec):
         (tmp_path / 'main.go').touch()
-        builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert rec.calls[0][0] == [
             'go', 'build', '-mod=readonly', '-o', str(tmp_path / 'bin' / 'agent'), '.',
         ]
@@ -120,14 +125,14 @@ class TestGoBuilder:
         (tmp_path / 'main.go').touch()
         (tmp_path / 'bin').mkdir()
         (tmp_path / 'bin' / 'agent').write_text('binary', encoding='utf-8')
-        builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert rec.calls == []
 
 
 class TestJavaBuilder:
     def test_mvn_profile_and_cwd(self, tmp_path, rec):
         (tmp_path / 'pom.xml').touch()
-        builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert rec.calls[0][0] == [
             'mvn', '-Pitk', '-pl', 'itk', '-am', 'install',
             '-DskipTests', '-Dmaven.javadoc.skip=true',
@@ -139,7 +144,7 @@ class TestJavaBuilder:
 class TestRustBuilder:
     def test_cargo_build_locked_release(self, tmp_path, rec):
         (tmp_path / 'Cargo.toml').touch()
-        builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert rec.calls[0][0] == ['cargo', 'build', '--locked', '--release']
         assert rec.calls[0][1] == tmp_path
 
@@ -148,7 +153,7 @@ class TestRustBuilder:
         rel = tmp_path / 'target' / 'release'
         rel.mkdir(parents=True)
         (rel / 'itk-something').write_text('x', encoding='utf-8')
-        builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert rec.calls == []
 
 
@@ -157,7 +162,7 @@ class TestTsBuilder:
         (tmp_path / 'package.json').touch()
         agent = tmp_path / 'itk'
         agent.mkdir()
-        builders.build_in_place('x/y', 'a' * 40, agent)
+        builders.build_in_place('x/y', 'a' * 40, agent, skip_codegen=True)
         assert rec.calls[0][0] == ['npm', 'ci']
         # npm ci must run from the *repo root*, not the agent subdir.
         assert rec.calls[0][1] == tmp_path
@@ -167,14 +172,14 @@ class TestTsBuilder:
         (tmp_path / 'node_modules').mkdir()
         agent = tmp_path / 'itk'
         agent.mkdir()
-        builders.build_in_place('x/y', 'a' * 40, agent)
+        builders.build_in_place('x/y', 'a' * 40, agent, skip_codegen=True)
         assert rec.calls == []
 
 
 class TestDotnetBuilder:
     def test_dotnet_is_noop(self, tmp_path, rec):
         (tmp_path / 'Agent.csproj').touch()
-        lang = builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        lang = builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert lang is Language.DOTNET
         assert rec.calls == []
 
@@ -195,7 +200,7 @@ class TestFailureWrapping:
 
         monkeypatch.setattr(builders.subprocess, 'run', boom)
         with pytest.raises(InfraFailure) as e:
-            builders.build_in_place('x/y', 'a' * 40, tmp_path)
+            builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert e.value.stage is Stage.BUILD
         assert e.value.repo == 'x/y'
 
@@ -209,5 +214,90 @@ class TestFailureWrapping:
 
         monkeypatch.setattr(builders.subprocess, 'run', hang)
         with pytest.raises(InfraFailure) as e:
-            builders.build_in_place('x/y', 'a' * 40, tmp_path)
+            builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert e.value.stage is Stage.BUILD
+
+
+# ---------------------------------------------------------------------------
+# Codegen ↔ build ordering
+# ---------------------------------------------------------------------------
+
+
+class TestCodegenOrdering:
+    """The end-to-end ordering: some languages need codegen BEFORE the SDK
+    build tool runs; others AFTER. Verified by observing which of the
+    recorded subprocess calls fires first.
+    """
+
+    def _first_cmd(self, rec, cmd: str) -> int | None:
+        """Return index of the first call whose argv[0] equals cmd."""
+        for i, (argv, _cwd) in enumerate(rec.calls):
+            if argv and argv[0] == cmd:
+                return i
+        return None
+
+    def test_go_codegen_runs_before_go_build(self, tmp_path, rec):
+        (tmp_path / 'main.go').touch()
+        # Real codegen would need protoc; the Recorder returns 0 for anything.
+        builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        protoc_at = self._first_cmd(rec, 'protoc')
+        gobuild_at = self._first_cmd(rec, 'go')
+        assert protoc_at is not None, 'expected protoc call from codegen.prepare_go'
+        assert gobuild_at is not None, 'expected go build call'
+        assert protoc_at < gobuild_at, 'codegen must run before go build'
+
+    def test_python_codegen_runs_after_uv_sync(self, tmp_path, rec):
+        (tmp_path / 'main.py').touch()
+        builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        # Both are 'uv ...' — distinguish by the subcommand.
+        first_uv_sub = rec.calls[0][0][1]
+        assert first_uv_sub == 'sync', (
+            f'expected uv sync first; got {rec.calls[0][0]!r}'
+        )
+        # Codegen uses `uv run --with grpcio-tools python -m grpc_tools.protoc`.
+        assert any('grpc_tools.protoc' in ' '.join(argv) for argv, _ in rec.calls), (
+            'codegen protoc call missing'
+        )
+
+    def test_ts_codegen_runs_after_npm_ci(self, tmp_path, rec):
+        (tmp_path / 'package.json').touch()
+        agent = tmp_path / 'itk'
+        agent.mkdir()
+        builders.build_in_place('x/y', 'a' * 40, agent)
+        # npm ci comes first
+        assert rec.calls[0][0] == ['npm', 'ci']
+        # buf generate is somewhere after — argv[0] ends with '/node_modules/.bin/buf'
+        buf_at = None
+        for i, (argv, _cwd) in enumerate(rec.calls):
+            if argv and argv[0].endswith('/node_modules/.bin/buf'):
+                buf_at = i
+                break
+        assert buf_at is not None and buf_at > 0
+
+    def test_rust_codegen_creates_symlink_before_cargo(self, tmp_path, rec):
+        (tmp_path / 'Cargo.toml').touch()
+        builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        # No subprocess for rust codegen — just a symlink.
+        assert (tmp_path / 'a2a-itk').is_symlink(), (
+            'codegen must symlink a2a-itk into rust agent dir'
+        )
+        # Only one recorded call — cargo build (rust codegen has no subprocess).
+        assert rec.calls[0][0] == ['cargo', 'build', '--locked', '--release']
+
+    def test_java_codegen_creates_symlink_before_mvn(self, tmp_path, rec):
+        (tmp_path / 'pom.xml').touch()
+        builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        assert (tmp_path / 'a2a-itk').is_symlink()
+        assert rec.calls[0][0][0] == 'mvn'
+
+    def test_skip_codegen_bypasses_all(self, tmp_path, rec):
+        (tmp_path / 'Cargo.toml').touch()
+        builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
+        assert not (tmp_path / 'a2a-itk').exists()
+        assert rec.calls[0][0] == ['cargo', 'build', '--locked', '--release']
+
+    def test_dotnet_has_no_codegen(self, tmp_path, rec):
+        (tmp_path / 'Agent.csproj').touch()
+        builders.build_in_place('x/y', 'a' * 40, tmp_path)
+        assert rec.calls == []
+        assert not (tmp_path / 'a2a-itk').exists()

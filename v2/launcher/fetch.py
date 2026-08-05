@@ -90,6 +90,13 @@ def resolve_ref(repo: str, ref: str, *, timeout: int | None = None) -> str:
             branches and tags — a bare SHA does not resolve this way.
         timeout: Per-attempt timeout; defaults to :func:`config.checkout_timeout`.
 
+    Ambiguity handling: an unqualified ref like ``main`` can match multiple
+    namespaces (``refs/heads/main`` on every server, plus ``refs/for/main``
+    on Gerrit review servers, ``refs/pull/N/head`` mirrors, etc.). We filter
+    to ``--heads --tags --refs`` and prefer heads over tags over anything
+    else, so the returned SHA is always the branch/tag tip a user meant —
+    not a pending review or pull request.
+
     Raises:
         PermanentError: The ref does not exist on the remote.
         InfraFailure: Network exhausted after retries.
@@ -99,7 +106,9 @@ def resolve_ref(repo: str, ref: str, *, timeout: int | None = None) -> str:
     for attempt in range(config.retries()):
         try:
             cp = _run_git(
-                ['ls-remote', repo_url(repo), ref],
+                # --heads --tags: only return refs/heads/* and refs/tags/*.
+                # --refs: strip peeled tag entries (^{}).
+                ['ls-remote', '--heads', '--tags', '--refs', repo_url(repo), ref],
                 timeout=to,
             )
         except subprocess.TimeoutExpired as e:
@@ -108,14 +117,26 @@ def resolve_ref(repo: str, ref: str, *, timeout: int | None = None) -> str:
             continue
 
         if cp.returncode == 0:
-            # Output shape: "<40hex>\trefs/heads/main\n" (possibly multiple lines).
-            for raw in cp.stdout.splitlines():
-                line = raw.strip()
-                if not line:
-                    continue
-                sha = line.split('\t', 1)[0].strip()
-                if len(sha) == 40 and all(c in '0123456789abcdef' for c in sha):
-                    return sha
+            chosen = _pick_sha(cp.stdout)
+            if chosen is not None:
+                return chosen
+            # Filtered ls-remote returned nothing — this is normal for `HEAD`
+            # (not in refs/heads/*, so --heads --tags excludes it). Fall back
+            # to an unfiltered query so the caller can resolve HEAD and other
+            # non-namespaced refs too.
+            try:
+                cp2 = _run_git(
+                    ['ls-remote', repo_url(repo), ref],
+                    timeout=to,
+                )
+            except subprocess.TimeoutExpired as e:
+                last_exc = e
+                _sleep_backoff(attempt)
+                continue
+            if cp2.returncode == 0:
+                chosen = _pick_sha(cp2.stdout)
+                if chosen is not None:
+                    return chosen
             raise PermanentError(
                 repo,
                 ref,
@@ -130,6 +151,35 @@ def resolve_ref(repo: str, ref: str, *, timeout: int | None = None) -> str:
         _sleep_backoff(attempt)
 
     raise InfraFailure(repo, ref, Stage.FETCH, cause=last_exc)
+
+
+def _pick_sha(stdout: str) -> str | None:
+    """Pick the best SHA from a ``git ls-remote`` output block.
+
+    Prefers ``refs/heads/*``, then ``refs/tags/*``, then any other 40-hex
+    match (covers ``HEAD`` and any exotic ref namespaces the server exposes).
+    Returns None if no valid SHA is present.
+    """
+    head_sha: str | None = None
+    tag_sha: str | None = None
+    other_sha: str | None = None
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if not line or '\t' not in line:
+            continue
+        sha_part, refname = line.split('\t', 1)
+        sha_part = sha_part.strip()
+        refname = refname.strip()
+        if not (len(sha_part) == 40 and
+                all(c in '0123456789abcdef' for c in sha_part)):
+            continue
+        if refname.startswith('refs/heads/') and head_sha is None:
+            head_sha = sha_part
+        elif refname.startswith('refs/tags/') and tag_sha is None:
+            tag_sha = sha_part
+        elif other_sha is None:
+            other_sha = sha_part
+    return head_sha or tag_sha or other_sha
 
 
 def fetch_commit(repo: str, sha: str, dst: Path, *, timeout: int | None = None) -> None:
