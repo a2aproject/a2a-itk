@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from v2.launcher import fetch
-from v2.launcher.errors import InfraFailure, PermanentError, Stage
+from test_suite.launcher import fetch
+from test_suite.launcher.errors import InfraFailure, PermanentError, Stage
 
 
 # ---------------------------------------------------------------------------

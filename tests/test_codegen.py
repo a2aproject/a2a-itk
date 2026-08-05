@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from v2.launcher import codegen
+from test_suite.launcher import codegen
 
 
 class _Recorder:
@@ -294,6 +294,6 @@ class TestDefaultSources:
 
     def test_default_itk_source_points_at_repo_root(self):
         root = codegen.default_itk_source()
-        assert (root / 'v2' / 'launcher' / 'codegen.py').exists(), (
+        assert (root / 'test_suite' / 'launcher' / 'codegen.py').exists(), (
             f'default_itk_source() should be the a2a-itk root; got {root}'
         )

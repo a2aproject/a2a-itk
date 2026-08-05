@@ -19,8 +19,8 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from v2.launcher import codegen, config
-from v2.launcher.errors import InfraFailure, Stage
+from test_suite.launcher import codegen, config
+from test_suite.launcher.errors import InfraFailure, Stage
 
 
 class Language(enum.Enum):
@@ -81,7 +81,7 @@ def build_in_place(
 ) -> Language:
     """Detect the language of ``agent_dir`` and build the agent there.
 
-    Runs :mod:`v2.launcher.codegen` before or after the SDK build tool as
+    Runs :mod:`test_suite.launcher.codegen` before or after the SDK build tool as
     each language needs (see below). Set ``skip_codegen=True`` to bypass —
     useful in tests that isolate the build step, and for callers whose
     upstream bash script already prepared the proto artifacts.

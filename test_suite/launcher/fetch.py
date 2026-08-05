@@ -8,7 +8,7 @@ Two entry points:
 
   * :func:`fetch_commit` — fetch exactly one commit into ``dst``, with
     bounded retry on transient errors. A 404-class failure (SHA not found)
-    is surfaced as :class:`~v2.launcher.errors.PermanentError` — retrying
+    is surfaced as :class:`~test_suite.launcher.errors.PermanentError` — retrying
     will never resolve it.
 
 Both do their I/O through :func:`_run_git`, which every test replaces with a
@@ -22,8 +22,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from v2.launcher import config
-from v2.launcher.errors import InfraFailure, PermanentError, Stage
+from test_suite.launcher import config
+from test_suite.launcher.errors import InfraFailure, PermanentError, Stage
 
 
 _GITHUB_HTTPS = 'https://github.com/{repo}.git'

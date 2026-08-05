@@ -1,6 +1,6 @@
 """Public launcher entry points: :func:`resolve`, :func:`spawn`, :class:`LaunchSession`.
 
-Dispatches a :class:`~v2.launcher.spec.TargetSpec` to one of three concrete
+Dispatches a :class:`~test_suite.launcher.spec.TargetSpec` to one of three concrete
 locations:
 
   * ``MOUNT``    — the fixed container-mount path ``agents/repo/itk``.
@@ -20,13 +20,13 @@ import contextlib
 import subprocess
 from pathlib import Path
 
-from v2.launcher import cache
-from v2.launcher import spawn as _spawn_mod
-from v2.launcher.spec import Kind, TargetSpec
+from test_suite import current as _current
+from test_suite.launcher import cache
+from test_suite.launcher.spec import Kind, TargetSpec
 
 
 def _repo_root() -> Path:
-    """a2a-itk root; matches :func:`v2.launcher.config._repo_root`."""
+    """a2a-itk root; matches :func:`test_suite.launcher.config._repo_root`."""
     return Path(__file__).resolve().parents[2]
 
 
@@ -39,9 +39,9 @@ def resolve(spec: TargetSpec) -> Path:
 
     Raises:
         RuntimeError: MOUNT target has not been mounted into the container.
-        v2.launcher.errors.InfraFailure: CHECKOUT fetch/build failed after
+        test_suite.launcher.errors.InfraFailure: CHECKOUT fetch/build failed after
             retries.
-        v2.launcher.errors.PermanentError: CHECKOUT SHA does not exist on
+        test_suite.launcher.errors.PermanentError: CHECKOUT SHA does not exist on
             the remote.
     """
     if spec.kind is Kind.MOUNT:
@@ -69,10 +69,19 @@ def spawn(
     grpc_port: int,
     *,
     log_dir: Path | None = None,
+    log_name: str | None = None,
 ) -> subprocess.Popen:
-    """Resolve ``spec`` then spawn its agent."""
+    """Resolve ``spec`` then spawn its agent.
+
+    Uses :func:`test_suite.current.spawn_from_dir` so this new path and the
+    legacy ``current.spawn_agent`` share one polyglot implementation — no
+    drift possible between the two entry points.
+    """
     agent_dir = resolve(spec)
-    return _spawn_mod.spawn_from_dir(agent_dir, http_port, grpc_port, log_dir=log_dir)
+    return _current.spawn_from_dir(
+        agent_dir, http_port, grpc_port,
+        log_dir=log_dir, log_name=log_name,
+    )
 
 
 class LaunchSession(contextlib.AbstractContextManager):
@@ -113,7 +122,7 @@ class LaunchSession(contextlib.AbstractContextManager):
         log_name: str | None = None,
     ) -> subprocess.Popen:
         agent_dir = self.resolve(spec)
-        proc = _spawn_mod.spawn_from_dir(
+        proc = _current.spawn_from_dir(
             agent_dir, http_port, grpc_port,
             log_dir=log_dir, log_name=log_name,
         )

@@ -122,7 +122,7 @@ class TargetSpec:
     # -- convenience ---------------------------------------------------------
 
     def cache_slug(self) -> str:
-        """Filesystem-safe slug for :mod:`v2.launcher.cache` keys.
+        """Filesystem-safe slug for :mod:`test_suite.launcher.cache` keys.
 
         Only meaningful for :attr:`Kind.CHECKOUT`. Callers must check the kind.
         """

@@ -6,7 +6,7 @@ locking down: (a) detection precedence matches :mod:`.spawn`, and (b) the
 exact commands and lockfile flags.
 
 These tests pass ``skip_codegen=True`` to isolate the SDK-build step from
-the codegen preparer (that lives in :mod:`v2.launcher.codegen` and has its
+the codegen preparer (that lives in :mod:`test_suite.launcher.codegen` and has its
 own test module). The end-to-end order (codegen ↔ build) is tested in
 :class:`TestCodegenOrdering` at the bottom of this file.
 """
@@ -19,9 +19,9 @@ from typing import Any
 
 import pytest
 
-from v2.launcher import builders
-from v2.launcher.builders import Language, detect_language
-from v2.launcher.errors import InfraFailure, Stage
+from test_suite.launcher import builders
+from test_suite.launcher.builders import Language, detect_language
+from test_suite.launcher.errors import InfraFailure, Stage
 
 
 class _Recorder:

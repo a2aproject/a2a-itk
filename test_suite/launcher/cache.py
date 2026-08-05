@@ -1,6 +1,6 @@
 """Checkout + build cache — the concurrency-safe core of the launcher.
 
-Layout under :func:`v2.launcher.config.cache_root`::
+Layout under :func:`test_suite.launcher.config.cache_root`::
 
     trees/<key>/            the fetched + built agent tree
     trees/<key>/.itk-built  sentinel: fully-built and safe to reuse
@@ -35,8 +35,8 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from v2.launcher import builders, config, fetch
-from v2.launcher.errors import InfraFailure, LauncherError, Stage
+from test_suite.launcher import builders, config, fetch
+from test_suite.launcher.errors import InfraFailure, LauncherError, Stage
 
 
 _SENTINEL = '.itk-built'
@@ -250,7 +250,7 @@ def checkout_and_build(
         _fetcher, _builder: Injection seams for tests. Callers should not set.
 
     The tree is pinned for the caller. Release the pin with :func:`release`
-    (or use :class:`v2.launcher.resolve.LaunchSession`) when done.
+    (or use :class:`test_suite.launcher.resolve.LaunchSession`) when done.
     """
     _ensure_layout()
     key = cache_key(repo, sha)
@@ -391,10 +391,10 @@ def evict() -> list[str]:
 
 
 def _cli() -> int:
-    """``python -m v2.launcher.cache evict`` — for scheduled CI hooks."""
+    """``python -m test_suite.launcher.cache evict`` — for scheduled CI hooks."""
     import sys
     if len(sys.argv) < 2 or sys.argv[1] != 'evict':
-        print('usage: python -m v2.launcher.cache evict', file=sys.stderr)
+        print('usage: python -m test_suite.launcher.cache evict', file=sys.stderr)
         return 2
     evicted = evict()
     for key in evicted:

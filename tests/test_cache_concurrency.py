@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from v2.launcher import cache
+from test_suite.launcher import cache
 
 
 _REPO = 'a2aproject/a2a-python'

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from v2.launcher.spec import Kind, TargetSpec
+from test_suite.launcher.spec import Kind, TargetSpec
 
 
 _VALID_SHA = 'abcdef0123456789abcdef0123456789abcdef01'

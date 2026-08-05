@@ -3,6 +3,10 @@
 Concurrent peers commonly root at ``itk/`` (every SDK repo puts the agent there),
 so ``agent_<basename>.log`` would collapse them all into one file. The default
 naming appends an 8-hex hash of the full ``agent_dir`` path.
+
+Under test: :func:`test_suite.current.spawn_from_dir`, which the launcher's
+:func:`test_suite.launcher.resolve.spawn` delegates to. One implementation,
+one set of log-naming semantics.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from v2.launcher import spawn
+from test_suite import current as spawn
 
 
 class _NoOpPopen:

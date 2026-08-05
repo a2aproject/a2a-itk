@@ -55,7 +55,7 @@ def default_itk_source() -> Path:
 
 
 def _repo_root() -> Path:
-    """Return the a2a-itk root — mirrors :func:`v2.launcher.config._repo_root`."""
+    """Return the a2a-itk root — mirrors :func:`test_suite.launcher.config._repo_root`."""
     return Path(__file__).resolve().parents[2]
 
 

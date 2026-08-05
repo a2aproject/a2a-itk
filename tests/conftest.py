@@ -28,8 +28,8 @@ def cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]
 
 @pytest.fixture
 def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Neuter :func:`v2.launcher.fetch._sleep_backoff` so retry tests are fast."""
-    from v2.launcher import fetch
+    """Neuter :func:`test_suite.launcher.fetch._sleep_backoff` so retry tests are fast."""
+    from test_suite.launcher import fetch
     monkeypatch.setattr(fetch, '_sleep_backoff', lambda _attempt: None)
 
 

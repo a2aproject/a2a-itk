@@ -129,8 +129,8 @@ def image_digest() -> str:
 
 
 def _repo_root() -> Path:
-    """Locate a2a-itk's root without importing test_suite.
+    """Locate a2a-itk's root.
 
-    ``v2/launcher/config.py`` -> parents[2] is the repo root.
+    ``test_suite/launcher/config.py`` -> parents[2] is the repo root.
     """
     return Path(__file__).resolve().parents[2]

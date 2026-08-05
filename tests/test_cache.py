@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from v2.launcher import cache
-from v2.launcher.errors import InfraFailure, PermanentError, Stage
+from test_suite.launcher import cache
+from test_suite.launcher.errors import InfraFailure, PermanentError, Stage
 
 
 _SHA_A = 'a' * 40

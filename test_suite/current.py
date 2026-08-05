@@ -1,165 +1,295 @@
+"""Launcher for the mounted 'current' agent (SUT).
+
+Exposes two entry points:
+
+  * :func:`spawn_agent` — the legacy per-SDK entry the test-suite registry
+    calls (``test_suite.get_agent_launcher('current')``). Preserves the
+    ``ITK_LOG_LEVEL=DEBUG`` behaviour that opens a debug log at
+    ``logs/agent_current.log``.
+
+  * :func:`spawn_from_dir` — the polyglot body, parameterised on an
+    ``agent_dir``. Used by :mod:`test_suite.launcher.resolve` for both the
+    ``MOUNT`` (this file's traditional target) and ``CHECKOUT`` kinds so
+    every path through the launcher shares one spawn implementation.
+"""
+
+from __future__ import annotations
+
+import hashlib
 import os
 import subprocess
-
+from collections.abc import Callable
 from pathlib import Path
 
 
 _ROOT_DIR = Path(__file__).parent.parent
+_MOUNT_DIR = _ROOT_DIR / 'agents' / 'repo' / 'itk'
+
+
+# ---------------------------------------------------------------------------
+# Legacy entry point
+# ---------------------------------------------------------------------------
 
 
 def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
-    """Spawns the 'current' agent process by detecting its type.
-
-    Args:
-        http_port: The port for the HTTP/JSON-RPC interface.
-        grpc_port: The port for the gRPC interface.
-
-    Returns:
-        subprocess.Popen: The spawned process object.
+    """Spawn the current (mounted) agent process.
 
     Raises:
-        RuntimeError: If the 'current' agent directory is not found or type cannot be determined.
+        RuntimeError: The 'current' agent directory hasn't been mounted, or
+            its language can't be determined.
     """
-    current_dir = _ROOT_DIR / 'agents' / 'repo' / 'itk'
-    if not current_dir.exists():
+    if not _MOUNT_DIR.exists():
         raise RuntimeError(
             'current agent has not been mounted and is not available to test'
         )
+    return spawn_from_dir(
+        _MOUNT_DIR, http_port, grpc_port,
+        log_dir=_legacy_log_dir(),
+        # Preserve the historical filename so anyone tailing logs/agent_current.log
+        # in dev mode isn't surprised.
+        log_name='agent_current',
+    )
 
-    log_level = os.environ.get('ITK_LOG_LEVEL', 'INFO')
-    is_debug = log_level.upper() == 'DEBUG'
 
-    if is_debug:
-        logs_dir = _ROOT_DIR / 'logs'
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        stdout_file = open(logs_dir / 'agent_current.log', 'w')  # noqa: WPS515
+def _legacy_log_dir() -> Path | None:
+    """Preserve pre-launcher behaviour: ``ITK_LOG_LEVEL=DEBUG`` opens logs."""
+    if os.environ.get('ITK_LOG_LEVEL', 'INFO').upper() != 'DEBUG':
+        return None
+    return _ROOT_DIR / 'logs'
 
-    def popen_with_logs(args, cwd, stdout_override=None):
-        if is_debug:
-            p = subprocess.Popen(  # noqa: S603
-                args,
-                cwd=cwd,
-                stdout=stdout_file,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            p._log_file = stdout_file  # noqa: SLF001
-            return p
-        else:
-            kwargs = {
-                'cwd': cwd,
-                'stdout': subprocess.DEVNULL,
-                'stderr': subprocess.DEVNULL,
-                'text': True,
-            }
-            if stdout_override:
-                kwargs['stdout'] = stdout_override
-            return subprocess.Popen(args, **kwargs)  # noqa: S603
 
-    if (current_dir / 'main.go').exists():
-        # Go agent. `-mod=readonly` builds strictly from the committed
-        # go.mod/go.sum and fails if they are stale, rather than updating them.
-        args = [  # noqa: S607
-            'go',
-            'run',
-            '-mod=readonly',
-            'main.go',
-            '--httpPort',
-            str(http_port),
-            '--grpcPort',
-            str(grpc_port),
-        ]
-        return popen_with_logs(
-            args, current_dir
-        )
+# ---------------------------------------------------------------------------
+# Polyglot spawn body — the launcher's shared implementation
+# ---------------------------------------------------------------------------
 
-    if (current_dir / 'main.py').exists():
-        # Python agent. `--locked` resolves strictly from the committed uv.lock
-        # and fails if it is stale, rather than silently re-resolving.
-        args = [  # noqa: S607
-            'uv',
-            'run',
-            '--locked',
-            'main.py',
-            '--httpPort',
-            str(http_port),
-            '--grpcPort',
-            str(grpc_port),
-        ]
-        return popen_with_logs(args, current_dir)
 
-    if (current_dir.parent / 'package.json').exists():
-        # JS/TS agent
-        args = [  # noqa: S607
-            'npm',
-            'run',
-            'itk-agent',
-            '--',
-            '--httpPort',
-            str(http_port),
-            '--grpcPort',
-            str(grpc_port),
-        ]
-        return popen_with_logs(args, current_dir)
+def spawn_from_dir(
+    agent_dir: Path,
+    http_port: int,
+    grpc_port: int,
+    *,
+    log_dir: Path | None = None,
+    log_name: str | None = None,
+) -> subprocess.Popen:
+    """Detect the agent's language and spawn it.
 
-    csproj_files = list(current_dir.glob('*.csproj'))
-    if csproj_files:
-        # Check local or system dotnet
-        args = [  # noqa: S607
-            'dotnet',
-            'run',
-            '--project',
-            str(csproj_files[0]),
-            '--',
-            '--httpPort',
-            str(http_port),
-            '--grpcPort',
-            str(grpc_port),
-        ]
-        return popen_with_logs(args, current_dir)
+    Args:
+        agent_dir: The directory that contains the agent's entrypoint
+            (``main.py``, ``main.go``, ``Cargo.toml``, ...).
+        http_port: JSON-RPC / HTTP port.
+        grpc_port: gRPC port.
+        log_dir: If set, agent stdout+stderr are appended to
+            ``<log_dir>/<log_name>.log``. If unset, they are discarded.
+        log_name: Basename for the log file. Defaults to
+            ``agent_<agent_dir_name>_<8-hex-hash-of-full-path>`` — the hash
+            prevents interleaving when several peers share a ``log_dir`` and
+            all happen to root at ``itk/`` (which every SDK repo does).
+            Callers that own naming (e.g. the runner) should pass an explicit
+            name like ``agent_python_v10`` for readability.
 
-    if (current_dir / 'pom.xml').exists():
-        # Synchronously build and install 'itk' sibling SDK dependencies to the local maven repo.
-        compile_args = ['mvn', '-Pitk', '-pl', 'itk', '-am', 'install', '-DskipTests', '-Dmaven.javadoc.skip=true']  # noqa: S607
-        subprocess.run(compile_args, cwd=current_dir.parent, check=True)
+    Returns:
+        The spawned ``subprocess.Popen``. If ``log_dir`` was set, the Popen
+        carries a ``_log_file`` attribute — the caller (usually
+        :class:`test_suite.launcher.resolve.LaunchSession`) is responsible
+        for closing it on teardown.
 
-        # Asynchronously spawn the 'itk' mock agent directly within its module directory
-        args = [  # noqa: S607
-            'mvn',
-            'exec:java',
-            '-Dexec.mainClass=org.a2aproject.sdk.itk.Main',
-            f'-Dexec.args=--httpPort {http_port} --grpcPort {grpc_port}',
-        ]
-        return popen_with_logs(args, current_dir)
+    Raises:
+        RuntimeError: The directory does not contain a recognised agent
+            entrypoint, or a required lazy build failed.
+    """
+    if not agent_dir.exists():
+        raise RuntimeError(f'agent dir does not exist: {agent_dir}')
 
-    if (current_dir / 'Cargo.toml').exists():
-        # Rust agent: build release binary then run it
-        binary = current_dir / 'target' / 'release' / 'itk-current-agent'
-        candidates = list((current_dir / 'target' / 'release').glob('itk-*')) if (current_dir / 'target' / 'release').exists() else []
-        if not binary.exists() and candidates:
-            binary = candidates[0]
-        if not binary.exists():
-            # `--locked` builds strictly from the committed Cargo.lock and fails
-            # if it is stale, rather than silently updating it.
-            subprocess.run(  # noqa: S603
-                ['cargo', 'build', '--locked', '--release'],  # noqa: S607
-                cwd=current_dir,
-                check=True,
-            )
-            built = list((current_dir / 'target' / 'release').glob('itk-*'))
-            if not built:
-                raise RuntimeError(f'cargo build succeeded but no itk-* binary found in {current_dir / "target/release"}')
-            binary = built[0]
-        args = [  # noqa: S607
-            str(binary),
-            '--httpPort',
-            str(http_port),
-            '--grpcPort',
-            str(grpc_port),
-        ]
-        return popen_with_logs(args, current_dir)
+    popen = _popen_factory(agent_dir, log_dir, log_name)
+
+    if (agent_dir / 'main.go').exists():
+        return _spawn_go(agent_dir, http_port, grpc_port, popen)
+
+    if (agent_dir / 'main.py').exists():
+        return _spawn_python(agent_dir, http_port, grpc_port, popen)
+
+    if (agent_dir.parent / 'package.json').exists():
+        return _spawn_ts(agent_dir, http_port, grpc_port, popen)
+
+    csproj = list(agent_dir.glob('*.csproj'))
+    if csproj:
+        return _spawn_dotnet(agent_dir, csproj[0], http_port, grpc_port, popen)
+
+    if (agent_dir / 'pom.xml').exists():
+        return _spawn_java(agent_dir, http_port, grpc_port, popen)
+
+    if (agent_dir / 'Cargo.toml').exists():
+        return _spawn_rust(agent_dir, http_port, grpc_port, popen)
 
     raise RuntimeError(
-        f'Could not determine agent type in {current_dir}. '
-        'Neither main.go, main.py, package.json, .csproj, pom.xml nor Cargo.toml found.'
+        f'could not determine agent type in {agent_dir}. '
+        f'Expected main.go, main.py, ../package.json, *.csproj, pom.xml, or Cargo.toml.'
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-language spawn implementations
+# ---------------------------------------------------------------------------
+
+
+_PopenFactory = Callable[[list[str], Path], subprocess.Popen]
+
+
+def _spawn_go(
+    agent_dir: Path, http_port: int, grpc_port: int, popen: _PopenFactory,
+) -> subprocess.Popen:
+    # -mod=readonly: never mutate go.mod/go.sum; fail loudly on drift.
+    args = [  # noqa: S607
+        'go', 'run', '-mod=readonly', 'main.go',
+        '--httpPort', str(http_port),
+        '--grpcPort', str(grpc_port),
+    ]
+    return popen(args, agent_dir)
+
+
+def _spawn_python(
+    agent_dir: Path, http_port: int, grpc_port: int, popen: _PopenFactory,
+) -> subprocess.Popen:
+    # --locked: never re-resolve; fail if uv.lock is stale.
+    args = [  # noqa: S607
+        'uv', 'run', '--locked', 'main.py',
+        '--httpPort', str(http_port),
+        '--grpcPort', str(grpc_port),
+    ]
+    return popen(args, agent_dir)
+
+
+def _spawn_ts(
+    agent_dir: Path, http_port: int, grpc_port: int, popen: _PopenFactory,
+) -> subprocess.Popen:
+    # TS agents live one level deep under a repo whose root has package.json.
+    # ``npm run itk-agent`` is the convention every SDK repo exposes.
+    args = [  # noqa: S607
+        'npm', 'run', 'itk-agent', '--',
+        '--httpPort', str(http_port),
+        '--grpcPort', str(grpc_port),
+    ]
+    return popen(args, agent_dir)
+
+
+def _spawn_dotnet(
+    agent_dir: Path,
+    csproj: Path,
+    http_port: int,
+    grpc_port: int,
+    popen: _PopenFactory,
+) -> subprocess.Popen:
+    args = [  # noqa: S607
+        'dotnet', 'run', '--project', str(csproj), '--',
+        '--httpPort', str(http_port),
+        '--grpcPort', str(grpc_port),
+    ]
+    return popen(args, agent_dir)
+
+
+def _spawn_java(
+    agent_dir: Path, http_port: int, grpc_port: int, popen: _PopenFactory,
+) -> subprocess.Popen:
+    # The java itk agent is a Maven submodule; the parent pom needs -Pitk to
+    # include it. Synchronously install SDK sibling deps into the local repo,
+    # then exec the mock main class from inside the module directory.
+    compile_args = [  # noqa: S607
+        'mvn', '-Pitk', '-pl', 'itk', '-am', 'install',
+        '-DskipTests', '-Dmaven.javadoc.skip=true',
+    ]
+    subprocess.run(compile_args, cwd=str(agent_dir.parent), check=True)  # noqa: S603
+
+    args = [  # noqa: S607
+        'mvn', 'exec:java',
+        '-Dexec.mainClass=org.a2aproject.sdk.itk.Main',
+        f'-Dexec.args=--httpPort {http_port} --grpcPort {grpc_port}',
+    ]
+    return popen(args, agent_dir)
+
+
+def _spawn_rust(
+    agent_dir: Path, http_port: int, grpc_port: int, popen: _PopenFactory,
+) -> subprocess.Popen:
+    release_dir = agent_dir / 'target' / 'release'
+    binary = _find_rust_binary(release_dir)
+    if binary is None:
+        # Lazy build for MOUNT/LOCAL. CHECKOUT trees already contain the
+        # binary because the launcher's builder built them under the cache lock.
+        subprocess.run(  # noqa: S603
+            ['cargo', 'build', '--locked', '--release'],  # noqa: S607
+            cwd=str(agent_dir),
+            check=True,
+        )
+        binary = _find_rust_binary(release_dir)
+        if binary is None:
+            raise RuntimeError(
+                f'cargo build succeeded but no itk-* binary found in {release_dir}'
+            )
+    args = [  # noqa: S607
+        str(binary),
+        '--httpPort', str(http_port),
+        '--grpcPort', str(grpc_port),
+    ]
+    return popen(args, agent_dir)
+
+
+def _find_rust_binary(release_dir: Path) -> Path | None:
+    if not release_dir.exists():
+        return None
+    canonical = release_dir / 'itk-current-agent'
+    if canonical.exists():
+        return canonical
+    for candidate in sorted(release_dir.glob('itk-*')):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+# ---------------------------------------------------------------------------
+# subprocess.Popen factory (with optional log-file redirection)
+# ---------------------------------------------------------------------------
+
+
+def _default_log_name(agent_dir: Path) -> str:
+    """Hash-suffixed default so concurrent peers don't collide on ``itk``."""
+    tag = hashlib.sha1(str(agent_dir).encode('utf-8')).hexdigest()[:8]  # noqa: S324
+    return f'agent_{agent_dir.name}_{tag}'
+
+
+def _popen_factory(
+    agent_dir: Path,
+    log_dir: Path | None,
+    log_name: str | None = None,
+) -> _PopenFactory:
+    """Return a ``popen(args, cwd)`` callable that respects the log setting."""
+    if log_dir is None:
+        def popen(args: list[str], cwd: Path) -> subprocess.Popen:
+            return subprocess.Popen(  # noqa: S603
+                args,
+                cwd=str(cwd),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        return popen
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    name = log_name or _default_log_name(agent_dir)
+    log_path = log_dir / f'{name}.log'
+    log_handle = open(log_path, 'a', encoding='utf-8')  # noqa: SIM115
+
+    def popen(args: list[str], cwd: Path) -> subprocess.Popen:
+        p = subprocess.Popen(  # noqa: S603
+            args,
+            cwd=str(cwd),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        # Stash so LaunchSession.__exit__ can close the handle on teardown.
+        # Direct callers of spawn_from_dir are responsible for closing it
+        # themselves — see the spawn_from_dir docstring.
+        p._log_file = log_handle  # noqa: SLF001
+        return p
+
+    return popen

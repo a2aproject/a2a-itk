@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from v2.launcher import cache, resolve
-from v2.launcher.spec import Kind, TargetSpec
+from test_suite.launcher import cache, resolve
+from test_suite.launcher.spec import Kind, TargetSpec
 
 
 _SHA = 'a' * 40
@@ -133,7 +133,7 @@ class TestLaunchSessionLogHandles:
         return FakeProc()
 
     def test_closes_all_log_handles_on_exit(self, tmp_path, monkeypatch):
-        from v2.launcher import spawn as spawn_mod
+        from test_suite import current as spawn_mod
 
         # Two "spawns" — each gets its own StringIO-like open file.
         opened: list = []
@@ -161,7 +161,7 @@ class TestLaunchSessionLogHandles:
         assert all(f.closed for f in opened), 'LaunchSession must close every log handle'
 
     def test_closes_log_handles_even_on_exception(self, tmp_path, monkeypatch):
-        from v2.launcher import spawn as spawn_mod
+        from test_suite import current as spawn_mod
         opened: list = []
 
         def fake_spawn_from_dir(agent_dir, http, grpc, *, log_dir=None, log_name=None):  # noqa: ARG001
@@ -188,7 +188,7 @@ class TestLaunchSessionLogHandles:
     def test_no_log_dir_leaves_no_log_file_attr(self, tmp_path, monkeypatch):
         # When log_dir is None, spawn should not attach ._log_file. Exit path
         # must not choke on its absence.
-        from v2.launcher import spawn as spawn_mod
+        from test_suite import current as spawn_mod
         def fake(agent_dir, http, grpc, *, log_dir=None, log_name=None):  # noqa: ARG001
             class FakeProc:  # no _log_file attribute
                 pass
