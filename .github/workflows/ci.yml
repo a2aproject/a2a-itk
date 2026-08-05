@@ -44,7 +44,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Lint (ruff)
-        run: uv run ruff check --isolated v2/
+        run: uv run ruff check --isolated test_suite/launcher tests scripts
 
       - name: Run tests
         run: uv run pytest --tb=short
