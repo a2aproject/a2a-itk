@@ -30,14 +30,6 @@ class TestResolve:
         with pytest.raises(RuntimeError, match='not been mounted'):
             resolve.resolve(TargetSpec(kind=Kind.MOUNT))
 
-    def test_local_composes_path(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(resolve, '_repo_root', lambda: tmp_path)
-        spec = TargetSpec(kind=Kind.LOCAL, sdk='python', line='v10')
-        got = resolve.resolve(spec)
-        assert got == tmp_path / 'agents' / 'python' / 'v10'
-        # LOCAL does NOT check existence — it is a degenerate ref that may be
-        # deleted between plan and resolve.
-
     def test_checkout_delegates_to_cache(self, monkeypatch):
         called = {}
 
@@ -48,7 +40,6 @@ class TestResolve:
         monkeypatch.setattr(cache, 'checkout_and_build', fake)
         spec = TargetSpec(
             kind=Kind.CHECKOUT,
-            sdk='python',
             repo='a2aproject/a2a-python',
             sha=_SHA,
         )
@@ -65,7 +56,7 @@ class TestLaunchSession:
         monkeypatch.setattr(cache, 'release',
                             lambda repo, sha: released.append((repo, sha)))
         spec = TargetSpec(
-            kind=Kind.CHECKOUT, sdk='python',
+            kind=Kind.CHECKOUT,
             repo='a2aproject/a2a-python', sha=_SHA,
         )
         with resolve.LaunchSession() as sess:
@@ -79,7 +70,7 @@ class TestLaunchSession:
         monkeypatch.setattr(cache, 'release',
                             lambda repo, sha: released.append((repo, sha)))
         spec = TargetSpec(
-            kind=Kind.CHECKOUT, sdk='python',
+            kind=Kind.CHECKOUT,
             repo='a2aproject/a2a-python', sha=_SHA,
         )
         with pytest.raises(RuntimeError, match='deliberate'):
@@ -88,7 +79,7 @@ class TestLaunchSession:
                 raise RuntimeError('deliberate')
         assert released == [('a2aproject/a2a-python', _SHA)]
 
-    def test_mount_and_local_do_not_pin(self, tmp_path, monkeypatch):
+    def test_mount_does_not_pin(self, tmp_path, monkeypatch):
         released: list[tuple[str, str]] = []
         monkeypatch.setattr(cache, 'release',
                             lambda repo, sha: released.append((repo, sha)))
@@ -97,8 +88,7 @@ class TestLaunchSession:
 
         with resolve.LaunchSession() as sess:
             sess.resolve(TargetSpec(kind=Kind.MOUNT))
-            sess.resolve(TargetSpec(kind=Kind.LOCAL, sdk='python', line='v10'))
-        assert released == [], 'MOUNT/LOCAL must not create cache pins'
+        assert released == [], 'MOUNT must not create cache pins'
 
     def test_multiple_checkouts_all_released(self, monkeypatch):
         released: list[tuple[str, str]] = []
@@ -107,9 +97,9 @@ class TestLaunchSession:
         monkeypatch.setattr(cache, 'release',
                             lambda repo, sha: released.append((repo, sha)))
         specs = [
-            TargetSpec(kind=Kind.CHECKOUT, sdk='python',
+            TargetSpec(kind=Kind.CHECKOUT,
                        repo='a2aproject/a2a-python', sha='a' * 40),
-            TargetSpec(kind=Kind.CHECKOUT, sdk='go',
+            TargetSpec(kind=Kind.CHECKOUT,
                        repo='a2aproject/a2a-go', sha='b' * 40),
         ]
         with resolve.LaunchSession() as sess:

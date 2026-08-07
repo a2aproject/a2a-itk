@@ -22,11 +22,15 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import datetime
 import enum
 import json
 import logging
+import os
 import pathlib
 import sys
+import urllib.error
+import urllib.request
 
 
 # -----------------------------------------------------------------------------
@@ -397,6 +401,103 @@ def _load_raw(path: pathlib.Path) -> dict[str, Outcome]:
     return raw_to_outcomes(json.loads(pathlib.Path(path).read_text()))
 
 
+# -----------------------------------------------------------------------------
+# Rolling-history support — mirrors process_results.py's --history_url /
+# --history_output_file pattern so shadow classification history publishes
+# to a GitHub release asset with the same lifecycle as the nightly metrics
+# it lives alongside.
+#
+# Duplicated (not imported) from process_results.py on purpose: keeps the
+# two scripts independent so a refactor of one can't silently break the
+# other. If the pair ever grows a third consumer, extract then.
+# -----------------------------------------------------------------------------
+
+HTTP_STATUS_OK = 200
+HTTP_STATUS_NOT_FOUND = 404
+DEFAULT_HISTORY_LIMIT = 50
+
+
+def fetch_existing_history(url: str) -> list:
+    """Fetch the previous shadow history from a GitHub release asset.
+
+      * HTTP 200 → parse and return the list.
+      * HTTP 404 → asset missing, return an empty list (fresh history).
+      * Any other HTTP / network error → ``SystemExit(1)`` — preserving
+        the previous metrics beats clobbering them with a partial run.
+    """
+    try:
+        req = urllib.request.Request(  # noqa: S310
+            url, headers={'User-Agent': 'Mozilla/5.0'}
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:  # noqa: S310
+            # HTTP → non-2xx raises HTTPError before we get here, so any
+            # response object we see is a 2xx OR a non-HTTP scheme
+            # (file:// local-bootstrap used by the shadow simulator; that
+            # response has .status=None because status codes are HTTP-only).
+            status = getattr(response, 'status', None)
+            if status in (HTTP_STATUS_OK, None):
+                history = json.loads(response.read().decode('utf-8'))
+                logger.info(
+                    'Successfully retrieved shadow history. Current entries: %d',
+                    len(history),
+                )
+                return history
+            logger.error(
+                'Unexpected HTTP status when downloading shadow history: %d',
+                status,
+            )
+            raise SystemExit(1)  # noqa: TRY301
+    except urllib.error.HTTPError as e:
+        if e.code == HTTP_STATUS_NOT_FOUND:
+            logger.warning(
+                'No existing shadow history found (HTTP %d). Initializing fresh history.',
+                e.code,
+            )
+            return []
+        logger.exception(
+            'HTTP error downloading shadow history: %d. Aborting to preserve metrics.',
+            e.code,
+        )
+        raise SystemExit(1) from None
+    except Exception:
+        logger.exception(
+            'Failed to download shadow history. Aborting to preserve metrics.'
+        )
+        raise SystemExit(1) from None
+
+
+def save_history(filepath: str, history: list) -> None:
+    """Write the rolling shadow history back to disk as a release candidate."""
+    path = pathlib.Path(filepath)
+    try:
+        with path.open('w') as f:
+            json.dump(history, f, indent=2)
+        logger.info(
+            'Wrote shadow history to: %s (%d entries)', filepath, len(history)
+        )
+    except (OSError, TypeError):
+        logger.exception('Error writing shadow history file')
+        sys.exit(1)
+
+
+def _build_run_record(report: RunReport) -> dict:
+    """Wrap a classification report with per-run metadata for the history file.
+
+    ``commit_sha`` / ``github_run_id`` come from the SDK repo's CI env (same
+    as ``process_results.py``); ``a2a_itk_sha`` is new to the shadow —
+    matrix.yaml changes here affect peer resolution, so pinning the
+    a2a-itk revision makes cross-day divergences diagnosable.
+    """
+    record = _report_to_dict(report)
+    record['timestamp'] = (
+        datetime.datetime.now(datetime.timezone.utc).isoformat()
+    )
+    record['commit_sha'] = os.environ.get('GITHUB_SHA', 'local-dev')
+    record['github_run_id'] = os.environ.get('GITHUB_RUN_ID', '0')
+    record['a2a_itk_sha'] = os.environ.get('A2A_ITK_SHA', 'unset')
+    return record
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -420,6 +521,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=pathlib.Path,
         default=None,
         help='Optional path to write the JSON report for CI artifact upload.',
+    )
+    # Rolling-history flags — same pattern as scripts/process_results.py so
+    # both nightly-metrics and shadow-metrics publish through GHA release
+    # assets the same way.
+    parser.add_argument(
+        '--history_url',
+        default=None,
+        help=(
+            'URL to fetch the previous shadow-history JSON (release asset). '
+            'If omitted, --history_output_file (if set) starts fresh from empty.'
+        ),
+    )
+    parser.add_argument(
+        '--history_output_file',
+        default=None,
+        help=(
+            'Path to write the appended shadow-history JSON. If set, the '
+            'current report is wrapped with (timestamp, commit_sha, '
+            'github_run_id, a2a_itk_sha) and appended to the fetched '
+            'history, pruned to ITK_HISTORY_LIMIT (default '
+            f'{DEFAULT_HISTORY_LIMIT}), and written here.'
+        ),
     )
     return parser
 
@@ -485,6 +608,23 @@ def main(argv: list[str] | None = None) -> int:
         args.report_file.write_text(
             json.dumps(_report_to_dict(report), indent=2, sort_keys=True)
         )
+
+    # Rolling history: append the current run and prune. Fetches from
+    # --history_url if given, else starts from an empty list.
+    if args.history_output_file is not None:
+        history = (
+            fetch_existing_history(args.history_url)
+            if args.history_url is not None
+            else []
+        )
+        history.append(_build_run_record(report))
+        history_limit = int(
+            os.environ.get('ITK_HISTORY_LIMIT', str(DEFAULT_HISTORY_LIMIT))
+        )
+        if len(history) > history_limit:
+            history = history[-history_limit:]
+            logger.info('Pruned shadow history to last %d entries.', history_limit)
+        save_history(args.history_output_file, history)
 
     return 0 if report.is_clean else 1
 

@@ -68,6 +68,24 @@ def tree_ttl() -> int:
     return _env_int('ITK_TREE_TTL', 7 * 24 * 60 * 60)  # 7 days
 
 
+def readiness_timeout() -> int:
+    """Max seconds to wait for an agent's ``/.well-known/agent-card.json``.
+
+    Default matches ``testlib._check_agent_ready`` (35s) so behaviour is
+    identical to the legacy pipeline.
+    """
+    return _env_int('ITK_READINESS_TIMEOUT', 35)
+
+
+def teardown_grace() -> int:
+    """Seconds between SIGTERM and SIGKILL when tearing down an agent.
+
+    Agents that ignore SIGTERM (rare, but happens with some JVM/Node
+    combinations) get SIGKILL after this grace period.
+    """
+    return _env_int('ITK_TEARDOWN_GRACE', 10)
+
+
 # ---------------------------------------------------------------------------
 # Cache root
 # ---------------------------------------------------------------------------

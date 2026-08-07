@@ -599,6 +599,233 @@ class TestCLI:
 # -----------------------------------------------------------------------------
 
 
+class TestRollingHistory:
+    """Rolling-history mode: --history_url + --history_output_file.
+
+    Mirrors the pattern process_results.py uses so shadow classification
+    history publishes through the same GHA release asset lifecycle as the
+    nightly metrics it lives alongside.
+    """
+
+    def _write_scenarios(self, path: pathlib.Path, names: list[str]) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    'tests': [
+                        {'name': n, 'sdks': ['current'], 'behavior': 'send_message', 'expected': 'pass'}
+                        for n in names
+                    ]
+                }
+            )
+        )
+
+    def _write_raw(self, path: pathlib.Path, outcomes: dict[str, bool]) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    'all_passed': all(outcomes.values()),
+                    'results': {n: {'passed': p, 'sdks': ['current']} for n, p in outcomes.items()},
+                }
+            )
+        )
+
+    def _run_with_history(
+        self,
+        tmp_path: pathlib.Path,
+        history_url: str | None,
+        history_output_file: pathlib.Path,
+        *,
+        monkeypatch,
+        env: dict[str, str] | None = None,
+    ) -> int:
+        scenarios = tmp_path / 'scenarios.json'
+        old = tmp_path / 'old.json'
+        new = tmp_path / 'new.json'
+        self._write_scenarios(scenarios, ['a', 'b'])
+        self._write_raw(old, {'a': True, 'b': True})
+        self._write_raw(new, {'a': True, 'b': True})
+
+        for k, v in (env or {}).items():
+            monkeypatch.setenv(k, v)
+
+        argv = [
+            '--sdk', 'ts',
+            '--line', 'v10',
+            '--scenarios', str(scenarios),
+            '--old', str(old),
+            '--new', str(new),
+            '--history_output_file', str(history_output_file),
+        ]
+        if history_url is not None:
+            argv += ['--history_url', history_url]
+        return cr.main(argv)
+
+    def test_new_history_file_when_no_url(self, tmp_path, monkeypatch):
+        """Without --history_url, a fresh history is started."""
+        out = tmp_path / 'shadow.json'
+        rc = self._run_with_history(
+            tmp_path, history_url=None, history_output_file=out,
+            monkeypatch=monkeypatch,
+        )
+        assert rc == 0
+        history = json.loads(out.read_text())
+        assert isinstance(history, list) and len(history) == 1
+        assert history[0]['is_clean'] is True
+        assert set(history[0]) >= {
+            'timestamp', 'commit_sha', 'github_run_id', 'a2a_itk_sha',
+            'sdk', 'line', 'is_clean', 'matches', 'real_failures',
+            'infra_failures', 'behavioral_divergences',
+            'suppressed_count', 'orphan_result_keys',
+        }
+
+    def test_metadata_from_env(self, tmp_path, monkeypatch):
+        """commit_sha / github_run_id / a2a_itk_sha are picked up from env,
+        matching process_results.py's convention for GHA."""
+        out = tmp_path / 'shadow.json'
+        self._run_with_history(
+            tmp_path, history_url=None, history_output_file=out,
+            monkeypatch=monkeypatch,
+            env={
+                'GITHUB_SHA': 'aaaaaaaaaaaa',
+                'GITHUB_RUN_ID': '12345',
+                'A2A_ITK_SHA': 'bbbbbbbbbbbb',
+            },
+        )
+        record = json.loads(out.read_text())[0]
+        assert record['commit_sha'] == 'aaaaaaaaaaaa'
+        assert record['github_run_id'] == '12345'
+        assert record['a2a_itk_sha'] == 'bbbbbbbbbbbb'
+
+    def test_default_metadata_when_env_absent(self, tmp_path, monkeypatch):
+        """When env vars aren't set (local dev), the record still has
+        legible placeholder values — not None or crash."""
+        out = tmp_path / 'shadow.json'
+        # Nuke the env vars in case they leak from the host / other tests.
+        for k in ('GITHUB_SHA', 'GITHUB_RUN_ID', 'A2A_ITK_SHA'):
+            monkeypatch.delenv(k, raising=False)
+        self._run_with_history(
+            tmp_path, history_url=None, history_output_file=out,
+            monkeypatch=monkeypatch,
+        )
+        record = json.loads(out.read_text())[0]
+        assert record['commit_sha'] == 'local-dev'
+        assert record['github_run_id'] == '0'
+        assert record['a2a_itk_sha'] == 'unset'
+
+    def test_timestamp_is_iso8601_utc(self, tmp_path, monkeypatch):
+        import datetime
+        out = tmp_path / 'shadow.json'
+        self._run_with_history(
+            tmp_path, history_url=None, history_output_file=out,
+            monkeypatch=monkeypatch,
+        )
+        ts = json.loads(out.read_text())[0]['timestamp']
+        # Parsable as ISO-8601 with tz — round-trips cleanly.
+        parsed = datetime.datetime.fromisoformat(ts)
+        assert parsed.tzinfo is not None
+
+    def test_appends_to_fetched_history(self, tmp_path, monkeypatch):
+        """--history_url pulls existing entries; new run is appended."""
+        # Pre-existing entries in the "fetched" release asset.
+        prior = [
+            {'timestamp': '2026-08-01T00:00:00+00:00', 'sdk': 'ts', 'line': 'v10',
+             'is_clean': True, 'commit_sha': 'old1', 'github_run_id': '1',
+             'a2a_itk_sha': 'aitk1', 'matches': [], 'real_failures': [],
+             'infra_failures': [], 'behavioral_divergences': [],
+             'suppressed_count': 0,
+             'orphan_result_keys': {'new': [], 'old': []}},
+            {'timestamp': '2026-08-02T00:00:00+00:00', 'sdk': 'ts', 'line': 'v10',
+             'is_clean': True, 'commit_sha': 'old2', 'github_run_id': '2',
+             'a2a_itk_sha': 'aitk2', 'matches': [], 'real_failures': [],
+             'infra_failures': [], 'behavioral_divergences': [],
+             'suppressed_count': 0,
+             'orphan_result_keys': {'new': [], 'old': []}},
+        ]
+
+        # Stub the URL fetch (no network in tests).
+        monkeypatch.setattr(cr, 'fetch_existing_history', lambda _url: prior[:])
+
+        out = tmp_path / 'shadow.json'
+        self._run_with_history(
+            tmp_path, history_url='https://example.com/shadow_ts.json',
+            history_output_file=out, monkeypatch=monkeypatch,
+        )
+        history = json.loads(out.read_text())
+        assert len(history) == 3, 'appended, not replaced'
+        # Order preserved — prior first, new last.
+        assert history[0]['commit_sha'] == 'old1'
+        assert history[1]['commit_sha'] == 'old2'
+        assert history[2]['is_clean'] is True
+
+    def test_prune_respects_ITK_HISTORY_LIMIT(self, tmp_path, monkeypatch):
+        """History is pruned to the last N entries (default 50, env-overridable)."""
+        # Pretend we already have 4 entries; limit=3 means final size is 3
+        # (2 old + 1 new = 3 after pruning drops the oldest).
+        prior = [
+            {'timestamp': f'2026-08-0{i}T00:00:00+00:00', 'sdk': 'ts', 'line': 'v10',
+             'is_clean': True, 'commit_sha': f'old{i}', 'github_run_id': str(i),
+             'a2a_itk_sha': f'aitk{i}', 'matches': [], 'real_failures': [],
+             'infra_failures': [], 'behavioral_divergences': [],
+             'suppressed_count': 0,
+             'orphan_result_keys': {'new': [], 'old': []}}
+            for i in range(1, 5)
+        ]
+        monkeypatch.setattr(cr, 'fetch_existing_history', lambda _url: prior[:])
+
+        out = tmp_path / 'shadow.json'
+        self._run_with_history(
+            tmp_path, history_url='https://example.com/shadow_ts.json',
+            history_output_file=out, monkeypatch=monkeypatch,
+            env={'ITK_HISTORY_LIMIT': '3'},
+        )
+        history = json.loads(out.read_text())
+        assert len(history) == 3, 'must prune to limit'
+        # Oldest entries evicted from the front.
+        assert history[0]['commit_sha'] == 'old3'
+        assert history[1]['commit_sha'] == 'old4'
+        # Newest (this run) at the tail.
+        assert history[2]['is_clean'] is True
+
+    def test_fetch_from_file_url(self, tmp_path):
+        """Regression: fetch_existing_history must accept file:// URLs.
+
+        The shadow simulator bootstraps consecutive local runs by pointing
+        --history_url at the previous run's output via file://. Before
+        the fix, urlopen returned a response with .status=None (only HTTP
+        responses set status), which fell through the OK check and errored
+        'Unexpected HTTP status: None'.
+        """
+        prior = [{'timestamp': '2026-08-01T00:00:00+00:00', 'is_clean': True}]
+        prior_file = tmp_path / 'prior.json'
+        prior_file.write_text(json.dumps(prior))
+        got = cr.fetch_existing_history(f'file://{prior_file}')
+        assert got == prior
+
+    def test_no_history_output_file_writes_nothing(self, tmp_path, monkeypatch):
+        """History mode is entirely optional — omitting --history_output_file
+        must not fetch anything or write anything."""
+        scenarios = tmp_path / 'scenarios.json'
+        old = tmp_path / 'old.json'
+        new = tmp_path / 'new.json'
+        self._write_scenarios(scenarios, ['a'])
+        self._write_raw(old, {'a': True})
+        self._write_raw(new, {'a': True})
+
+        # Fail loudly if fetch is called — it must not be.
+        def fail(_url):
+            raise AssertionError('fetch_existing_history must not be called without --history_output_file')
+        monkeypatch.setattr(cr, 'fetch_existing_history', fail)
+
+        rc = cr.main([
+            '--sdk', 'ts', '--line', 'v10',
+            '--scenarios', str(scenarios),
+            '--old', str(old), '--new', str(new),
+            # Even with --history_url, no output file → no fetch, no write.
+            '--history_url', 'https://example.com/never.json',
+        ])
+        assert rc == 0
+
+
 class TestPlumbingSelfComparison:
     """Same raw_results.json on both sides ⇒ zero divergence, zero infra."""
 

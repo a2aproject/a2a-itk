@@ -349,44 +349,74 @@ def _lru_keys() -> list[str]:
     return [k for _, k in entries]
 
 
+def _evict_lock_path() -> Path:
+    """Global evict lock — serialises evict() across processes.
+
+    Without this, two concurrent evict() calls each take a snapshot of the
+    total on-disk size, then both start reclaiming keys based on their own
+    (stale) view of the total — the classic over-eviction race. Held for
+    the whole evict() call so the total is a single consistent view.
+    """
+    return _root() / 'locks' / '_evict.lock'
+
+
 def evict() -> list[str]:
     """Reclaim unused cache slots if over budget or past TTL.
 
     Returns the list of evicted keys (useful for logging / testing). Safe to
-    call from anywhere; skips keys whose per-key lock is held by a live
-    builder, and keeps trees with any live pin.
+    call from anywhere concurrently; only one evict runs at a time (global
+    lock), it skips keys whose per-key lock is held by a live builder, and
+    it keeps trees with any live pin.
+
+    Best-effort: if another process is already evicting when we call, we
+    return an empty list rather than block. Whoever holds the lock will
+    reclaim what needs reclaiming.
     """
     _ensure_layout()
     evicted: list[str] = []
-    budget = config.disk_budget_bytes()
-    ttl = config.tree_ttl()
-    now = time.time()
-    trees_dir = _root() / 'trees'
-    total = sum(_tree_size(trees_dir / k) for k in _lru_keys())
 
-    for key in _lru_keys():
-        tree = _tree_path(key)
-        sentinel = tree / _SENTINEL
-        try:
-            age = now - sentinel.stat().st_mtime if sentinel.exists() else float('inf')
-        except OSError:
-            age = float('inf')
+    # Global evict lock — serialise across processes so `total` is not a
+    # stale snapshot when we decide whether to keep evicting.
+    with _flock(_evict_lock_path(), blocking=False) as got_global:
+        if not got_global:
+            return evicted
 
-        need_evict = (total > budget) or (age > ttl)
-        if not need_evict:
-            continue
+        budget = config.disk_budget_bytes()
+        ttl = config.tree_ttl()
+        now = time.time()
+        # Snapshot the key list ONCE — computing it twice can drift if a
+        # concurrent build (which holds only its per-key lock, not the
+        # evict lock) adds a new tree between the size sum and the loop.
+        # Recompute the total AFTER taking the global lock — otherwise a
+        # concurrent build that finished between "snapshot" and "lock"
+        # would be counted against a stale budget.
+        keys = _lru_keys()
+        total = sum(_tree_size(_tree_path(k)) for k in keys)
 
-        with _flock(_lock_path(key), blocking=False) as got:
-            if not got:
-                # Someone is building/spawning under this key right now.
+        for key in keys:
+            tree = _tree_path(key)
+            sentinel = tree / _SENTINEL
+            try:
+                age = now - sentinel.stat().st_mtime if sentinel.exists() else float('inf')
+            except OSError:
+                age = float('inf')
+
+            need_evict = (total > budget) or (age > ttl)
+            if not need_evict:
                 continue
-            if _has_live_pin(key):
-                continue
-            size = _tree_size(tree)
-            shutil.rmtree(tree, ignore_errors=True)
-            _clear_pins(key)
-            total -= size
-            evicted.append(key)
+
+            with _flock(_lock_path(key), blocking=False) as got:
+                if not got:
+                    # Someone is building/spawning under this key right now.
+                    continue
+                if _has_live_pin(key):
+                    continue
+                size = _tree_size(tree)
+                shutil.rmtree(tree, ignore_errors=True)
+                _clear_pins(key)
+                total -= size
+                evicted.append(key)
+
     return evicted
 
 

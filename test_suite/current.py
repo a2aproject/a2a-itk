@@ -70,6 +70,7 @@ def spawn_from_dir(
     *,
     log_dir: Path | None = None,
     log_name: str | None = None,
+    new_session: bool = False,
 ) -> subprocess.Popen:
     """Detect the agent's language and spawn it.
 
@@ -86,21 +87,31 @@ def spawn_from_dir(
             all happen to root at ``itk/`` (which every SDK repo does).
             Callers that own naming (e.g. the runner) should pass an explicit
             name like ``agent_python_v10`` for readability.
+        new_session: If True, spawn the child in its own POSIX session so
+            ``proc.pid == pgid``. Only :class:`~test_suite.launcher.cluster.Cluster`
+            passes True — its teardown signals the whole group via
+            ``os.killpg`` to catch grandchildren (mvn -> java, npm -> tsx,
+            go run -> compiled binary). The legacy ``spawn_agent`` path
+            defaults to False because ``testlib.stop_itk_cluster`` only
+            signals the direct child via ``proc.terminate()`` — detaching
+            the session there would leak grandchildren.
 
     Returns:
         The spawned ``subprocess.Popen``. If ``log_dir`` was set, the Popen
         carries a ``_log_file`` attribute — the caller (usually
-        :class:`test_suite.launcher.resolve.LaunchSession`) is responsible
-        for closing it on teardown.
+        :class:`test_suite.launcher.resolve.LaunchSession` or
+        :class:`test_suite.launcher.cluster.Cluster`) is responsible for
+        closing it on teardown.
 
     Raises:
         RuntimeError: The directory does not contain a recognised agent
-            entrypoint, or a required lazy build failed.
+            entrypoint, or a required lazy build failed. Callers should
+            treat this as a permanent (non-retryable) configuration error.
     """
     if not agent_dir.exists():
         raise RuntimeError(f'agent dir does not exist: {agent_dir}')
 
-    popen = _popen_factory(agent_dir, log_dir, log_name)
+    popen = _popen_factory(agent_dir, log_dir, log_name, new_session=new_session)
 
     if (agent_dir / 'main.go').exists():
         return _spawn_go(agent_dir, http_port, grpc_port, popen)
@@ -260,8 +271,16 @@ def _popen_factory(
     agent_dir: Path,
     log_dir: Path | None,
     log_name: str | None = None,
+    *,
+    new_session: bool = False,
 ) -> _PopenFactory:
-    """Return a ``popen(args, cwd)`` callable that respects the log setting."""
+    """Return a ``popen(args, cwd)`` callable that respects the log setting.
+
+    ``new_session=True`` makes the child its own process-group leader so a
+    caller with ``killpg``-based teardown (i.e. :class:`Cluster`) can reap
+    grandchildren. See ``spawn_from_dir`` docstring for why the legacy
+    default is False.
+    """
     if log_dir is None:
         def popen(args: list[str], cwd: Path) -> subprocess.Popen:
             return subprocess.Popen(  # noqa: S603
@@ -270,6 +289,7 @@ def _popen_factory(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                start_new_session=new_session,
             )
         return popen
 
@@ -285,10 +305,11 @@ def _popen_factory(
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=new_session,
         )
-        # Stash so LaunchSession.__exit__ can close the handle on teardown.
-        # Direct callers of spawn_from_dir are responsible for closing it
-        # themselves — see the spawn_from_dir docstring.
+        # Stash so LaunchSession/Cluster.__exit__ can close the handle on
+        # teardown. Direct callers of spawn_from_dir are responsible for
+        # closing it themselves — see the spawn_from_dir docstring.
         p._log_file = log_handle  # noqa: SLF001
         return p
 

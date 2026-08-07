@@ -1,0 +1,27 @@
+# Matrix: scenario-level agent identifiers → (repo, ref).
+#
+# Consumed by :mod:`test_suite.launcher.matrix`. Scenarios reference peers
+# by identifier ("python_v10", "go_v03", "python_v10_2" — the _N suffix
+# means "second instance of the same source"). This file maps each
+# (sdk, line) pair to the GitHub repo and default ref to fetch. The
+# service resolves the ref to a SHA at plan time via `git ls-remote`, so
+# a symbolic ref like `main` means "latest at run time" (fine for
+# nightly), while a tag or SHA pins the peer.
+#
+# Special case: "current" is the SUT and doesn't map through this file —
+# it's spawned via `Kind.MOUNT` from the container's bind mount.
+#
+# v03 lines are intentionally absent until the `+itk` overlay tags are
+# published (Story 1.10). Add them here when they land.
+
+sdks:
+  python:
+    v10: {repo: a2aproject/a2a-python, ref: main}
+  go:
+    v10: {repo: a2aproject/a2a-go, ref: main}
+  ts:
+    v10: {repo: a2aproject/a2a-js, ref: main}
+  java:
+    v10: {repo: a2aproject/a2a-java, ref: main}
+  rust:
+    v10: {repo: a2aproject/a2a-rs, ref: main}

@@ -1,17 +1,16 @@
 """Public launcher entry points: :func:`resolve`, :func:`spawn`, :class:`LaunchSession`.
 
-Dispatches a :class:`~test_suite.launcher.spec.TargetSpec` to one of three concrete
+Dispatches a :class:`~test_suite.launcher.spec.TargetSpec` to one of two concrete
 locations:
 
   * ``MOUNT``    — the fixed container-mount path ``agents/repo/itk``.
-  * ``LOCAL``    — a baked baseline at ``agents/<sdk>/<line>``.
   * ``CHECKOUT`` — fetch + build under the on-disk cache; :mod:`.cache`
                    owns the concurrency guarantees.
 
-:class:`LaunchSession` is the context manager the runner uses to acquire pins
-on a batch of specs and release them on exit — the design's ``release()``
-needs an owner, and this is it. Story 1.9 will extend it to own process
-groups and dynamic port ranges.
+:class:`LaunchSession` is the simple single-spawn context manager (pins +
+log-handle cleanup). For batch orchestration of a whole cluster with dynamic
+port allocation, parallel readiness gating, and process-group teardown, use
+:class:`test_suite.launcher.cluster.Cluster` instead.
 """
 
 from __future__ import annotations
@@ -35,14 +34,15 @@ def resolve(spec: TargetSpec) -> Path:
 
     For :attr:`Kind.CHECKOUT`, this fetches and builds if necessary and pins
     the cache slot for the current process. The caller is responsible for
-    releasing the pin (use :class:`LaunchSession`).
+    releasing the pin (use :class:`LaunchSession` or
+    :class:`~test_suite.launcher.cluster.Cluster`).
 
     Raises:
         RuntimeError: MOUNT target has not been mounted into the container.
-        test_suite.launcher.errors.InfraFailure: CHECKOUT fetch/build failed after
-            retries.
-        test_suite.launcher.errors.PermanentError: CHECKOUT SHA does not exist on
-            the remote.
+        test_suite.launcher.errors.InfraFailure: CHECKOUT fetch/build failed
+            after retries.
+        test_suite.launcher.errors.PermanentError: CHECKOUT SHA does not exist
+            on the remote.
     """
     if spec.kind is Kind.MOUNT:
         d = _repo_root() / 'agents' / 'repo' / 'itk'
@@ -51,10 +51,6 @@ def resolve(spec: TargetSpec) -> Path:
                 'current agent has not been mounted and is not available to test'
             )
         return d
-
-    if spec.kind is Kind.LOCAL:
-        assert spec.sdk is not None and spec.line is not None
-        return _repo_root() / 'agents' / spec.sdk / spec.line
 
     if spec.kind is Kind.CHECKOUT:
         assert spec.repo is not None and spec.sha is not None
@@ -85,19 +81,18 @@ def spawn(
 
 
 class LaunchSession(contextlib.AbstractContextManager):
-    """Own the cache pins AND log-file handles for a batch of specs.
+    """Own the cache pins AND log-file handles for a single-spawn scenario.
 
     Usage::
 
         with LaunchSession() as sess:
-            for spec in plan:
-                sess.spawn(spec, http, grpc, log_dir=Path('logs'))
-            # ... run tests ...
-        # pins released, log handles closed — even on error.
+            proc = sess.spawn(spec, http, grpc, log_dir=Path('logs'))
+            # ... use proc ...
+        # pin released, log handle closed — even on error.
 
-    Only CHECKOUT specs need release; MOUNT and LOCAL are cheap no-ops.
-    Story 1.9 will grow this into a full cluster lifecycle owner (process
-    groups, ports, teardown-on-timeout).
+    For multi-agent runs, prefer :class:`test_suite.launcher.cluster.Cluster`
+    which additionally owns dynamic port allocation, parallel readiness
+    gating, and process-group teardown.
     """
 
     def __init__(self) -> None:

@@ -22,12 +22,29 @@ class Stage(enum.Enum):
 
     FETCH = 'fetch'         # git clone / fetch / checkout
     BUILD = 'build'         # per-language build step
-    SPAWN = 'spawn'         # agent process startup (health check lives in 1.9)
-    CACHE = 'cache'         # cache bookkeeping (rmtree, lock, pin)
+    SPAWN = 'spawn'         # subprocess.Popen raised (binary missing, bad exec)
+    READY = 'ready'         # health check didn't return 200 before deadline
 
 
 class LauncherError(Exception):
     """Base class for launcher errors."""
+
+
+def _target_label(repo: str | None, sha: str | None) -> str:
+    """Human-friendly identifier used in error messages.
+
+    CHECKOUT targets have both ``repo`` and ``sha``; MOUNT targets have
+    neither. A half-populated state shouldn't happen in practice (the
+    spec validators enforce all-or-nothing) but the label degrades
+    gracefully rather than rendering ``"None@abc..."``.
+    """
+    if repo is None and sha is None:
+        return 'mount'
+    if repo is None:
+        return f'?@{sha[:12]}'  # type: ignore[index]
+    if sha is None:
+        return f'{repo}@?'
+    return f'{repo}@{sha[:12]}'
 
 
 class InfraFailure(LauncherError):
@@ -37,16 +54,16 @@ class InfraFailure(LauncherError):
     After retry exhaustion the classifier reports ``INFRA_FAILURE``.
 
     Attributes:
-        repo: The repo being processed (e.g. ``"a2aproject/a2a-python"``).
-        sha: The resolved commit SHA (40-hex).
+        repo: The repo being processed (``None`` for MOUNT targets).
+        sha: The resolved commit SHA (``None`` for MOUNT targets).
         stage: Where the failure happened (:class:`Stage`).
         cause: Underlying exception, if any.
     """
 
     def __init__(
         self,
-        repo: str,
-        sha: str,
+        repo: str | None,
+        sha: str | None,
         stage: Stage,
         cause: BaseException | None = None,
         message: str | None = None,
@@ -55,7 +72,7 @@ class InfraFailure(LauncherError):
         self.sha = sha
         self.stage = stage
         self.cause = cause
-        msg = message or f'{stage.value} failed for {repo}@{sha[:12]}'
+        msg = message or f'{stage.value} failed for {_target_label(repo, sha)}'
         if cause is not None:
             msg = f'{msg}: {cause}'
         super().__init__(msg)
@@ -70,12 +87,14 @@ class PermanentError(LauncherError):
 
     def __init__(
         self,
-        repo: str,
-        sha: str,
+        repo: str | None,
+        sha: str | None,
         stage: Stage,
         message: str,
     ) -> None:
         self.repo = repo
         self.sha = sha
         self.stage = stage
-        super().__init__(f'{stage.value} permanently failed for {repo}@{sha[:12]}: {message}')
+        super().__init__(
+            f'{stage.value} permanently failed for {_target_label(repo, sha)}: {message}'
+        )

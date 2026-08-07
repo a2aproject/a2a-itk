@@ -5,6 +5,9 @@
 **/.github
 **/.vscode
 **/.ruff_cache
-**/uv.lock
 **/bin
 dashboard
+# NOTE: uv.lock is INCLUDED so `uv sync --frozen` at build time reproduces
+# exactly what CI resolved. Previously excluded because the legacy CMD
+# (`uv run itk_service.py`) resolved dependencies JIT on first run — the
+# baked venv means we resolve them once at build time instead.

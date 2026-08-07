@@ -22,7 +22,9 @@ from test_suite import current as spawn
 class _NoOpPopen:
     """Stub Popen so tests never launch a real process."""
 
-    def __init__(self, args, cwd=None, stdout=None, stderr=None, text=None):  # noqa: ARG002
+    def __init__(self, args, cwd=None, stdout=None, stderr=None, text=None, **_kw):  # noqa: ARG002
+        # Extra kwargs accepted (`start_new_session=True` is one) so the
+        # real spawn code path exercises identical Popen arguments.
         self.pid = 1
         self.args = args
         self.stdout_target = stdout
