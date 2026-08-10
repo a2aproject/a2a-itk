@@ -228,9 +228,33 @@ class TestFromPath:
 
 class TestFromDefault:
     def test_default_matrix_loads(self):
-        """The repo-root matrix.yaml must parse and contain the 5 SDKs."""
+        """The repo-root matrix.yaml must parse and contain the live entries.
+
+        Currently: v10 across all 5 SDKs, plus v03 overlays for python/go/ts.
+        java and rust have no v03 baseline. If new SDKs or lines land, this
+        list needs updating — that's the point.
+        """
         m = Matrix.from_default()
-        # If new SDKs land, this list may need updating — that's the point.
-        expected = [('go', 'v10'), ('java', 'v10'), ('python', 'v10'),
-                    ('rust', 'v10'), ('ts', 'v10')]
+        expected = [
+            ('go', 'v03'), ('go', 'v10'),
+            ('java', 'v10'),
+            ('python', 'v03'), ('python', 'v10'),
+            ('rust', 'v10'),
+            ('ts', 'v03'), ('ts', 'v10'),
+        ]
         assert m.keys() == expected
+
+    def test_default_matrix_v03_pins_overlay_tags(self):
+        """v03 entries must point at `+itk` overlay tags, not `main`.
+
+        Regression: a copy-paste that sets v03 to `main` would resolve to
+        the SDK's v1 tip (no v0.3 code at all) and every v03 peer would
+        fail to build with a version-mismatched SDK dep.
+        """
+        m = Matrix.from_default()
+        for sdk in ('python', 'go', 'ts'):
+            entry = m.resolve(f'{sdk}_v03')
+            assert '+itk' in entry.ref, (
+                f'{sdk}_v03 must pin an overlay tag (contains "+itk"), '
+                f'got {entry.ref!r}'
+            )
