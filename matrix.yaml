@@ -11,16 +11,21 @@
 # Special case: "current" is the SUT and doesn't map through this file —
 # it's spawned via `Kind.MOUNT` from the container's bind mount.
 #
-# v03 lines are intentionally absent until the `+itk` overlay tags are
-# published (Story 1.10). Add them here when they land.
+# v03 lines point at `+itk` overlay tags: the underlying v0.3.X release
+# with the itk agent grafted onto its `itk/` subdir. Bump the pin when a
+# new patch (`+itk.2`) is cut. `java` and `rust` have no v03 line because
+# no v03 baked baseline exists for them today.
 
 sdks:
   python:
     v10: {repo: a2aproject/a2a-python, ref: main}
+    v03: {repo: a2aproject/a2a-python, ref: "v0.3.24+itk"}
   go:
     v10: {repo: a2aproject/a2a-go, ref: main}
+    v03: {repo: a2aproject/a2a-go, ref: "v0.3.15+itk"}
   ts:
     v10: {repo: a2aproject/a2a-js, ref: main}
+    v03: {repo: a2aproject/a2a-js, ref: "v0.3.14+itk"}
   java:
     v10: {repo: a2aproject/a2a-java, ref: main}
   rust:
