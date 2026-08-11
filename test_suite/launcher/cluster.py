@@ -179,6 +179,11 @@ class Cluster(contextlib.AbstractContextManager):
         """
         if not specs:
             return []
+        if max_workers is None:
+            # ITK_MAX_WORKERS (see config.max_workers) overrides the default
+            # for resource-constrained CI runners; otherwise scale to
+            # len(specs) but never below 4 so small clusters stay parallel.
+            max_workers = config.max_workers()
         workers = max_workers if max_workers is not None else max(4, len(specs))
         log_names = log_names or {}
 

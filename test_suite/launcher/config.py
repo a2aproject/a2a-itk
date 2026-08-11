@@ -86,6 +86,31 @@ def teardown_grace() -> int:
     return _env_int('ITK_TEARDOWN_GRACE', 10)
 
 
+def max_workers() -> int | None:
+    """Cap on parallel workers in :meth:`Cluster.start_all`.
+
+    Returns ``None`` when unset — callers keep their own default
+    (``max(4, len(specs))``). On resource-constrained CI runners (GHA's
+    default ubuntu-latest is 2-4 vCPU / 7 GB RAM) spawning every peer in
+    parallel drives npm / mvn / cargo / uv into OOM territory; set this
+    env to 2 or 3 there.
+    """
+    val = os.environ.get('ITK_MAX_WORKERS', '').strip()
+    if not val:
+        return None
+    try:
+        n = int(val)
+    except ValueError as e:
+        raise ValueError(
+            f'ITK_MAX_WORKERS must be a positive integer, got {val!r}'
+        ) from e
+    if n < 1:
+        raise ValueError(
+            f'ITK_MAX_WORKERS must be >= 1, got {n}'
+        )
+    return n
+
+
 # ---------------------------------------------------------------------------
 # Cache root
 # ---------------------------------------------------------------------------

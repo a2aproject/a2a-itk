@@ -18,6 +18,7 @@ import os
 import signal
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -255,6 +256,57 @@ class TestStartAllBatch:
         with _patch_cluster_deps(monkeypatch):
             with Cluster() as c:
                 assert c.start_all([]) == []
+
+    def test_max_workers_env_caps_parallelism(self, monkeypatch):
+        """ITK_MAX_WORKERS overrides the default when caller passes None.
+
+        Regression: 8-peer scenarios_full on a 2-vCPU GHA runner OOM'd npm/uv
+        under the default ``max(4, len(specs))`` fan-out; the env knob lets
+        the CI workflow cap it at 2.
+        """
+        monkeypatch.setenv('ITK_MAX_WORKERS', '2')
+
+        seen_workers: list[int] = []
+        real_pool = ThreadPoolExecutor
+        import test_suite.launcher.cluster as cluster_mod
+
+        def spy_pool(*args, **kwargs):
+            seen_workers.append(kwargs.get('max_workers'))
+            return real_pool(*args, **kwargs)
+
+        monkeypatch.setattr(cluster_mod, 'ThreadPoolExecutor', spy_pool)
+
+        specs = [
+            TargetSpec(kind=Kind.CHECKOUT, repo=f'org/r{i}', sha=_SHA_A)
+            for i in range(6)
+        ]
+        with _patch_cluster_deps(monkeypatch):
+            with Cluster(readiness_timeout_s=1, teardown_grace_s=1) as c:
+                c.start_all(specs)
+        assert seen_workers == [2]
+
+    def test_max_workers_explicit_arg_wins_over_env(self, monkeypatch):
+        """An explicit ``max_workers=`` on start_all beats the env var."""
+        monkeypatch.setenv('ITK_MAX_WORKERS', '2')
+
+        seen_workers: list[int] = []
+        real_pool = ThreadPoolExecutor
+        import test_suite.launcher.cluster as cluster_mod
+
+        def spy_pool(*args, **kwargs):
+            seen_workers.append(kwargs.get('max_workers'))
+            return real_pool(*args, **kwargs)
+
+        monkeypatch.setattr(cluster_mod, 'ThreadPoolExecutor', spy_pool)
+
+        specs = [
+            TargetSpec(kind=Kind.CHECKOUT, repo=f'org/r{i}', sha=_SHA_A)
+            for i in range(6)
+        ]
+        with _patch_cluster_deps(monkeypatch):
+            with Cluster(readiness_timeout_s=1, teardown_grace_s=1) as c:
+                c.start_all(specs, max_workers=5)
+        assert seen_workers == [5]
 
 
 class TestTeardown:
