@@ -1,0 +1,59 @@
+{
+  "axis": "timestamp",
+  "description": "google.protobuf.Timestamp on the JSON wire. proto3 JSON parses RFC 3339 on input and emits a Z-normalized string with 0, 3, 6 or 9 fractional digits on output. Input that is not a timestamp is rejected.",
+  "vectors": [
+    {
+      "id": "timestamp.whole_second",
+      "message": "TaskStatus",
+      "input": { "state": "TASK_STATE_WORKING", "timestamp": "2026-01-01T00:00:00Z" },
+      "expected": { "state": "TASK_STATE_WORKING", "timestamp": "2026-01-01T00:00:00Z" },
+      "rationale": "Baseline. An already-normalized timestamp is unchanged."
+    },
+    {
+      "id": "timestamp.millis",
+      "message": "TaskStatus",
+      "input": { "state": "TASK_STATE_WORKING", "timestamp": "2026-01-01T00:00:00.123Z" },
+      "expected": { "state": "TASK_STATE_WORKING", "timestamp": "2026-01-01T00:00:00.123Z" },
+      "rationale": "Three fractional digits are preserved rather than padded or truncated."
+    },
+    {
+      "id": "timestamp.nanos",
+      "message": "TaskStatus",
+      "input": { "state": "TASK_STATE_WORKING", "timestamp": "2026-01-01T00:00:00.123456789Z" },
+      "expected": { "state": "TASK_STATE_WORKING", "timestamp": "2026-01-01T00:00:00.123456789Z" },
+      "rationale": "Nanosecond precision survives. An implementation backed by a millisecond clock type silently truncates here."
+    },
+    {
+      "id": "timestamp.offset_utc",
+      "message": "TaskStatus",
+      "input": { "state": "TASK_STATE_WORKING", "timestamp": "2026-01-01T00:00:00+00:00" },
+      "expected": { "state": "TASK_STATE_WORKING", "timestamp": "2026-01-01T00:00:00Z" },
+      "rationale": "A zero offset is accepted on input and normalized to Z on output.",
+      "issues": ["a2aproject/a2a-js#641"]
+    },
+    {
+      "id": "timestamp.offset_non_utc",
+      "message": "TaskStatus",
+      "input": { "state": "TASK_STATE_WORKING", "timestamp": "2026-01-01T05:30:00+05:30" },
+      "expected": { "state": "TASK_STATE_WORKING", "timestamp": "2026-01-01T00:00:00Z" },
+      "rationale": "Same instant, different offset. Two SDKs that skip normalization produce different bytes for the same moment, which matters wherever bytes are compared rather than instants.",
+      "issues": ["a2aproject/a2a-js#641"]
+    },
+    {
+      "id": "timestamp.not_a_timestamp",
+      "message": "TaskStatus",
+      "input": { "state": "TASK_STATE_WORKING", "timestamp": "not-a-timestamp" },
+      "expect_reject": true,
+      "rationale": "Input that is not RFC 3339 is rejected rather than stored. An SDK that forwards it makes some later peer report the error instead.",
+      "issues": ["a2aproject/a2a-js#641"]
+    },
+    {
+      "id": "timestamp.number_input",
+      "message": "TaskStatus",
+      "input": { "state": "TASK_STATE_WORKING", "timestamp": 12345 },
+      "expect_reject": true,
+      "rationale": "A JSON number is not a Timestamp. Coercing it to a string hides the error.",
+      "issues": ["a2aproject/a2a-js#641"]
+    }
+  ]
+}
