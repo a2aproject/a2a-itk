@@ -34,6 +34,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Iterator
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -170,7 +171,12 @@ async def _run(request: RunTestsRequest) -> RunTestsResponse:
     log_names = {spec: f'agent_{sid}' for sid, spec in specs_by_id.items()}
 
     # 3. Start cluster (dynamic ports + parallel readiness + pgroup teardown).
-    with Cluster() as cluster:
+    # /app/logs is bind-mounted by run_itk.sh when ITK_LOG_LEVEL=DEBUG (or
+    # by the operator for any similar diagnostic mount); when present,
+    # agent stdout/stderr goes into per-agent log files so post-mortem
+    # debugging of readiness/spawn failures doesn't need a live container.
+    agent_log_dir = Path('/app/logs') if Path('/app/logs').is_dir() else None
+    with Cluster(log_dir=agent_log_dir) as cluster:
         outcomes = await asyncio.to_thread(
             cluster.start_all, specs, log_names=log_names,
         )

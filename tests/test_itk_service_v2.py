@@ -69,8 +69,9 @@ class _FakeCluster:
 
     instances: list['_FakeCluster'] = []
 
-    def __init__(self, *_a: Any, **_kw: Any) -> None:
+    def __init__(self, *_a: Any, **kw: Any) -> None:
         self.start_all_calls: list[tuple[list[Any], dict[Any, str] | None]] = []
+        self.init_kwargs: dict[str, Any] = dict(kw)
         self.exited = False
         # Default: every spec succeeds with sequential fake ports.
         self._outcomes: list[_FakeOutcome] | None = None
@@ -279,6 +280,45 @@ class TestClusterStartup:
             'tests': [{'name': 't', 'sdks': ['current'], 'behavior': 'echo'}],
         })
         assert _FakeCluster.instances[-1].exited, 'Cluster.__exit__ must run'
+
+    def test_cluster_uses_app_logs_when_bind_mount_present(
+        self, client, monkeypatch, stub_deps, tmp_path,  # noqa: ARG002
+    ):
+        """When run_itk.sh bind-mounts a log dir at /app/logs, agent stderr
+        must land there (via Cluster(log_dir=...)) so post-mortem debugging
+        of readiness failures doesn't need a live container.
+
+        Regression: itk_service_v2.py used to instantiate Cluster() with no
+        args, so agent output was silently discarded and every readiness
+        failure looked identical.
+        """
+        # Simulate /app/logs existing by patching Path.is_dir just for /app/logs.
+        import pathlib
+        real_is_dir = pathlib.Path.is_dir
+
+        def fake_is_dir(self):
+            if str(self) == '/app/logs':
+                return True
+            return real_is_dir(self)
+
+        monkeypatch.setattr(pathlib.Path, 'is_dir', fake_is_dir)
+
+        client.post('/run', json={
+            'tests': [{'name': 't', 'sdks': ['current'], 'behavior': 'echo'}],
+        })
+        last = _FakeCluster.instances[-1]
+        assert last.init_kwargs.get('log_dir') == pathlib.Path('/app/logs')
+
+    def test_cluster_log_dir_none_when_app_logs_missing(
+        self, client, stub_deps,  # noqa: ARG002
+    ):
+        """When /app/logs isn't mounted, Cluster gets log_dir=None so we
+        don't crash trying to write into a nonexistent host path."""
+        client.post('/run', json={
+            'tests': [{'name': 't', 'sdks': ['current'], 'behavior': 'echo'}],
+        })
+        last = _FakeCluster.instances[-1]
+        assert last.init_kwargs.get('log_dir') is None
 
     def test_partial_startup_502_lists_failed(self, client, monkeypatch, stub_deps):  # noqa: ARG002
         cluster = _FakeCluster()
