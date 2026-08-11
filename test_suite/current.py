@@ -20,6 +20,7 @@ import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from tempfile import gettempdir
 
 
 _ROOT_DIR = Path(__file__).parent.parent
@@ -226,15 +227,28 @@ def _spawn_rust(
     if binary is None:
         # Lazy build for MOUNT/LOCAL. CHECKOUT trees already contain the
         # binary because the launcher's builder built them under the cache lock.
+        # Build into a dedicated writable target dir to avoid bind-mount
+        # permission issues under /app/agents/repo/itk/target in CI.
+        build_env = os.environ.copy()
+        rust_target_root = Path(
+            build_env.get(
+                'ITK_RUST_CURRENT_TARGET_DIR',
+                str(Path(gettempdir()) / 'itk-rust-current-target'),
+            )
+        )
+        rust_target_root.mkdir(parents=True, exist_ok=True)
+        build_env['CARGO_TARGET_DIR'] = str(rust_target_root)
         subprocess.run(  # noqa: S603
             ['cargo', 'build', '--locked', '--release'],  # noqa: S607
             cwd=str(agent_dir),
+            env=build_env,
             check=True,
         )
-        binary = _find_rust_binary(release_dir)
+        binary = _find_rust_binary(rust_target_root / 'release')
         if binary is None:
             raise RuntimeError(
-                f'cargo build succeeded but no itk-* binary found in {release_dir}'
+                'cargo build succeeded but no itk-* binary found in '
+                f'{rust_target_root / "release"}'
             )
     args = [  # noqa: S607
         str(binary),
