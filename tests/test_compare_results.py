@@ -263,6 +263,90 @@ class TestAcceptedDeltas:
         assert report.suppressed_count == 1
         assert report.matches == ['s-drifted', 's-fresh'] or set(report.matches) == {'s-drifted', 's-fresh'}
 
+    def test_load_real_failure_deltas_defaults_off(self, tmp_path: pathlib.Path):
+        """Entries without ``suppresses_real_failure`` don't leak into the
+        real-failure set (backwards compat)."""
+        p = tmp_path / 'accepted.json'
+        self._write(p, [
+            {'sdk': 'python', 'line': 'v10', 'scenario': 's-a',
+             'expected': 'pass', 'old_passed': False, 'new_passed': True,
+             'reason': 'stale', 'adjudicated_by': 'a',
+             'adjudicated_at': '2026-07-23T00:00:00Z'},
+        ])
+        assert cr.load_accepted_real_failures(p) == set()
+        # But divergence-suppression still picks it up:
+        assert cr.load_accepted_deltas(p) == {('python', 'v10', 's-a')}
+
+    def test_load_real_failure_deltas_opt_in(self, tmp_path: pathlib.Path):
+        """`suppresses_real_failure: true` opts an entry into the real-failure set."""
+        p = tmp_path / 'accepted.json'
+        self._write(p, [
+            {'sdk': 'rust', 'line': 'v10',
+             'scenario': 'Nightly - HTTP_JSON - Resubscribe',
+             'expected': 'pass', 'old_passed': False, 'new_passed': False,
+             'reason': 'shared java resub bug — tracking upstream',
+             'adjudicated_by': 'jakubworek',
+             'adjudicated_at': '2026-08-11T00:00:00Z',
+             'suppresses_real_failure': True},
+        ])
+        key = ('rust', 'v10', 'Nightly - HTTP_JSON - Resubscribe')
+        assert cr.load_accepted_real_failures(p) == {key}
+        # Divergence set still contains it too (an entry can suppress both).
+        assert cr.load_accepted_deltas(p) == {key}
+
+    def test_classify_run_suppresses_real_failure_when_opted_in(
+        self, tmp_path: pathlib.Path,
+    ):
+        """A ``suppresses_real_failure: true`` entry demotes REAL_FAILURE to
+        suppressed-match (with a bumped suppressed_count)."""
+        p = tmp_path / 'accepted.json'
+        self._write(p, [
+            {'sdk': 'rust', 'line': 'v10', 'scenario': 's-shared-bug',
+             'expected': 'pass', 'old_passed': False, 'new_passed': False,
+             'reason': 'tracked at #123', 'adjudicated_by': 'a',
+             'adjudicated_at': '2026-08-11T00:00:00Z',
+             'suppresses_real_failure': True},
+        ])
+        scenarios = {'s-shared-bug': _scn('s-shared-bug', expected_pass=True)}
+        # NEW fails oracle → REAL_FAILURE before suppression.
+        old = {'s-shared-bug': cr.Outcome(passed=False)}
+        new = {'s-shared-bug': cr.Outcome(passed=False)}
+
+        report = cr.classify_run(
+            sdk='rust', line='v10', scenarios=scenarios, old=old, new=new,
+            accepted_deltas=cr.load_accepted_deltas(p),
+            accepted_real_failures=cr.load_accepted_real_failures(p),
+        )
+        assert report.real_failures == []
+        assert report.suppressed_count == 1
+        assert 's-shared-bug' in report.matches
+        assert report.is_clean is True
+
+    def test_classify_run_does_not_suppress_real_failure_without_opt_in(
+        self, tmp_path: pathlib.Path,
+    ):
+        """A plain accepted-delta entry (no ``suppresses_real_failure``)
+        must NOT hide REAL_FAILUREs — historical semantic preserved."""
+        p = tmp_path / 'accepted.json'
+        self._write(p, [
+            {'sdk': 'rust', 'line': 'v10', 'scenario': 's-shared-bug',
+             'expected': 'pass', 'old_passed': False, 'new_passed': True,
+             'reason': 'stale', 'adjudicated_by': 'a',
+             'adjudicated_at': '2026-08-11T00:00:00Z'},  # no suppresses_real_failure
+        ])
+        scenarios = {'s-shared-bug': _scn('s-shared-bug', expected_pass=True)}
+        old = {'s-shared-bug': cr.Outcome(passed=False)}
+        new = {'s-shared-bug': cr.Outcome(passed=False)}  # NEW fails → REAL_FAILURE
+
+        report = cr.classify_run(
+            sdk='rust', line='v10', scenarios=scenarios, old=old, new=new,
+            accepted_deltas=cr.load_accepted_deltas(p),
+            accepted_real_failures=cr.load_accepted_real_failures(p),
+        )
+        assert report.real_failures == ['s-shared-bug']
+        assert report.suppressed_count == 0
+        assert report.is_clean is False
+
 
 # -----------------------------------------------------------------------------
 # classify_run — aggregate report

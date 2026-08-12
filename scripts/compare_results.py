@@ -203,7 +203,14 @@ def raw_to_outcomes(raw: dict) -> dict[str, Outcome]:
 #       {"sdk": "python", "line": "v10", "scenario": "<name>",
 #        "expected": "pass", "old_passed": false, "new_passed": true,
 #        "reason": "<why the delta is acceptable>",
-#        "adjudicated_by": "<ldap>", "adjudicated_at": "<ISO-8601>"}
+#        "adjudicated_by": "<ldap>", "adjudicated_at": "<ISO-8601>",
+#
+#        // OPTIONAL. Default false. When true, the entry ALSO suppresses
+#        // REAL_FAILURE for that (sdk, line, scenario) — i.e. a shared
+#        // regression that's been triaged but blocks the gate until a
+#        // downstream fix lands. Use sparingly and set `reason` to the
+#        // tracking issue / owner so it doesn't rot.
+#        "suppresses_real_failure": false}
 #     ]
 #   }
 # -----------------------------------------------------------------------------
@@ -215,13 +222,39 @@ AcceptedKey = tuple[str, str, str]  # (sdk, line, scenario)
 def load_accepted_deltas(path: pathlib.Path) -> set[AcceptedKey]:
     """Load the accepted-deltas file into a set of (sdk, line, scenario) keys.
 
-    Missing file → empty set (a fresh repo has no adjudicated deltas yet).
+    Every entry in the file suppresses BEHAVIORAL_DIVERGENCE for its key
+    (that's the historical semantic). Missing file → empty set.
+
+    Real-failure suppressions live in a companion set — see
+    :func:`load_accepted_real_failures` — because they change the meaning
+    of a REAL_FAILURE result and are opt-in per entry.
     """
+    return {k for k, _ in _load_entries(path)}
+
+
+def load_accepted_real_failures(path: pathlib.Path) -> set[AcceptedKey]:
+    """Load entries that additionally suppress REAL_FAILURE.
+
+    Only entries with ``suppresses_real_failure: true`` appear here. Kept
+    as a separate set (rather than folding into a richer struct) so
+    :func:`classify_run` stays backwards-compatible with callers that
+    only care about divergence suppression.
+    """
+    return {k for k, entry in _load_entries(path)
+            if entry.get('suppresses_real_failure', False)}
+
+
+def _load_entries(
+    path: pathlib.Path,
+) -> list[tuple[AcceptedKey, dict]]:
     p = pathlib.Path(path)
     if not p.exists():
-        return set()
+        return []
     data = json.loads(p.read_text())
-    return {(d['sdk'], d['line'], d['scenario']) for d in data.get('deltas', [])}
+    return [
+        ((d['sdk'], d['line'], d['scenario']), d)
+        for d in data.get('deltas', [])
+    ]
 
 
 # -----------------------------------------------------------------------------
@@ -303,6 +336,7 @@ def classify_run(
     old: dict[str, Outcome],
     new: dict[str, Outcome],
     accepted_deltas: set[AcceptedKey],
+    accepted_real_failures: set[AcceptedKey] = frozenset(),
 ) -> RunReport:
     """Classify every scenario (including sub-tests) and roll up into a RunReport.
 
@@ -316,6 +350,13 @@ def classify_run(
     transient infra problem from the classifier's point of view — retry
     upstream. If OLD is missing but NEW satisfies the oracle, still infra
     on OLD (we can't cross-check).
+
+    ``accepted_deltas`` suppresses BEHAVIORAL_DIVERGENCE (baseline is stale
+    against a NEW that matches the oracle). ``accepted_real_failures`` is
+    opt-in per entry and additionally suppresses REAL_FAILURE (NEW breaks
+    the oracle); use only for shared regressions with an active tracking
+    issue, since it hides genuine bugs. Both are matched at parent-scenario
+    granularity so one entry covers all its sub-tests.
 
     Orphan result keys (present in NEW/OLD but matching no known scenario) are
     logged at WARNING and counted; they mirror
@@ -341,7 +382,13 @@ def classify_run(
             if result is Result.MATCH:
                 report.matches.append(key)
             elif result is Result.REAL_FAILURE:
-                report.real_failures.append(key)
+                # Adjudication is per parent scenario — a sub-test crash is
+                # covered by the parent's accepted-real-failure entry.
+                if (sdk, line, name) in accepted_real_failures:
+                    report.suppressed_count += 1
+                    report.matches.append(key)  # triaged / tracked elsewhere
+                else:
+                    report.real_failures.append(key)
             elif result is Result.INFRA_FAILURE:
                 report.infra_failures.append(key)
             elif result is Result.BEHAVIORAL_DIVERGENCE:
@@ -567,11 +614,12 @@ def main(argv: list[str] | None = None) -> int:
     scenarios = load_scenarios(args.scenarios)
     old_outcomes = _load_raw(args.old)
     new_outcomes = _load_raw(args.new)
-    accepted = (
-        load_accepted_deltas(args.accepted_deltas)
-        if args.accepted_deltas is not None
-        else set()
-    )
+    if args.accepted_deltas is not None:
+        accepted = load_accepted_deltas(args.accepted_deltas)
+        accepted_real = load_accepted_real_failures(args.accepted_deltas)
+    else:
+        accepted = set()
+        accepted_real = set()
 
     report = classify_run(
         sdk=args.sdk,
@@ -580,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
         old=old_outcomes,
         new=new_outcomes,
         accepted_deltas=accepted,
+        accepted_real_failures=accepted_real,
     )
 
     logger.info(
