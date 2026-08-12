@@ -175,6 +175,49 @@ class TestTsBuilder:
         builders.build_in_place('x/y', 'a' * 40, agent, skip_codegen=True)
         assert rec.calls == []
 
+    def test_ts_inner_npm_ci_for_overlay_with_own_package_json(
+        self, tmp_path, rec,
+    ):
+        """Overlay-style agents (v03) declare their own itk/package.json
+        pinning @a2a-js/sdk at the matching version. Root npm ci alone
+        doesn't populate <agent>/node_modules, so the launcher must also
+        install there or the agent crashes with ERR_MODULE_NOT_FOUND at
+        spawn time."""
+        (tmp_path / 'package.json').touch()
+        agent = tmp_path / 'itk'
+        agent.mkdir()
+        (agent / 'package.json').touch()
+        builders.build_in_place('x/y', 'a' * 40, agent, skip_codegen=True)
+        # Root install first, then inner install.
+        assert rec.calls == [
+            (['npm', 'ci'], tmp_path),
+            (['npm', 'ci'], agent),
+        ]
+
+    def test_ts_inner_install_skipped_when_node_modules_already_present(
+        self, tmp_path, rec,
+    ):
+        """v03 overlay re-runs must not reinstall if inner node_modules is
+        already there (typical of a warm launcher cache)."""
+        (tmp_path / 'package.json').touch()
+        agent = tmp_path / 'itk'
+        agent.mkdir()
+        (agent / 'package.json').touch()
+        (agent / 'node_modules').mkdir()
+        builders.build_in_place('x/y', 'a' * 40, agent, skip_codegen=True)
+        # Only the root install ran; inner was skipped.
+        assert rec.calls == [(['npm', 'ci'], tmp_path)]
+
+    def test_ts_v10_pattern_no_inner_install(self, tmp_path, rec):
+        """v10 agents share the SDK root's node_modules and have no
+        itk/package.json — the inner install must not fire."""
+        (tmp_path / 'package.json').touch()
+        agent = tmp_path / 'itk'
+        agent.mkdir()
+        # No agent/package.json (v10 pattern)
+        builders.build_in_place('x/y', 'a' * 40, agent, skip_codegen=True)
+        assert rec.calls == [(['npm', 'ci'], tmp_path)]
+
 
 class TestDotnetBuilder:
     def test_dotnet_is_noop(self, tmp_path, rec):

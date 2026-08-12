@@ -219,22 +219,38 @@ def _build_rust(agent_dir: Path, timeout: int) -> None:
 
 
 def _build_ts(agent_dir: Path, timeout: int) -> None:
-    """``npm ci`` at the repo root.
+    """``npm ci`` at the repo root, and additionally at ``agent_dir`` if it
+    has its own ``package.json``.
 
     TS agents live one level below a repo whose root owns ``package.json`` and
     ``package-lock.json``. ``npm ci`` uses the lockfile verbatim and errors if
     it is out of sync.
+
+    v03 overlay agents (grafted onto v0.3.X of an SDK repo) declare their own
+    ``itk/package.json`` — pinning ``@a2a-js/sdk`` at the matching version so
+    the agent runs against the exact SDK line the overlay was built for —
+    which requires its own ``node_modules``. The v10 pattern reuses the SDK
+    root's ``node_modules`` and has no ``itk/package.json``, so the inner
+    install is skipped there.
     """
     repo_root = agent_dir.parent
-    if (repo_root / 'node_modules').exists():
-        return
-    subprocess.run(  # noqa: S603
-        ['npm', 'ci'],  # noqa: S607
-        cwd=str(repo_root),
-        check=True,
-        timeout=timeout,
-        capture_output=True,
-    )
+    if not (repo_root / 'node_modules').exists():
+        subprocess.run(  # noqa: S603
+            ['npm', 'ci'],  # noqa: S607
+            cwd=str(repo_root),
+            check=True,
+            timeout=timeout,
+            capture_output=True,
+        )
+    # Overlay-style agents (v03) have their own inner install target.
+    if (agent_dir / 'package.json').exists() and not (agent_dir / 'node_modules').exists():
+        subprocess.run(  # noqa: S603
+            ['npm', 'ci'],  # noqa: S607
+            cwd=str(agent_dir),
+            check=True,
+            timeout=timeout,
+            capture_output=True,
+        )
 
 
 def _build_dotnet(agent_dir: Path, timeout: int) -> None:  # noqa: ARG001
