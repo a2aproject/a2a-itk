@@ -147,30 +147,37 @@ def prepare_ts(
     agent_dir: Path,
     *,
     proto_source: Path | None = None,
-    itk_source: Path | None = None,
+    itk_source: Path | None = None,  # noqa: ARG001 — kept for dispatcher parity
     timeout: int | None = None,
 ) -> None:
-    """Symlink a2a-itk, stage proto, run ``buf generate`` inside the SDK tree.
+    """Stage the proto next to the SDK's own ``buf.gen.yaml`` and run buf.
 
-    The TS agent's source has a hard-coded import path
-    ``./a2a-itk/agents/ts/v10/pb/instruction.js``, so a2a-itk must live at
-    ``<agent_dir>/a2a-itk/``. We regenerate on every call because
-    ``pb/instruction.ts`` committed in a2a-itk can lag the authoritative
-    ``.proto`` (matches ``run_itk.sh``'s policy).
+    Each SDK's ``itk/`` owns its ``buf.gen.yaml`` (``out: ./pb``, ``inputs:
+    directory: protos``); we copy the authoritative ``instruction.proto``
+    into ``<agent_dir>/protos/``, invoke ``buf generate`` from
+    ``<agent_dir>``, and the generated ``pb/instruction.ts`` lands right
+    next to ``main.ts`` / ``itk_agent.ts``. Regenerating on every call
+    matches ``run_itk.sh``'s policy (committed ``pb/`` can lag the proto).
+
+    No symlink into a2a-itk any more — S17 deletes ``agents/`` and the
+    old symlink target vanishes; the SDK owns its codegen config now.
     """
     proto = proto_source or default_proto_source()
-    itk = itk_source or default_itk_source()
-    ensure_itk_link(agent_dir, itk)
-
-    ts_dir = agent_dir / 'a2a-itk' / 'agents' / 'ts' / 'v10'
-    protos_stage = ts_dir / 'protos'
+    if not (agent_dir / 'buf.gen.yaml').exists():
+        raise RuntimeError(
+            f'{agent_dir}/buf.gen.yaml missing — each SDK itk/ must own its '
+            'buf codegen config so the launcher does not need to reach into '
+            'a2a-itk/agents/ts/*/. Copy the reference config from '
+            'a2a-itk/agents/ts/v10/buf.gen.yaml (or the SDK\'s baseline).'
+        )
+    protos_stage = agent_dir / 'protos'
     protos_stage.mkdir(parents=True, exist_ok=True)
     try:
         shutil.copyfile(str(proto), str(protos_stage / 'instruction.proto'))
         buf = agent_dir.parent / 'node_modules' / '.bin' / 'buf'
         subprocess.run(  # noqa: S603
             [str(buf), 'generate'],
-            cwd=str(ts_dir),
+            cwd=str(agent_dir),
             check=True,
             timeout=timeout,
             capture_output=True,

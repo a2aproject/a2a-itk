@@ -306,6 +306,8 @@ class TestCodegenOrdering:
         (tmp_path / 'package.json').touch()
         agent = tmp_path / 'itk'
         agent.mkdir()
+        # prepare_ts now expects the SDK's own buf.gen.yaml (see codegen.py).
+        (agent / 'buf.gen.yaml').write_text('version: v2\n', encoding='utf-8')
         builders.build_in_place('x/y', 'a' * 40, agent)
         # npm ci comes first
         assert rec.calls[0][0] == ['npm', 'ci']

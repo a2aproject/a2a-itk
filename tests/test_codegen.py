@@ -192,47 +192,64 @@ class TestPrepareGo:
 
 class TestPrepareTs:
     def _stage(self, tmp_path, proto_file):
+        """SDK repo layout: repo/{node_modules/.bin/buf, itk/{buf.gen.yaml}}."""
         repo_root = tmp_path / 'a2a-js'
         repo_root.mkdir()
         (repo_root / 'node_modules' / '.bin').mkdir(parents=True)
         (repo_root / 'node_modules' / '.bin' / 'buf').write_text('#!/bin/sh', encoding='utf-8')
         agent = repo_root / 'itk'
         agent.mkdir()
-        itk = tmp_path / 'a2a-itk-source'
-        (itk / 'agents' / 'ts' / 'v10').mkdir(parents=True)
-        return repo_root, agent, itk
+        # The SDK's own buf.gen.yaml is what prepare_ts now expects — it no
+        # longer reaches into a2a-itk/agents/ts/v10/ for the codegen config.
+        (agent / 'buf.gen.yaml').write_text(
+            'version: v2\ninputs:\n  - directory: protos\n', encoding='utf-8',
+        )
+        return repo_root, agent
 
-    def test_symlinks_stages_proto_and_runs_buf(self, tmp_path, proto_file, rec):
-        repo_root, agent, itk = self._stage(tmp_path, proto_file)
-        codegen.prepare_ts(agent, proto_source=proto_file, itk_source=itk)
+    def test_stages_proto_and_runs_buf_in_agent_dir(self, tmp_path, proto_file, rec):
+        _repo_root, agent = self._stage(tmp_path, proto_file)
+        codegen.prepare_ts(agent, proto_source=proto_file)
 
-        # a2a-itk was symlinked into agent dir
-        link = agent / 'a2a-itk'
-        assert link.is_symlink()
-        assert link.resolve() == itk.resolve()
-
-        # buf was invoked from ts/v10 dir
+        # buf was invoked from the agent dir (where the SDK's buf.gen.yaml
+        # lives) — NOT from a symlinked a2a-itk/agents/ts/v10/.
         argv, cwd = rec.calls[0]
         assert argv[0].endswith('/node_modules/.bin/buf')
         assert argv[1] == 'generate'
-        expected_ts_dir = agent / 'a2a-itk' / 'agents' / 'ts' / 'v10'
-        assert cwd == expected_ts_dir
+        assert cwd == agent
 
-        # Staging protos dir was cleaned up (finally block)
-        assert not (expected_ts_dir / 'protos').exists()
+        # Proto was staged into <agent>/protos/instruction.proto and cleaned
+        # up on success (finally block).
+        assert not (agent / 'protos').exists()
+
+        # No a2a-itk symlink is created any more — the launcher is
+        # decoupled from the /app/agents/ts/v10/ path so Story S17
+        # (delete a2a-itk/agents/) doesn't break TS codegen.
+        assert not (agent / 'a2a-itk').exists()
+
+    def test_missing_buf_gen_yaml_is_a_hard_error(self, tmp_path, proto_file):
+        """Fail-fast when the SDK's itk/ doesn't own its buf config.
+
+        The launcher used to fall back to a2a-itk/agents/ts/v10/buf.gen.yaml
+        via a symlink — that coupling is removed. If a fresh SDK repo
+        forgets to add its own buf.gen.yaml, error out clearly instead of
+        producing an empty pb/ dir.
+        """
+        _repo_root, agent = self._stage(tmp_path, proto_file)
+        (agent / 'buf.gen.yaml').unlink()
+        with pytest.raises(RuntimeError, match='buf.gen.yaml missing'):
+            codegen.prepare_ts(agent, proto_source=proto_file)
 
     def test_cleans_up_stage_on_failure(self, tmp_path, proto_file, monkeypatch):
-        _repo_root, agent, itk = self._stage(tmp_path, proto_file)
+        _repo_root, agent = self._stage(tmp_path, proto_file)
 
         def bad(*_a, **_kw):
             raise subprocess.CalledProcessError(returncode=1, cmd=['buf'], stderr='fail')
 
         monkeypatch.setattr(codegen.subprocess, 'run', bad)
         with pytest.raises(subprocess.CalledProcessError):
-            codegen.prepare_ts(agent, proto_source=proto_file, itk_source=itk)
+            codegen.prepare_ts(agent, proto_source=proto_file)
 
-        ts_dir = agent / 'a2a-itk' / 'agents' / 'ts' / 'v10'
-        assert not (ts_dir / 'protos').exists(), (
+        assert not (agent / 'protos').exists(), (
             'staging protos dir must be cleaned even when buf fails'
         )
 
