@@ -280,6 +280,7 @@ func (e *V10AgentExecutor) handleCallAgentWithResubscribe(ctx context.Context, c
 
 	var taskObj *a2a.Task
 	disconnected := false
+	taskFinished := false
 	for ev, err := range resubEvents {
 		if err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "task not found") {
@@ -311,6 +312,7 @@ func (e *V10AgentExecutor) handleCallAgentWithResubscribe(ctx context.Context, c
 							t = strings.ReplaceAll(t, "task-finished", "")
 							responses = append(responses, t)
 							if strings.Contains(part.Text(), "task-finished") {
+								taskFinished = true
 								log.Info(ctx, "Found task-finished in history during loop, breaking.")
 								goto EndLoop
 							}
@@ -327,6 +329,7 @@ func (e *V10AgentExecutor) handleCallAgentWithResubscribe(ctx context.Context, c
 				responses = append(responses, t)
 
 				if strings.Contains(r, "task-finished") {
+					taskFinished = true
 					log.Info(ctx, "Received task-finished after re-subscribe, breaking loop.")
 					goto EndLoop
 				}
@@ -352,6 +355,10 @@ EndLoop:
 	log.Info(ctx, "Canceling task after retrieval", "taskId", taskID)
 	_, err := client.CancelTask(ctx, &a2a.CancelTaskRequest{ID: a2a.TaskID(taskID)})
 	if err != nil {
+		if taskFinished {
+			log.Info(ctx, "Task already reached a terminal state", "taskId", taskID, "error", err)
+			return responses, nil
+		}
 		return nil, fmt.Errorf("failed to cancel task after retrieval: %w", err)
 	}
 
