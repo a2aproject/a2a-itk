@@ -4,7 +4,6 @@ __pycache__/
 *.log
 bin/
 .ruff_cache/
-/agents/java/v10/target/
-agents/rust/v10/target/
+.pytest_cache/
 target/
 **/node_modules

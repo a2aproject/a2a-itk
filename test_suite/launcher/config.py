@@ -6,9 +6,9 @@ values in the design doc.
 
 The cache **root** is the one setting that intentionally has no obviously
 correct default: today's ``run_itk.sh`` destroys the container and image after
-every run, so nothing survives between invocations anyway. Once the shadow job
-lands it will bind-mount a host directory and set ``ITK_CACHE_DIR`` to point at
-it.
+every run, so nothing survives between invocations anyway. Each SDK's
+``run_itk.sh`` bind-mounts ``$HOME/.cache/a2a-itk-launcher`` into the container
+so builds are reused across runs on the same host.
 """
 
 from __future__ import annotations
@@ -71,8 +71,8 @@ def tree_ttl() -> int:
 def readiness_timeout() -> int:
     """Max seconds to wait for an agent's ``/.well-known/agent-card.json``.
 
-    Default matches ``testlib._check_agent_ready`` (35s) so behaviour is
-    identical to the legacy pipeline.
+    35s locally; SDK ``run_itk.sh`` scripts raise it to 180s because a
+    cold peer build can take minutes on a CI runner.
     """
     return _env_int('ITK_READINESS_TIMEOUT', 35)
 
@@ -137,6 +137,24 @@ def cache_root() -> Path:
     if home:
         return Path(home) / '.cache' / 'a2a-itk'
     return Path('/tmp/a2a-itk-cache')  # noqa: S108 — documented last-resort
+
+
+# ---------------------------------------------------------------------------
+# Mount point for the code under test
+# ---------------------------------------------------------------------------
+
+def mount_dir() -> Path:
+    """Directory the ``current`` agent (the SUT) is served from.
+
+    Defaults to ``<repo>/agents/repo/itk`` — the path each SDK's
+    ``run_itk.sh`` bind-mounts its ``itk/`` onto inside the container.
+    ``$ITK_MOUNT_DIR`` overrides it, which is how ``run_tests.py --mount``
+    points ``current`` at a local SDK checkout with no container involved.
+    """
+    explicit = os.environ.get('ITK_MOUNT_DIR', '').strip()
+    if explicit:
+        return Path(explicit)
+    return _repo_root() / 'agents' / 'repo' / 'itk'
 
 
 # ---------------------------------------------------------------------------

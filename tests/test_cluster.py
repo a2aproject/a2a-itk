@@ -73,6 +73,7 @@ def _patch_cluster_deps(
     pins_taken: list[tuple[str, str]] = []
     pins_released: list[tuple[str, str]] = []
     spawned_procs: list[_FakeProc] = []
+    spawn_log_names: list[str | None] = []
     killed_pgids: list[tuple[int, int]] = []
 
     def fake_checkout(repo, sha, **_kw):
@@ -91,6 +92,7 @@ def _patch_cluster_deps(
             raise spawn_raises('fake spawn failure')
         p = _FakeProc()
         spawned_procs.append(p)
+        spawn_log_names.append(log_name)
         return p
 
     def fake_wait_ready(_port, *, timeout_s, **_kw):  # noqa: ARG001
@@ -109,8 +111,44 @@ def _patch_cluster_deps(
         'pins_taken': pins_taken,
         'pins_released': pins_released,
         'spawned_procs': spawned_procs,
+        'spawn_log_names': spawn_log_names,
         'killed_pgids': killed_pgids,
     }
+
+
+class TestLogNames:
+    """Log basenames are positional, not keyed by spec.
+
+    Two scenario peers can resolve to the same (repo, sha) — `python_v10`
+    and `python_v10_2` do. `TargetSpec` is a frozen dataclass, so those two
+    specs compare equal; keying log names by spec silently collapsed them
+    onto one file and interleaved both agents' output.
+    """
+
+    DUPE = TargetSpec(kind=Kind.CHECKOUT, repo='a2aproject/a2a-python', sha=_SHA_A)
+
+    def test_duplicate_specs_get_distinct_log_names(self, monkeypatch):
+        with _patch_cluster_deps(monkeypatch) as st:
+            with Cluster(readiness_timeout_s=1, teardown_grace_s=1) as c:
+                c.start_all(
+                    [self.DUPE, self.DUPE],
+                    log_names=['agent_python_v10', 'agent_python_v10_2'],
+                )
+        assert sorted(st['spawn_log_names']) == [
+            'agent_python_v10', 'agent_python_v10_2',
+        ]
+
+    def test_omitted_log_names_pass_none_through(self, monkeypatch):
+        with _patch_cluster_deps(monkeypatch) as st:
+            with Cluster(readiness_timeout_s=1, teardown_grace_s=1) as c:
+                c.start_all([self.DUPE, self.DUPE])
+        assert st['spawn_log_names'] == [None, None]
+
+    def test_length_mismatch_is_rejected(self, monkeypatch):
+        with _patch_cluster_deps(monkeypatch):
+            with Cluster(readiness_timeout_s=1, teardown_grace_s=1) as c:
+                with pytest.raises(ValueError, match='line up positionally'):
+                    c.start_all([self.DUPE, self.DUPE], log_names=['only_one'])
 
 
 class TestAddSingle:
@@ -336,9 +374,9 @@ class TestTeardown:
 
     def test_mount_target_no_pin(self, monkeypatch, tmp_path):
         # Set up so resolve.MOUNT succeeds against tmp_path
-        from test_suite.launcher import resolve as resolve_mod
-        monkeypatch.setattr(resolve_mod, '_repo_root', lambda: tmp_path)
-        (tmp_path / 'agents' / 'repo' / 'itk').mkdir(parents=True)
+        mount = tmp_path / 'agents' / 'repo' / 'itk'
+        monkeypatch.setenv('ITK_MOUNT_DIR', str(mount))
+        mount.mkdir(parents=True)
 
         with _patch_cluster_deps(monkeypatch) as st:
             with Cluster(readiness_timeout_s=1, teardown_grace_s=1) as c:

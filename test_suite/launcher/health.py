@@ -3,7 +3,7 @@
 Kept dependency-free (stdlib ``urllib.request`` only) so the launcher can
 stay freestanding — no httpx / grpcio / a2a-sdk import chain just to
 check whether an agent is up. Same 35s default as
-``testlib._check_agent_ready`` so behaviour matches the legacy pipeline.
+``testlib``'s original readiness poll, so the observable behaviour is unchanged.
 """
 
 from __future__ import annotations

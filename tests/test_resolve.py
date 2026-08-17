@@ -18,15 +18,15 @@ _SHA = 'a' * 40
 
 
 class TestResolve:
-    def test_mount_returns_agents_repo_itk(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(resolve, '_repo_root', lambda: tmp_path)
+    def test_mount_returns_the_configured_mount_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv('ITK_MOUNT_DIR', str(tmp_path / 'agents' / 'repo' / 'itk'))
         (tmp_path / 'agents' / 'repo' / 'itk').mkdir(parents=True)
         spec = TargetSpec(kind=Kind.MOUNT)
         got = resolve.resolve(spec)
         assert got == tmp_path / 'agents' / 'repo' / 'itk'
 
     def test_mount_missing_raises(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(resolve, '_repo_root', lambda: tmp_path)
+        monkeypatch.setenv('ITK_MOUNT_DIR', str(tmp_path / 'agents' / 'repo' / 'itk'))
         with pytest.raises(RuntimeError, match='not been mounted'):
             resolve.resolve(TargetSpec(kind=Kind.MOUNT))
 
@@ -83,7 +83,7 @@ class TestLaunchSession:
         released: list[tuple[str, str]] = []
         monkeypatch.setattr(cache, 'release',
                             lambda repo, sha: released.append((repo, sha)))
-        monkeypatch.setattr(resolve, '_repo_root', lambda: tmp_path)
+        monkeypatch.setenv('ITK_MOUNT_DIR', str(tmp_path / 'agents' / 'repo' / 'itk'))
         (tmp_path / 'agents' / 'repo' / 'itk').mkdir(parents=True)
 
         with resolve.LaunchSession() as sess:
@@ -138,7 +138,7 @@ class TestLaunchSessionLogHandles:
             return p
 
         monkeypatch.setattr(spawn_mod, 'spawn_from_dir', fake_spawn_from_dir)
-        monkeypatch.setattr(resolve, '_repo_root', lambda: tmp_path)
+        monkeypatch.setenv('ITK_MOUNT_DIR', str(tmp_path / 'agents' / 'repo' / 'itk'))
         (tmp_path / 'agents' / 'repo' / 'itk').mkdir(parents=True)
 
         with resolve.LaunchSession() as sess:
@@ -164,7 +164,7 @@ class TestLaunchSessionLogHandles:
             return p
 
         monkeypatch.setattr(spawn_mod, 'spawn_from_dir', fake_spawn_from_dir)
-        monkeypatch.setattr(resolve, '_repo_root', lambda: tmp_path)
+        monkeypatch.setenv('ITK_MOUNT_DIR', str(tmp_path / 'agents' / 'repo' / 'itk'))
         (tmp_path / 'agents' / 'repo' / 'itk').mkdir(parents=True)
 
         with pytest.raises(RuntimeError, match='deliberate'):
@@ -185,7 +185,7 @@ class TestLaunchSessionLogHandles:
             return FakeProc()
 
         monkeypatch.setattr(spawn_mod, 'spawn_from_dir', fake)
-        monkeypatch.setattr(resolve, '_repo_root', lambda: tmp_path)
+        monkeypatch.setenv('ITK_MOUNT_DIR', str(tmp_path / 'agents' / 'repo' / 'itk'))
         (tmp_path / 'agents' / 'repo' / 'itk').mkdir(parents=True)
 
         with resolve.LaunchSession() as sess:

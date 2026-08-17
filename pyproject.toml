@@ -43,6 +43,6 @@ exclude = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["a2a", "agents.python.v03.pyproto", "scripts", "test_suite"]
+known-first-party = ["a2a", "pyproto", "scripts", "test_suite"]
 
 

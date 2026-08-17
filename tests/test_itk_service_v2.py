@@ -1,16 +1,16 @@
-"""itk_service_v2 — /run wiring, matrix + launcher integration.
+"""itk_service_v2 + itk_runner — /run wiring, matrix + launcher integration.
 
-Mocked below the launcher and scenario-execution layer (Cluster,
-matrix, resolve_ref, execute_itk_test are stubbed). Each real subsystem
-is tested independently in its own module — here we only verify the
-service glues them correctly:
+Drives the pipeline through the HTTP surface, mocked below the launcher and
+scenario-execution layer (Cluster, matrix, resolve_ref, execute_itk_test are
+stubbed on :mod:`itk_runner`, where they now live). Each real subsystem is
+tested independently in its own module — here we only verify the glue:
 
   * frozen wire schema in and out
   * matrix + resolve_ref invoked with the right args per unique SDK
   * 'current' bypasses matrix -> MOUNT
   * Cluster.start_all called with the built specs
   * partial-startup failure -> 502 with per-target detail
-  * legacy _AGENT_DEFS ports poked and cleared
+  * _AGENT_DEFS ports poked and cleared
   * scenarios executed sequentially against the shared cluster
 """
 
@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-import itk_service_v2
+import itk_runner
 from itk_service_v2 import app
 from test_suite.launcher.errors import InfraFailure, PermanentError, Stage
 from test_suite.launcher.matrix import Matrix
@@ -70,7 +70,7 @@ class _FakeCluster:
     instances: list['_FakeCluster'] = []
 
     def __init__(self, *_a: Any, **kw: Any) -> None:
-        self.start_all_calls: list[tuple[list[Any], dict[Any, str] | None]] = []
+        self.start_all_calls: list[tuple[list[Any], list[str | None] | None]] = []
         self.init_kwargs: dict[str, Any] = dict(kw)
         self.exited = False
         # Default: every spec succeeds with sequential fake ports.
@@ -110,22 +110,22 @@ def stub_deps(monkeypatch):
     resolve_ref + a stub execute_itk_test. Individual tests override
     pieces via monkeypatch."""
     # Fresh matrix each test — some tests replace this with their own.
-    monkeypatch.setattr(itk_service_v2, '_matrix', Matrix.from_dict(_TEST_MATRIX))
+    monkeypatch.setattr(itk_runner, '_matrix', Matrix.from_dict(_TEST_MATRIX))
 
     # Fake Cluster class.
     _FakeCluster.instances = []
-    monkeypatch.setattr(itk_service_v2, 'Cluster', _FakeCluster)
+    monkeypatch.setattr(itk_runner, 'Cluster', _FakeCluster)
 
     # Stub resolve_ref: main -> _SHA_A for a2a-python, _SHA_B for a2a-go.
     def fake_resolve_ref(repo: str, ref: str) -> str:  # noqa: ARG001
         return {'a2aproject/a2a-python': _SHA_A,
                 'a2aproject/a2a-go': _SHA_B}.get(repo, 'c' * 40)
-    monkeypatch.setattr(itk_service_v2, 'resolve_ref', fake_resolve_ref)
+    monkeypatch.setattr(itk_runner, 'resolve_ref', fake_resolve_ref)
 
     # Stub execute_itk_test: returns a passing result for the label.
     async def fake_execute(sdks, behavior, edges=None, scenario_name=None, **_kw):  # noqa: ARG001
         return {scenario_name: {'passed': True, 'sdks': sdks, 'edges': edges}}
-    monkeypatch.setattr(itk_service_v2, 'execute_itk_test', fake_execute)
+    monkeypatch.setattr(itk_runner, 'execute_itk_test', fake_execute)
 
     return _FakeCluster
 
@@ -225,7 +225,7 @@ class TestSpecBuilding:
         def counting_resolve(repo, ref):
             calls.append((repo, ref))
             return _SHA_A
-        monkeypatch.setattr(itk_service_v2, 'resolve_ref', counting_resolve)
+        monkeypatch.setattr(itk_runner, 'resolve_ref', counting_resolve)
 
         # python_v10 and python_v10_2 both map to same matrix entry.
         client.post('/run', json={
@@ -253,7 +253,7 @@ class TestSpecBuilding:
     def test_permanent_resolve_error_400(self, client, monkeypatch, stub_deps):  # noqa: ARG002
         def bad(repo, ref):
             raise PermanentError(repo, ref, Stage.FETCH, 'ref does not exist')
-        monkeypatch.setattr(itk_service_v2, 'resolve_ref', bad)
+        monkeypatch.setattr(itk_runner, 'resolve_ref', bad)
         r = client.post('/run', json={
             'tests': [{'name': 't', 'sdks': ['python_v10'], 'behavior': 'echo'}],
         })
@@ -262,7 +262,7 @@ class TestSpecBuilding:
     def test_transient_resolve_error_502(self, client, monkeypatch, stub_deps):  # noqa: ARG002
         def flaky(repo, ref):
             raise InfraFailure(repo, ref, Stage.FETCH, message='ls-remote timeout')
-        monkeypatch.setattr(itk_service_v2, 'resolve_ref', flaky)
+        monkeypatch.setattr(itk_runner, 'resolve_ref', flaky)
         r = client.post('/run', json={
             'tests': [{'name': 't', 'sdks': ['python_v10'], 'behavior': 'echo'}],
         })
@@ -272,6 +272,20 @@ class TestSpecBuilding:
 # ---------------------------------------------------------------------------
 # Cluster startup + partial failure
 # ---------------------------------------------------------------------------
+
+
+class TestLogNaming:
+    def test_log_names_are_positional_and_match_agent_ids(self, client):
+        """Two ids sharing one spec must still get distinct log files."""
+        client.post('/run', json={'tests': [{
+            'name': 's', 'sdks': ['python_v10', 'python_v10_2'],
+            'behavior': 'send_message',
+        }]})
+        specs, log_names = _FakeCluster.instances[-1].start_all_calls[0]
+        # Same repo+ref, so the two specs are equal — the log names must
+        # not be (a dict keyed by spec would collapse them).
+        assert specs[0] == specs[1]
+        assert log_names == ['agent_python_v10', 'agent_python_v10_2']
 
 
 class TestClusterStartup:
@@ -322,7 +336,7 @@ class TestClusterStartup:
 
     def test_partial_startup_502_lists_failed(self, client, monkeypatch, stub_deps):  # noqa: ARG002
         cluster = _FakeCluster()
-        monkeypatch.setattr(itk_service_v2, 'Cluster', lambda *a, **kw: cluster)
+        monkeypatch.setattr(itk_runner, 'Cluster', lambda *a, **kw: cluster)
 
         # First succeeds, second fails at READY.
         original_start = cluster.start_all
@@ -354,7 +368,7 @@ class TestClusterStartup:
     def test_cluster_teardown_on_scenario_exception(self, client, monkeypatch, stub_deps):  # noqa: ARG002
         async def raising_execute(**_kw):
             raise RuntimeError('scenario blew up')
-        monkeypatch.setattr(itk_service_v2, 'execute_itk_test', raising_execute)
+        monkeypatch.setattr(itk_runner, 'execute_itk_test', raising_execute)
 
         r = client.post('/run', json={
             'tests': [{'name': 't', 'sdks': ['current'], 'behavior': 'echo'}],
@@ -365,7 +379,7 @@ class TestClusterStartup:
 
 
 # ---------------------------------------------------------------------------
-# Adapter: launcher ports → legacy _AGENT_DEFS
+# Adapter: launcher ports → _AGENT_DEFS
 # ---------------------------------------------------------------------------
 
 
@@ -385,10 +399,10 @@ class TestAdapter:
                 )
             return {scenario_name: {'passed': True, 'sdks': sdks, 'edges': edges}}
 
-        monkeypatch.setattr(itk_service_v2, 'execute_itk_test', probing_execute)
+        monkeypatch.setattr(itk_runner, 'execute_itk_test', probing_execute)
 
         # Snapshot BEFORE — ports for current should not be set (or set to
-        # whatever legacy left; we care about our writes + cleanup).
+        # whatever was there; we care about our writes + cleanup).
         before_current = _AGENT_DEFS['current'].get('httpPort')
 
         client.post('/run', json={
@@ -403,7 +417,7 @@ class TestAdapter:
         assert seen_ports['current'][0] != seen_ports['current'][1]
 
         # AFTER: our writes are gone (compared to snapshot).
-        # We only delete keys we wrote — if legacy already had a value there,
+        # We only delete keys we wrote — if something already had a value there,
         # we don't restore it, we just don't touch what we didn't write.
         after_current = _AGENT_DEFS['current'].get('httpPort')
         assert after_current == before_current, (
@@ -425,7 +439,7 @@ class TestSharedCluster:
         async def recording_execute(sdks, behavior, edges=None, scenario_name=None, **_kw):  # noqa: ARG001
             seen_call_order.append(scenario_name)
             return {scenario_name: {'passed': True, 'sdks': sdks, 'edges': edges}}
-        monkeypatch.setattr(itk_service_v2, 'execute_itk_test', recording_execute)
+        monkeypatch.setattr(itk_runner, 'execute_itk_test', recording_execute)
 
         r = client.post('/run', json={
             'tests': [
@@ -450,7 +464,7 @@ class TestSharedCluster:
 class TestMatrixLoad:
     def test_lazy_load_from_default_on_first_use(self, monkeypatch, client):
         # Reset the cache and monkey-patch Matrix.from_default to verify.
-        monkeypatch.setattr(itk_service_v2, '_matrix', None)
+        monkeypatch.setattr(itk_runner, '_matrix', None)
         called = [0]
         real_from_default = Matrix.from_default
 
@@ -458,7 +472,7 @@ class TestMatrixLoad:
             called[0] += 1
             return Matrix.from_dict(_TEST_MATRIX)
 
-        monkeypatch.setattr(itk_service_v2.Matrix, 'from_default', staticmethod(counted))
+        monkeypatch.setattr(itk_runner.Matrix, 'from_default', staticmethod(counted))
 
         # First /run triggers a load.
         client.post('/run', json={
@@ -473,5 +487,5 @@ class TestMatrixLoad:
         assert called[0] == 1, 'second /run should not reload matrix'
 
         # Cleanup — restore real classmethod so other tests aren't affected.
-        monkeypatch.setattr(itk_service_v2.Matrix, 'from_default',
+        monkeypatch.setattr(itk_runner.Matrix, 'from_default',
                             staticmethod(real_from_default))

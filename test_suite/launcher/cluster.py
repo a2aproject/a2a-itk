@@ -167,30 +167,51 @@ class Cluster(contextlib.AbstractContextManager):
         self,
         specs: list[TargetSpec],
         *,
-        log_names: dict[TargetSpec, str] | None = None,
+        log_names: list[str | None] | None = None,
         max_workers: int | None = None,
     ) -> list[StartOutcome]:
         """Spawn every spec in parallel; wait for all readiness.
+
+        Args:
+            specs: What to start. The same spec may appear more than once —
+                two scenario peers can share a (repo, sha), e.g.
+                ``python_v10`` and ``python_v10_2``.
+            log_names: Log basenames, positionally aligned with ``specs``.
+                Positional, not keyed by spec: ``TargetSpec`` is a frozen
+                dataclass, so duplicate specs compare equal and a dict would
+                silently collapse them onto one log file — losing exactly
+                the distinction you need when two instances of one SDK are
+                talking to each other.
+            max_workers: Parallelism cap; defaults to ``ITK_MAX_WORKERS``.
 
         Order of returned outcomes matches ``specs``. Failures are captured
         per-target so the caller can decide whether to run scenarios with a
         partial cluster or abort. The returned list is always the same
         length as ``specs`` — callers can safely ``zip(specs, outcomes)``.
+
+        Raises:
+            ValueError: ``log_names`` was given but is a different length
+                than ``specs``, which would misattribute agent logs.
         """
         if not specs:
             return []
+        if log_names is not None and len(log_names) != len(specs):
+            raise ValueError(
+                f'log_names has {len(log_names)} entries but there are '
+                f'{len(specs)} specs; they must line up positionally'
+            )
         if max_workers is None:
             # ITK_MAX_WORKERS (see config.max_workers) overrides the default
             # for resource-constrained CI runners; otherwise scale to
             # len(specs) but never below 4 so small clusters stay parallel.
             max_workers = config.max_workers()
         workers = max_workers if max_workers is not None else max(4, len(specs))
-        log_names = log_names or {}
 
         outcomes: list[StartOutcome | None] = [None] * len(specs)
 
         def worker(i: int) -> None:
-            outcomes[i] = self._start_one(specs[i], log_name=log_names.get(specs[i]))
+            name = log_names[i] if log_names is not None else None
+            outcomes[i] = self._start_one(specs[i], log_name=name)
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             for _ in executor.map(worker, range(len(specs))):

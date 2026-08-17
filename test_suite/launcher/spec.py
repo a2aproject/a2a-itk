@@ -12,11 +12,10 @@ ref (``main``, a tag) is a fail-fast configuration error. Refs are resolved to
 SHAs once per run at plan time so intra-run drift of a moving ref cannot mix
 versions across peers.
 
-There is intentionally no ``LOCAL`` kind for baked baselines. During the
-strangler window we run the untouched legacy pipeline in parallel with this
-one (the S1 comparison harness diffs the two outputs). Introducing a
-launcher-based path for baselines would defeat the whole point of the
-comparison — it would test the new spawn/cache/codegen against itself.
+There is intentionally no ``LOCAL`` kind. Baked baseline agents used to live
+in this repo under ``agents/<sdk>/<line>``; they were deleted once every SDK
+started sourcing its agent from its own repository, and re-introducing a
+local kind would let that duplication grow back.
 """
 
 from __future__ import annotations

@@ -3,7 +3,9 @@
 Dispatches a :class:`~test_suite.launcher.spec.TargetSpec` to one of two concrete
 locations:
 
-  * ``MOUNT``    — the fixed container-mount path ``agents/repo/itk``.
+  * ``MOUNT``    — :func:`test_suite.launcher.config.mount_dir`, i.e. the
+                   container mount at ``agents/repo/itk`` unless
+                   ``$ITK_MOUNT_DIR`` overrides it.
   * ``CHECKOUT`` — fetch + build under the on-disk cache; :mod:`.cache`
                    owns the concurrency guarantees.
 
@@ -20,13 +22,8 @@ import subprocess
 from pathlib import Path
 
 from test_suite import current as _current
-from test_suite.launcher import cache
+from test_suite.launcher import cache, config
 from test_suite.launcher.spec import Kind, TargetSpec
-
-
-def _repo_root() -> Path:
-    """a2a-itk root; matches :func:`test_suite.launcher.config._repo_root`."""
-    return Path(__file__).resolve().parents[2]
 
 
 def resolve(spec: TargetSpec) -> Path:
@@ -38,14 +35,15 @@ def resolve(spec: TargetSpec) -> Path:
     :class:`~test_suite.launcher.cluster.Cluster`).
 
     Raises:
-        RuntimeError: MOUNT target has not been mounted into the container.
+        RuntimeError: MOUNT target is not present at
+            :func:`test_suite.launcher.config.mount_dir`.
         test_suite.launcher.errors.InfraFailure: CHECKOUT fetch/build failed
             after retries.
         test_suite.launcher.errors.PermanentError: CHECKOUT SHA does not exist
             on the remote.
     """
     if spec.kind is Kind.MOUNT:
-        d = _repo_root() / 'agents' / 'repo' / 'itk'
+        d = config.mount_dir()
         if not d.exists():
             raise RuntimeError(
                 'current agent has not been mounted and is not available to test'
@@ -69,9 +67,9 @@ def spawn(
 ) -> subprocess.Popen:
     """Resolve ``spec`` then spawn its agent.
 
-    Uses :func:`test_suite.current.spawn_from_dir` so this new path and the
-    legacy ``current.spawn_agent`` share one polyglot implementation — no
-    drift possible between the two entry points.
+    Uses :func:`test_suite.current.spawn_from_dir`, the same polyglot
+    implementation :class:`~test_suite.launcher.cluster.Cluster` calls, so
+    the SUT and its peers can't drift in how they're started.
     """
     agent_dir = resolve(spec)
     return _current.spawn_from_dir(

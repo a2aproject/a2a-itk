@@ -66,8 +66,8 @@ ITK is structured to validate in-development SDK codebases against a cluster of 
 | **Python** | ✅ | ✅ | ✅ |
 | **Go** | ✅ | ✅ | ✅ |
 | **TypeScript** | ✅ | ✅ | ✅ |
-| **Java** | ❌ | ✅ | ⚠️ |
-| **Rust** | ❌ | ✅ | ❌ |
+| **Java** | ❌ | ✅ | ✅ |
+| **Rust** | ❌ | ✅ | ✅ |
 | **.NET** | ❌ | ❌ | ⚠️ |
 
 > [!NOTE]
@@ -89,14 +89,19 @@ Within these transport scenarios, the following A2A features can be tested:
 
 ## 📂 Project Structure
 
-- `agents/`: SDK-specific agent implementations (e.g., Go, Python).
+- `protos/instruction.proto`: The single source for the traversal instruction message. Every SDK's agent generates its stubs from this file.
+- `pyproto/`: Python stubs generated from `protos/instruction.proto` (committed; regenerate with `./build_protos.sh`).
+- `matrix.yaml`: Maps each scenario-level agent identifier (`python_v10`, `go_v03`, …) to the SDK repo and ref the launcher fetches it from.
+- `test_suite/launcher/`: The launcher engine — fetch, cache, build, spawn, health-check, and tear down a cluster of agents at given repo+SHA.
+- `test_suite/`: Agent identifier registry and the Eulerian traversal logic that turns a scenario into a nested instruction.
+- `scenarios/smoke.json`: Default scenario set for `run_tests.py` — peers only, so it runs with no SDK checked out.
 - `dashboard/`: Static web assets (HTML, JS, CSS) for rendering compatibility matrix test results.
 - `scripts/`: Auxiliary utilities, including result-parsing metrics pipelines.
-- `test_suite/`: Modular agent definitions, launchers, and traversal logic.
-- `itk_service.py`: FastAPI orchestration service for remote test execution.
+- `itk_runner.py`: The scenario execution pipeline — plan, start a cluster, run, tear down. Shared by both front ends below.
+- `itk_service_v2.py`: HTTP `/run` handler, for CI. A thin wrapper over `itk_runner`.
+- `run_tests.py`: Local CLI, for running scenarios on your own machine. Also a thin wrapper over `itk_runner`.
 - `notifications_app.py`: Dedicated mock server for ingesting and verifying SDK push notifications.
-- `run_tests.py`: CLI orchestrator for running concurrent test scenarios.
-- `testlib.py`: Core logic for cluster lifecycle, port management, and test execution.
+- `testlib.py`: Scenario execution — payload construction, transport dispatch, and result verification.
 - `Dockerfile`: Container environment definition for the ITK service.
 
 ---
@@ -108,11 +113,46 @@ Within these transport scenarios, the following A2A features can be tested:
 - **Go 1.25+**: Required for Go agent builds.
 - **Node.js v20**: Required for certain A2A utility components.
 
-### 1. Local Run with Stable SDKs
-Run the standard integration suite locally using purely the stable reference baseline agents:
+### 1. Local Run
+Every peer is fetched from its own repository at the ref pinned in [`matrix.yaml`](matrix.yaml), so
+a scenario that doesn't reference `current` needs nothing checked out but this repo:
+
 ```bash
-uv run run_tests.py
+uv run run_tests.py                              # the bundled smoke set
+uv run run_tests.py --scenarios path/to/x.json   # any SDK's scenarios.json
+uv run run_tests.py --sdks python_v10,go_v10     # narrow to those peers
+uv run run_tests.py --list-sdks                  # what matrix.yaml can resolve
+uv run run_tests.py --dry-run                    # plan only, no network
 ```
+
+To test a local SDK checkout as the code under test, point `current` at it — the `run_itk.sh`
+workflow without the container round-trip:
+
+```bash
+uv run run_tests.py --mount ~/Source/a2a-python/itk \
+                    --scenarios ~/Source/a2a-python/itk/scenarios.json
+```
+
+`run_tests.py` and the HTTP `/run` handler share one pipeline ([`itk_runner.py`](itk_runner.py)), so
+a scenario behaves the same locally and in CI.
+
+Two things to know. Builds run on your machine with each SDK's native toolchain, so you need
+whatever the selected peers require (uv, go + `protoc-gen-go`, cargo, mvn + JDK, npm) — the bundled
+smoke set sticks to python and go for that reason. And builds are cached under `$ITK_CACHE_DIR`
+(default `~/.cache/a2a-itk`), so a cold first run is slow and repeats are fast. Add `--log-dir DIR`
+to capture each agent's output when something won't start.
+
+If you'd rather not install a toolchain, the same CLI runs inside the ITK image, which has all of
+them:
+
+```bash
+docker build -t itk_service .
+docker run --rm -v "$PWD/scenarios:/scenarios" \
+  -v "$HOME/.cache/a2a-itk-launcher:/root/.cache/a2a-itk" \
+  itk_service uv run run_tests.py --scenarios /scenarios/smoke.json
+```
+
+The unit tests cover the launcher and traversal logic with no network at all: `uv run pytest`.
 
 ### 2. Setting up PR Testing & Nightly Runs
 To gate **Pull Requests** or schedule automated **nightly runs** against an in-development SDK repository (e.g., `a2a-python` or `a2a-go`), consuming codebases mount their local source directly into ITK's validation container runtime.
@@ -121,7 +161,8 @@ To gate **Pull Requests** or schedule automated **nightly runs** against an in-d
 
 1. **Instruction Handling Agent Implementation**:
    - Consuming SDKs must implement an instruction handling agent capable of parsing nested traversal instructions and executing varied agent behavior modes.
-   - **Implementation Reference**: The native stable baselines hosted in this repository ([agents/go](https://github.com/a2aproject/a2a-itk/tree/main/agents/go) and [agents/python](https://github.com/a2aproject/a2a-itk/tree/main/agents/python)) serve as comprehensive production referrals for custom handling logic.
+   - The agent lives in the SDK's own repository under `itk/`, and generates its proto stubs from this repo's `protos/instruction.proto`. Add the SDK to [`matrix.yaml`](matrix.yaml) so the launcher knows which repo and ref to fetch it from.
+   - **Implementation Reference**: [a2a-python/itk](https://github.com/a2aproject/a2a-python/tree/main/itk) and [a2a-go/itk](https://github.com/a2aproject/a2a-go/tree/main/itk) are the reference implementations.
 
 2. **Custom Scenario Definitions**:
    - Consuming repositories supply customized scenario suites tuned to the desired depth of testing:
@@ -198,17 +239,5 @@ Incorporate traversal test strategies evaluating additional native client API co
 - [ ] `create_task_push_notification_config` / `delete_task_push_notification_config`
 - [ ] `get_extended_agent_card`
 
-### 4. Missing Stable Baseline Implementations
-Package stable agents images for:
-- [ ] **.NET** baseline agents
-- [ ] **Java** baseline agents
-- [ ] **Rust** baseline agents
-
-### 5. Client SDK Repository Orchestration
-Integrate full continuous integration orchestration pipelines and custom instruction handlers across client SDK repositories to transition them from placeholders to active validation status:
-- [ ] **Java SDK**: Implement functional instruction handling agents and scenario orchestration scripts to replace existing basic `current` placeholders.
-- [ ] **.NET SDK**: Implement functional instruction handling agents and scenario orchestration scripts to replace existing basic `current` placeholders.
-- [ ] **Rust SDK**: Set up core mounting configuration, custom handlers, and full repository verification workflows.
-
-### 6. Automated Baseline Lifecycle
-- [ ] **Stable Agent Version Bumping**: Implement automated CI/CD workflows to periodically detect new stable upstream A2A SDK releases and automatically bump version configurations for ITK reference baseline agents.
+### 4. Client SDK Repository Onboarding
+- [ ] **.NET SDK**: Implement an instruction handling agent under `itk/`, add a `matrix.yaml` entry, and wire up the orchestration workflow.

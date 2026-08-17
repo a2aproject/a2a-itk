@@ -48,18 +48,6 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain ${RUST_VERSION} --no-modify-path
 ENV PATH=$PATH:/root/.cargo/bin
 
-# Pre-build the Rust v1.0 agent so the binary is cached in the image layer.
-# This avoids a cold Cargo compile at test runtime.
-# Mirror the repo structure so build.rs can resolve ../../../protos correctly.
-COPY protos /tmp/protos
-COPY agents/rust/v10 /tmp/agents/rust/v10
-WORKDIR /tmp/agents/rust/v10
-RUN cargo build --release && \
-    mkdir -p /app/agents/rust/v10/target/release && \
-    cp target/release/itk-rust-v10-agent /app/agents/rust/v10/target/release/ && \
-    rm -rf target
-WORKDIR /app
-
 # Install Maven 3.9.9 (to satisfy protobuf-maven-plugin 3.9.6+ requirement)
 ENV MAVEN_VERSION=3.9.9
 RUN curl -sSL https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz | tar -xz -C /usr/local
@@ -68,13 +56,16 @@ ENV PATH=$PATH:/usr/local/apache-maven-${MAVEN_VERSION}/bin
 # Set the working directory
 WORKDIR /app
 
-# We assume the user runs docker build -t itk_service -f Dockerfile .
-# inside the itk/ directory.
-COPY . /app
-
-# Install Python dependencies using uv (JIT during run)
 ENV PYTHONPATH=/app
 ENV UV_INDEX_URL=https://pypi.org/simple
+
+# Dependency manifests only, ahead of the source. `uv sync` installs the
+# project itself editable — no source ends up in the wheel, imports resolve
+# through PYTHONPATH — so it needs nothing but these three files, and this
+# layer then survives every source-only change. README.md is not optional:
+# pyproject.toml declares `readme = "README.md"` and hatchling errors out
+# without it.
+COPY pyproject.toml uv.lock README.md /app/
 
 # Materialize the itk service's own venv at build time so the CMD doesn't
 # pay first-launch install cost, and pre-warm uv's wheel cache with the
@@ -85,6 +76,11 @@ ENV UV_INDEX_URL=https://pypi.org/simple
 RUN uv sync --frozen && \
     uv run --with grpcio-tools python -c "import grpc_tools"
 
+# Now the source. Anything excluded by .dockerignore (tests, scripts,
+# dashboard) never reaches this layer, so editing it can't invalidate the
+# build. We assume `docker build -t itk_service .` from the repo root.
+COPY . /app
+
 # Go and Node binaries are installed globally for JIT use
 
 # Expose the service port
@@ -93,19 +89,11 @@ EXPOSE 8000
 # Set environment variables if needed
 ENV PYTHONUNBUFFERED=1
 
-# Which service script to run — swap at `docker run` time.
-#
-# The launcher's new pipeline (test_suite/launcher/*) will eventually ship
-# as `itk_service_v2.py`; until it lands as the default, this container
-# defaults to the legacy `itk_service.py`. To run the new service instead:
-#
-#     docker run -e ITK_ENTRYPOINT=itk_service_v2.py itk_service
-#
-# Both entrypoints share the same image (identical toolchains, baked venv,
-# and launcher code) — only the top-level HTTP handler differs. Keeping
-# them in one image avoids maintaining two ~90-line Dockerfiles that would
-# drift.
-ENV ITK_ENTRYPOINT=itk_service.py
+# Which service script to run. The legacy `itk_service.py` is gone (every
+# SDK cut over to the launcher-based service); the env var stays so an
+# operator can point the container at an alternative handler without
+# rebuilding, and because every SDK's run_itk.sh already sets it.
+ENV ITK_ENTRYPOINT=itk_service_v2.py
 
 # `exec` so signals go straight to `uv run` (the shell never lingers in
 # the process tree). `sh -c` is required to expand $ITK_ENTRYPOINT at

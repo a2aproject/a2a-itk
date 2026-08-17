@@ -104,8 +104,8 @@ class TestImmutable:
 class TestNoLocalKind:
     """Regression: `Kind.LOCAL` was removed per reviewer feedback (PR #28).
 
-    Baked baselines run through the untouched legacy pipeline during the
-    strangler window, not through a launcher-based path.
+    Baked baselines no longer exist — every agent, SUT included, is
+    reached through MOUNT or CHECKOUT.
     """
 
     def test_local_kind_gone(self):

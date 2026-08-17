@@ -1,16 +1,12 @@
-"""Launcher for the mounted 'current' agent (SUT).
+"""Polyglot agent spawn — the launcher's shared implementation.
 
-Exposes two entry points:
-
-  * :func:`spawn_agent` — the legacy per-SDK entry the test-suite registry
-    calls (``test_suite.get_agent_launcher('current')``). Preserves the
-    ``ITK_LOG_LEVEL=DEBUG`` behaviour that opens a debug log at
-    ``logs/agent_current.log``.
-
-  * :func:`spawn_from_dir` — the polyglot body, parameterised on an
-    ``agent_dir``. Used by :mod:`test_suite.launcher.resolve` for both the
-    ``MOUNT`` (this file's traditional target) and ``CHECKOUT`` kinds so
-    every path through the launcher shares one spawn implementation.
+:func:`spawn_from_dir` detects an agent's language from the contents of its
+directory and starts it. Both launcher entry points go through it —
+:mod:`test_suite.launcher.resolve` for single spawns and
+:class:`test_suite.launcher.cluster.Cluster` for batches — and both the
+``MOUNT`` (the SUT bind-mounted at ``agents/repo/itk``) and ``CHECKOUT``
+(a peer fetched from its SDK repo) kinds, so no drift is possible between
+how the code under test and its peers are started.
 """
 
 from __future__ import annotations
@@ -23,44 +19,8 @@ from pathlib import Path
 from tempfile import gettempdir
 
 
-_ROOT_DIR = Path(__file__).parent.parent
-_MOUNT_DIR = _ROOT_DIR / 'agents' / 'repo' / 'itk'
-
-
 # ---------------------------------------------------------------------------
-# Legacy entry point
-# ---------------------------------------------------------------------------
-
-
-def spawn_agent(http_port: int, grpc_port: int) -> subprocess.Popen:
-    """Spawn the current (mounted) agent process.
-
-    Raises:
-        RuntimeError: The 'current' agent directory hasn't been mounted, or
-            its language can't be determined.
-    """
-    if not _MOUNT_DIR.exists():
-        raise RuntimeError(
-            'current agent has not been mounted and is not available to test'
-        )
-    return spawn_from_dir(
-        _MOUNT_DIR, http_port, grpc_port,
-        log_dir=_legacy_log_dir(),
-        # Preserve the historical filename so anyone tailing logs/agent_current.log
-        # in dev mode isn't surprised.
-        log_name='agent_current',
-    )
-
-
-def _legacy_log_dir() -> Path | None:
-    """Preserve pre-launcher behaviour: ``ITK_LOG_LEVEL=DEBUG`` opens logs."""
-    if os.environ.get('ITK_LOG_LEVEL', 'INFO').upper() != 'DEBUG':
-        return None
-    return _ROOT_DIR / 'logs'
-
-
-# ---------------------------------------------------------------------------
-# Polyglot spawn body — the launcher's shared implementation
+# Polyglot spawn body
 # ---------------------------------------------------------------------------
 
 
@@ -92,10 +52,9 @@ def spawn_from_dir(
             ``proc.pid == pgid``. Only :class:`~test_suite.launcher.cluster.Cluster`
             passes True — its teardown signals the whole group via
             ``os.killpg`` to catch grandchildren (mvn -> java, npm -> tsx,
-            go run -> compiled binary). The legacy ``spawn_agent`` path
-            defaults to False because ``testlib.stop_itk_cluster`` only
-            signals the direct child via ``proc.terminate()`` — detaching
-            the session there would leak grandchildren.
+            go run -> compiled binary). Defaults to False so a caller that
+            only signals the direct child via ``proc.terminate()`` doesn't
+            silently leak those grandchildren.
 
     Returns:
         The spawned ``subprocess.Popen``. If ``log_dir`` was set, the Popen
@@ -290,8 +249,7 @@ def _popen_factory(
 
     ``new_session=True`` makes the child its own process-group leader so a
     caller with ``killpg``-based teardown (i.e. :class:`Cluster`) can reap
-    grandchildren. See ``spawn_from_dir`` docstring for why the legacy
-    default is False.
+    grandchildren. See ``spawn_from_dir`` docstring for why it defaults off.
     """
     if log_dir is None:
         def popen(args: list[str], cwd: Path) -> subprocess.Popen:

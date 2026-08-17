@@ -5,7 +5,6 @@ import logging
 import socket
 from typing import Any
 import subprocess
-import time
 import uuid
 import os
 
@@ -15,7 +14,7 @@ from httpx_sse import aconnect_sse
 import test_suite
 
 
-from agents.python.v03.pyproto import instruction_pb2
+from pyproto import instruction_pb2
 
 
 logger = logging.getLogger(__name__)
@@ -40,125 +39,6 @@ def _clean_ports(*ports: int) -> None:
             capture_output=True,
             check=False,
         )
-
-
-def stop_itk_cluster(procs: list[subprocess.Popen], ports: list[int]) -> None:
-    """Decommissions the agent cluster by terminating processes, cleaning ports, and resetting port allocations."""
-    logger.info('Decommissioning agent cluster...')
-    for proc in procs:
-        try:
-            proc.terminate()
-        except Exception:
-            logger.debug('Failed to terminate process', exc_info=True)
-        log_file = getattr(proc, '_log_file', None)
-        if log_file is not None:
-            try:
-                log_file.close()
-            except Exception:
-                logger.debug('Failed to close log file', exc_info=True)
-    _clean_ports(*ports)
-    test_suite.reset_all_agent_ports(ports)
-
-
-def _log_process_output(
-    proc: subprocess.Popen, name: str, err: Exception | None = None
-) -> None:
-    """Helper to log some output from a process if it fails or for debugging.
-
-    Args:
-        proc: The process from which to read standard output.
-        name: A human-readable identifier for the process being logged.
-        err: Optional exception to log and raise.
-    """
-    try:
-        # Read available output without blocking
-        output = proc.stdout.read() if proc.stdout else ''
-        if output:
-            logger.error(
-                '--- %s Output ---\n%s\n-------------------', name, output
-            )
-    except Exception:  # noqa: BLE001
-        logger.debug('Failed to read %s output', name, exc_info=True)
-    finally:
-        if err:
-            logger.error('Error: %s', err)
-        raise err
-
-
-async def _check_agent_ready(
-    name: str, url: str, timeout_seconds: int = 35
-) -> bool:
-    """Verify agent readiness by attempting to fetch the agent card.
-
-    Args:
-        name: Name of the agent.
-        url: The URL pointing to the agent's JSON-RPC endpoint.
-        timeout_seconds: Duration in seconds to wait for readiness. Defaults to 35.
-
-    Returns:
-        bool: True if card fetched successfully within the timeout, otherwise False.
-    """
-    start = time.time()
-    target_url = f'{url.rstrip("/")}/.well-known/agent-card.json'
-
-    async with httpx.AsyncClient(timeout=5) as http_client:
-        while time.time() - start < timeout_seconds:
-            try:
-                response = await http_client.get(target_url)
-                if response.status_code == 200:
-                    logger.info('%s is ready at %s', name, url)
-                    return True
-            except Exception:  # noqa: BLE001
-                logger.debug('%s at %s not ready yet', name, url, exc_info=True)
-            await asyncio.sleep(1.0)
-    return False
-
-
-async def start_itk_cluster(
-    sdks: list[str],
-) -> tuple[list[subprocess.Popen], list[str], list[int]]:
-    """Starts a cluster of agents and waits for readiness.
-
-    Args:
-        sdks: List of SDK identifiers to launch.
-
-    Returns:
-        tuple: (list of Popen processes, list of card URIs, list of ports).
-    """
-    agent_procs = []
-    ports = []
-    agent_card_uris = []
-
-    logger.info('Initializing agent cluster with SDKs: %s', ', '.join(sdks))
-
-    try:
-        for sdk in sdks:
-            test_suite.allocate_agent_ports(sdk)
-            agent_def = test_suite.get_agent_def(sdk)
-            h_port = agent_def['httpPort']
-            g_port = agent_def['grpcPort']
-            ports.extend([h_port, g_port])
-
-            _clean_ports(h_port, g_port)
-
-            launcher = test_suite.get_agent_launcher(sdk)
-            uri = test_suite.get_agent_card_uri(sdk)
-            agent_card_uris.append(uri)
-
-            logger.info('Starting %s agent...', sdk)
-            proc = launcher()
-            agent_procs.append(proc)
-
-            logger.info('Verifying %s readiness at %s...', sdk, uri)
-            if not await _check_agent_ready(sdk, uri):
-                err = RuntimeError(f'{sdk} agent failed SDK readiness check.')
-                _log_process_output(proc, sdk, err)
-
-    except Exception:
-        stop_itk_cluster(agent_procs, ports)
-        raise
-    else:
-        return agent_procs, agent_card_uris, ports
 
 
 async def start_notification_server(
@@ -395,7 +275,6 @@ def _verify_send_message(
 async def _verify_push_notification(
     notification_texts: list[str],
     expected_end_tokens: list[str],
-    protocols: list[str],
     label: str,
 ) -> bool:
     full_response = ''.join(notification_texts)
@@ -567,7 +446,6 @@ async def _execute_single_itk_test(  # noqa: PLR0913
             expected_end_tokens,
         ) = test_suite.create_test_suite(
             sdks,
-            logger,
             edges=edges,
             protocols=protocols,
             streaming=streaming,
@@ -643,14 +521,12 @@ async def _execute_single_itk_test(  # noqa: PLR0913
                     http_client, target_url, json_rpc_request, headers
                 )
 
-            full_response = ''
-
             if behavior == 'push_notification':
                 notification_texts = await read_push_notifications(
                     notification_server_url
                 )
                 test_result = await _verify_push_notification(
-                    notification_texts, expected_end_tokens, protocols, label
+                    notification_texts, expected_end_tokens, label
                 )
             elif behavior == 'send_message':
                 test_result = _verify_send_message(
@@ -670,8 +546,6 @@ async def _execute_single_itk_test(  # noqa: PLR0913
             _clean_ports(notif_port)
 
     return test_result
-
-
 
 
 async def execute_itk_test(  # noqa: PLR0913
@@ -748,37 +622,3 @@ async def execute_itk_test(  # noqa: PLR0913
             'edges': s_edges,
         }
     return res_map
-
-
-
-async def run_itk_test(
-    sdks: list[str],
-    behavior: str,
-    edges: list[str] | None = None,
-    scenario_name: str | None = None,
-) -> bool:
-    """Executes a multi-agent integration test traversal.
-
-    Args:
-        sdks: List of SDK identifiers to include in the test cluster.
-        behavior: The behavior to test ('send_message' or 'push_notification').
-        edges: Optional list of custom graph edges (e.g., "0->1").
-        scenario_name: Optional human-readable name for logging.
-
-    Raises:
-        RuntimeError: If an agent fails to start or the test verification fails.
-    """
-    procs, _, ports = await start_itk_cluster(sdks)
-    try:
-        res_dict = await execute_itk_test(
-            sdks=sdks,
-            behavior=behavior,
-            edges=edges,
-            scenario_name=scenario_name,
-        )
-        return all(res_dict.values())
-    finally:
-        logger.info(
-            'Decommissioning agents for %s...', scenario_name or 'euler'
-        )
-        stop_itk_cluster(procs, ports)

@@ -1,38 +1,30 @@
 import itertools
-import logging
-import socket
-import subprocess
-import sys
 
-from agents.python.v03.pyproto import instruction_pb2
-from test_suite.current import spawn_agent as spawn_agent_current
-from test_suite.go_v03 import spawn_agent as spawn_agent_go_v03
-from test_suite.go_v10 import spawn_agent as spawn_agent_go_v10
-from test_suite.java_v10 import spawn_agent as spawn_agent_java_v10
-from test_suite.python_v03 import spawn_agent as spawn_agent_python_v03
-from test_suite.python_v10 import spawn_agent as spawn_agent_python_v10
-from test_suite.rust_v10 import spawn_agent as spawn_agent_rust_v10
-from test_suite.ts_v03 import spawn_agent as spawn_agent_ts_v03
-from test_suite.ts_v10 import spawn_agent as spawn_agent_ts_v10
+from pyproto import instruction_pb2
 
 
-_AGENT_DEFS = {
-    'go_v03': {'launcher': spawn_agent_go_v03},
-    'python_v03': {'launcher': spawn_agent_python_v03},
-    'ts_v03': {'launcher': spawn_agent_ts_v03},
-    'ts_v03_2': {'launcher': spawn_agent_ts_v03},
-    'go_v10': {'launcher': spawn_agent_go_v10},
-    'java_v10': {'launcher': spawn_agent_java_v10},
-    'python_v10': {'launcher': spawn_agent_python_v10},
-    'python_v10_2': {'launcher': spawn_agent_python_v10},
-    'rust_v10': {'launcher': spawn_agent_rust_v10},
-    'ts_v10': {'launcher': spawn_agent_ts_v10},
-    'ts_v10_2': {'launcher': spawn_agent_ts_v10},
-    'current': {'launcher': spawn_agent_current},
+# Scenario-level agent identifiers this suite knows how to address. The `_N`
+# suffix means "second instance of the same source" — the launcher allocates
+# it distinct ports.
+#
+# Nothing is spawned from here any more: itk_service_v2 injects each agent's
+# httpPort/grpcPort from the launcher's handles before scenario execution and
+# clears them afterwards. This registry only bounds which identifiers are
+# addressable and holds those ports for the duration of a run.
+_AGENT_DEFS: dict[str, dict] = {
+    'go_v03': {},
+    'python_v03': {},
+    'ts_v03': {},
+    'ts_v03_2': {},
+    'go_v10': {},
+    'java_v10': {},
+    'python_v10': {},
+    'python_v10_2': {},
+    'rust_v10': {},
+    'ts_v10': {},
+    'ts_v10_2': {},
+    'current': {},
 }
-
-
-
 
 
 _HOST = '127.0.0.1'
@@ -41,72 +33,38 @@ _ALL_TRANSPORTS = {'jsonrpc', 'grpc', 'http_json'}
 
 _END_OF_TRAVERSAL_TOKEN = 'traversal-completed'  # noqa: S105
 
-_MIN_SDKS_PER_TRANSPORT = 2
 
+def _http_port(sdk_name: str) -> int:
+    """Returns the HTTP port the launcher assigned to ``sdk_name``.
 
-def _get_free_port() -> int:
-    """Finds an available TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
-        return s.getsockname()[1]
-
-
-def allocate_agent_ports(sdk_name: str) -> None:
-    """Allocates dynamic ports for an agent if not already assigned."""
-    agent_def = _AGENT_DEFS.get(sdk_name)
-    if not agent_def:
-        raise ValueError(f'Unknown SDK: {sdk_name}')
-    if 'httpPort' not in agent_def:
-        p1 = _get_free_port()
-        p2 = _get_free_port()
-        max_retries = 10
-        for _ in range(max_retries):
-            if p2 != p1:
-                break
-            p2 = _get_free_port()
-        else:
-            raise RuntimeError(
-                f'Failed to allocate distinct ports for {sdk_name} after {max_retries} attempts'
-            )
-        agent_def['httpPort'] = p1
-        agent_def['grpcPort'] = p2
-
-
-def reset_all_agent_ports(ports: list[int]) -> None:
-    """Clears allocated ports from agent definitions only if their assigned ports are in the list to be cleaned up."""
-    target_ports = set(ports)
-    for agent_def in _AGENT_DEFS.values():
-        h_port = agent_def.get('httpPort')
-        g_port = agent_def.get('grpcPort')
-        if h_port in target_ports:
-            del agent_def['httpPort']
-        if g_port in target_ports:
-            del agent_def['grpcPort']
-
-
-def get_agent_launcher(sdk_name: str):
-    """Returns a launcher function with allocated ports bound."""
-    agent_def = _AGENT_DEFS.get(sdk_name)
-    if not agent_def:
-        raise ValueError(f'Unknown SDK: {sdk_name}')
-    launcher_func = agent_def['launcher']
-    h = agent_def['httpPort']
-    g = agent_def['grpcPort']
-    return lambda h=h, g=g, f=launcher_func: f(h, g)
+    Raises:
+        ValueError: The SDK identifier is not one this suite knows.
+        RuntimeError: The identifier is known but the cluster never started
+            it, so no port was injected. Deliberately NOT a ``ValueError``:
+            :func:`_get_valid_subgraphs` swallows those to skip untraversable
+            subgraphs, and a missing peer must not be mistaken for one.
+            Without this guard the URI would carry a ``None`` port and fail
+            much later as an opaque connection error.
+    """
+    agent_def = get_agent_def(sdk_name)
+    port = agent_def.get('httpPort')
+    if port is None:
+        raise RuntimeError(
+            f'No port assigned for SDK {sdk_name!r}; it was not started by '
+            f'the launcher for this run'
+        )
+    return port
 
 
 def get_agent_card_uri(sdk_name: str) -> str:
     """Returns the well-known agent card URI."""
-    agent_def = _AGENT_DEFS.get(sdk_name)
-    if not agent_def:
-        raise ValueError(f'Unknown SDK: {sdk_name}')
-    return f'http://{_HOST}:{agent_def["httpPort"]}'
+    return f'http://{_HOST}:{_http_port(sdk_name)}'
 
 
 def get_agent_def(sdk_name: str) -> dict:
     """Returns the agent definition dictionary for the given SDK."""
     agent_def = _AGENT_DEFS.get(sdk_name)
-    if not agent_def:
+    if agent_def is None:
         raise ValueError(f'Unknown SDK: {sdk_name}')
     return agent_def
 
@@ -250,14 +208,7 @@ def _traversal_to_instruction(
 
         call_step = hop.steps.instructions.add()
 
-        agent_def = _AGENT_DEFS.get(v)
-        if not agent_def:
-            raise ValueError(f'Unknown SDK: {v}')
-
-        port = agent_def.get('httpPort')
-        agent_card_uri = f'http://{_HOST}:{port}'
-
-        call_step.call_agent.agent_card_uri = agent_card_uri
+        call_step.call_agent.agent_card_uri = get_agent_card_uri(v)
         call_step.call_agent.transport = transport
         call_step.call_agent.streaming = streaming
         call_step.call_agent.instruction.CopyFrom(current_inst)
@@ -284,7 +235,6 @@ def _traversal_to_instruction(
 
 def create_test_suite(  # noqa: PLR0913
     sdks: list[str],
-    logger: logging.Logger,
     edges: list[str] | None = None,
     protocols: list[str] | None = None,
     streaming: bool = False,
@@ -311,7 +261,6 @@ def create_test_suite(  # noqa: PLR0913
         circuits = _euler_traversal_with_hierholzer(
             sdks[0],
             sdks,
-            transport,
             edges=parsed_edges,
         )
         for circuit in circuits:
@@ -329,8 +278,6 @@ def create_test_suite(  # noqa: PLR0913
                 instruction_for_transport
             )
 
-    for sdk in sdks:
-        allocate_agent_ports(sdk)
     return (
         testing_instruction,
         expected_end_tokens,
@@ -340,7 +287,6 @@ def create_test_suite(  # noqa: PLR0913
 def _euler_traversal_with_hierholzer(
     current_sdk: str,
     all_sdks: list[str],
-    transport: str,
     edges: list[tuple[str, str]] | None = None,
 ) -> list[str]:
     """
@@ -368,7 +314,6 @@ def _euler_traversal_with_hierholzer(
     Args:
         current_sdk: The starting agent/SDK node.
         all_sdks: The list of ALL agents/SDKs in the graph.
-        transport: The transport protocol to use for hops.
         edges: Optional list of pre-parsed SDK pairs (u, v).
     Returns:
         list[str]: The node circuit representing the traversal path.
@@ -485,11 +430,9 @@ def _get_valid_subgraphs(
                     continue
 
             # Validate traversability
-            dummy_logger = logging.getLogger('test_suite.validation')
             try:
                 create_test_suite(
                     sdks=sub_sdks,
-                    logger=dummy_logger,
                     edges=new_edges,
                     protocols=protocols,
                     streaming=streaming,

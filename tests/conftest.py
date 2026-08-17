@@ -40,3 +40,16 @@ def _reset_home_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # won't land in ~/.cache/a2a-itk.
     if 'ITK_CACHE_DIR' not in os.environ:
         monkeypatch.setenv('ITK_CACHE_DIR', '/tmp/a2a-itk-cache-unset')  # noqa: S108
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mount_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ``ITK_MOUNT_DIR`` from leaking between tests.
+
+    ``run_tests.main_async`` assigns it directly on ``os.environ`` (that's
+    how ``--mount`` reaches the launcher), which monkeypatch can't undo on
+    its own. Touching it here registers the pre-test value so teardown
+    restores it either way — and stops a real mount on the developer's
+    machine from changing what a test resolves.
+    """
+    monkeypatch.delenv('ITK_MOUNT_DIR', raising=False)

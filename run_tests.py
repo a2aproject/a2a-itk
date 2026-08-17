@@ -1,18 +1,42 @@
+#!/usr/bin/env python3
+"""Run ITK scenarios locally, without a container and without an SDK checkout.
+
+Every peer is fetched from its own repository at the ref pinned in
+``matrix.yaml``, so a scenario that doesn't name ``current`` needs nothing
+but this repo::
+
+    uv run run_tests.py                              # the bundled smoke set
+    uv run run_tests.py --scenarios path/to/x.json   # any SDK's scenarios.json
+    uv run run_tests.py --sdks python_v10,go_v10     # narrow to those peers
+
+To test a local SDK checkout as the code under test, point ``current`` at it::
+
+    uv run run_tests.py --mount ~/Source/a2a-python/itk
+
+This shares its whole pipeline with the ``/run`` HTTP handler (see
+:mod:`itk_runner`), so a scenario behaves identically here and in CI.
+
+Caveat: builds happen on your machine with each SDK's native toolchain, so
+you need whatever the selected peers require — uv for python, go for go,
+cargo for rust, mvn+JDK for java, npm for ts. Builds are cached under
+``$ITK_CACHE_DIR`` (default ``~/.cache/a2a-itk``), so the second run of the
+same peer is fast.
+"""
+
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
 import logging
 import os
-import subprocess
 import sys
+from pathlib import Path
 
-import httpx
-from testlib import (
-    execute_itk_test,
-    start_itk_cluster,
-    start_notification_server,
-    stop_itk_cluster,
-)
+import itk_runner
+from itk_runner import SUT_ID, ClusterStartupError, Scenario
+from test_suite.launcher import InfraFailure, PermanentError
+from test_suite.launcher.matrix import MatrixError
 
 
 logging.basicConfig(
@@ -20,572 +44,228 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Hardcoded test case definitions
-TEST_CASES = [
-    {
-        'name': 'resubscribe-jsonrpc',
-        'sdks': ['python_v10', 'go_v03'],
-        'protocols': ['jsonrpc'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-     {
-        'name': 'resubscribe-grpc',
-        'sdks': ['python_v03', 'python_v10', 'go_v03'],
-        'protocols': ['grpc'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'resubscribe-python-all-protocols',
-        'sdks': ['python_v03', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'resubscribe-v10-all-protocols',
-        'sdks': ['python_v10', 'go_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'resubscribe-java-v10-all-protocols',
-        'sdks': ['java_v10', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'resubscribe-v03-grpc',
-        'sdks': ['python_v03', 'go_v03'],
-        'protocols': ['grpc'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'go-v03-v10-push-notification',
-        'sdks': ['go_v03', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': None,
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'python-v10-and-v03-sdks-push-notifications',
-        'sdks': ['python_v10', 'python_v03', 'go_v03', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': None,
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'python-v10-and-v03-sdks-push-notifications-grpc-http-json',
-        'sdks': ['python_v10', 'python_v03'],
-        'protocols': ['grpc', 'http_json'],
-        'edges': None,
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'v03-core',
-        'sdks': ['python_v03', 'go_v03'],
-        'edges': None,
-        'protocols': ['jsonrpc', 'grpc'],
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'v03-core-streaming',
-        'sdks': ['python_v03', 'go_v03'],
-        'edges': None,
-        'protocols': ['jsonrpc', 'grpc'],
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'v10-core',
-        'sdks': ['python_v10', 'go_v10'],
-        'protocols': ['http_json', 'jsonrpc', 'grpc'],
-        'edges': None,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'v10-core-streaming',
-        'sdks': ['python_v10', 'go_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'java-v10-core',
-        'sdks': ['java_v10', 'python_v10'],
-        'protocols': ['http_json', 'jsonrpc', 'grpc'],
-        'edges': None,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'java-v10-core-streaming',
-        'sdks': ['java_v10', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'java-v10-go-v10-core',
-        'sdks': ['java_v10', 'go_v10'],
-        'protocols': ['http_json', 'jsonrpc', 'grpc'],
-        'edges': None,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'java-v10-push-notification',
-        'sdks': ['java_v10', 'python_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': None,
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'python-v03-v10-all-transports',
-        'sdks': ['python_v03', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'python-v03-v10-all-transports-streaming',
-        'sdks': ['python_v03', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': None,
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'python-v03-go-v03-python-v10-hub-all-common-transports',
-        'sdks': ['python_v03', 'go_v03', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc'],
-        'edges': ['2->0', '2->1', '0->2', '1->2'],
-        'behavior': 'send_message',
-        'build_subtests': True,
-    },
-    {
-        'name': 'python-v03-go-v03-python-v10-hub-all-common-transports-streaming',
-        'sdks': ['python_v03', 'go_v03', 'python_v10'],
-        'protocols': ['jsonrpc', 'grpc'],
-        'edges': ['2->0', '2->1', '0->2', '1->2'],
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'full-backwards-compat-with-jsonrpc',
-        'sdks': ['python_v03', 'go_v03', 'python_v10', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': [
-            '3->0',
-            '3->1',
-            '2->0',
-            '2->1',
-            '0->2',
-            '0->3',
-            '1->2',
-            '1->3',
-        ],
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'full-backwards-compat-with-jsonrpc-streaming',
-        'sdks': ['python_v03', 'go_v03', 'python_v10', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': [
-            '3->0',
-            '3->1',
-            '2->0',
-            '2->1',
-            '0->2',
-            '0->3',
-            '1->2',
-            '1->3',
-        ],
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'disconnected-components',
-        'sdks': ['python_v03', 'go_v03', 'python_v10', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': ['1->3', '3->1', '2->0', '0->2'],
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'failing-go-v03-http-json',
-        'sdks': ['python_v03', 'python_v10', 'go_v03'],
-        'protocols': ['http_json'],
-        'edges': None,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'failing-go-v10-grpc',
-        'sdks': ['go_v03', 'go_v10'],
-        'protocols': ['grpc'],
-        'edges': None,
-        'behavior': 'send_message',
-    },
-    # --- Rust v1.0 (current-mount) scenarios ---
-    {
-        'name': 'rust-v10-send-message-jsonrpc',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': ['0->1', '1->0'],
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'rust-v10-send-message-grpc',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['grpc'],
-        'edges': ['0->1', '1->0'],
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'rust-v10-send-message-http-json',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['http_json'],
-        'edges': ['0->1', '1->0'],
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'rust-v10-streaming-jsonrpc',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': ['0->1', '1->0'],
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'rust-v10-streaming-grpc',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['grpc'],
-        'edges': ['0->1', '1->0'],
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'rust-v10-streaming-http-json',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['http_json'],
-        'edges': ['0->1', '1->0'],
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'rust-v10-push-notification-jsonrpc',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': ['0->1', '1->0'],
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'rust-v10-push-notification-grpc',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['grpc'],
-        'edges': ['0->1', '1->0'],
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'rust-v10-push-notification-http-json',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['http_json'],
-        'edges': ['0->1', '1->0'],
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'rust-v10-resubscribe-jsonrpc',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': ['0->1', '1->0'],
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'rust-v10-resubscribe-http-json',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['http_json'],
-        'edges': ['0->1', '1->0'],
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'rust-v10-resubscribe-grpc',
-        'sdks': ['current', 'python_v10'],
-        'protocols': ['grpc'],
-        'edges': ['0->1', '1->0'],
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'rust-v10-go-v10-push-notification-jsonrpc',
-        'sdks': ['current', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': ['0->1', '1->0'],
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'rust-v10-go-v10-push-notification-grpc',
-        'sdks': ['current', 'go_v10'],
-        'protocols': ['grpc'],
-        'edges': ['0->1', '1->0'],
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'rust-v10-go-v10-push-notification-http-json',
-        'sdks': ['current', 'go_v10'],
-        'protocols': ['http_json'],
-        'edges': ['0->1', '1->0'],
-        'behavior': 'push_notification',
-    },
-    {
-        'name': 'rust-v10-go-v10-resubscribe-jsonrpc',
-        'sdks': ['current', 'go_v10'],
-        'protocols': ['jsonrpc'],
-        'edges': ['0->1', '1->0'],
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'rust-v10-go-v10-resubscribe-grpc',
-        'sdks': ['current', 'go_v10'],
-        'protocols': ['grpc'],
-        'edges': ['0->1', '1->0'],
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'rust-v10-go-v10-resubscribe-http-json',
-        'sdks': ['current', 'go_v10'],
-        'protocols': ['http_json'],
-        'edges': ['0->1', '1->0'],
-        'streaming': True,
-        'behavior': 'resubscribe',
-    },
-    {
-        'name': 'rust-v10-go-v10-all-transports',
-        'sdks': ['current', 'go_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': ['0->1', '1->0'],
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'rust-v10-go-v10-all-transports-streaming',
-        'sdks': ['current', 'go_v10'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': ['0->1', '1->0'],
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-    {
-        'name': 'python-v10-go-v10-rust-v10-hub-all-transports',
-        'sdks': ['python_v10', 'go_v10', 'current'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': ['2->0', '2->1', '0->2', '1->2'],
-        'behavior': 'send_message',
-        'build_subtests': True,
-    },
-    {
-        'name': 'python-v10-go-v10-rust-v10-hub-all-transports-streaming',
-        'sdks': ['python_v10', 'go_v10', 'current'],
-        'protocols': ['jsonrpc', 'grpc', 'http_json'],
-        'edges': ['2->0', '2->1', '0->2', '1->2'],
-        'streaming': True,
-        'behavior': 'send_message',
-    },
-]
+_DEFAULT_SCENARIOS = Path(__file__).parent / 'scenarios' / 'smoke.json'
 
 
-def parse_args():
-    """Parse command-line arguments for SDK filtering."""
-    parser = argparse.ArgumentParser(
-        description='Run ITK integration tests with optional SDK filtering.',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''
-Examples:
-  # Run all tests
-  uv run run_tests.py
-
-  # Run only tests involving Python v1.0, Go v1.0, and Rust v1.0
-  uv run run_tests.py --sdks python_v10,go_v10,current
-
-  # Run only Rust v1.0 and Python v1.0 tests
-  uv run run_tests.py --sdks current,python_v10
-
-  # Run only v0.3 agents
-  uv run run_tests.py --sdks python_v03,go_v03
-
-  # List available SDKs
-  uv run run_tests.py --list-sdks
-        '''
-    )
-    parser.add_argument(
-        '--sdks',
-        type=str,
-        help='Comma-separated list of SDK version names to include '
-             '(e.g., python_v10,go_v10,rust_v10). '
-             'Only tests using these SDKs will run. If omitted, all tests run. '
-             'Use --list-sdks to see available options.'
-    )
-    parser.add_argument(
-        '--list-sdks',
-        action='store_true',
-        help='List all available SDK versions across all test cases.'
-    )
-    return parser.parse_args()
+# ---------------------------------------------------------------------------
+# Scenario loading
+# ---------------------------------------------------------------------------
 
 
-def get_available_sdks():
-    """Extract all unique SDKs from TEST_CASES."""
-    sdks = set()
-    for case in TEST_CASES:
-        sdks.update(case['sdks'])
-    return sorted(sdks)
+def load_scenarios(path: Path) -> list[Scenario]:
+    """Parse a scenario file in the same schema SDKs use for ``scenarios.json``.
 
-
-def filter_test_cases(selected_sdks=None):
-    """Filter TEST_CASES to only include cases using selected SDKs.
-
-    Args:
-        selected_sdks: Set of SDK names to include, or None to include all.
-
-    Returns:
-        Filtered list of test cases.
+    Raises:
+        SystemExit: The file is missing, malformed, or an entry lacks a
+            required field. These are user input errors, so they exit with a
+            readable message rather than a traceback.
     """
-    if selected_sdks is None:
-        return TEST_CASES
+    if not path.is_file():
+        sys.exit(f'Scenario file not found: {path}')
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except json.JSONDecodeError as e:
+        sys.exit(f'{path}: invalid JSON: {e}')
 
-    filtered = []
-    for case in TEST_CASES:
-        # Include test if all its SDKs are in the selected set
-        if all(sdk in selected_sdks for sdk in case['sdks']):
-            filtered.append(case)
-    return filtered
+    tests = data.get('tests') if isinstance(data, dict) else None
+    if not isinstance(tests, list):
+        sys.exit(f'{path}: expected a top-level object with a "tests" array')
 
-
-async def main_async() -> None:
-    """Execute hardcoded integration test scenarios concurrently."""
-    args = parse_args()
-
-    # Handle --list-sdks flag
-    if args.list_sdks:
-        available = get_available_sdks()
-        print('Available SDKs:')
-        for sdk in available:
-            print(f'  - {sdk}')
-        sys.exit(0)
-
-    # Parse and validate selected SDKs
-    selected_sdks = None
-    if args.sdks:
-        selected_sdks = set(sdk.strip() for sdk in args.sdks.split(','))
-        available = set(get_available_sdks())
-        unknown = selected_sdks - available
-        if unknown:
-            logger.error(
-                'Unknown SDK(s): %s. Available SDKs: %s',
-                ', '.join(sorted(unknown)),
-                ', '.join(sorted(available))
+    scenarios = []
+    for i, raw in enumerate(tests):
+        if not isinstance(raw, dict):
+            sys.exit(f'{path}: tests[{i}] must be an object')
+        missing = [k for k in ('name', 'sdks', 'behavior') if k not in raw]
+        if missing:
+            sys.exit(f'{path}: tests[{i}] missing required field(s): {", ".join(missing)}')
+        scenarios.append(
+            Scenario(
+                name=raw['name'],
+                sdks=list(raw['sdks']),
+                behavior=raw['behavior'],
+                edges=raw.get('edges'),
+                protocols=raw.get('protocols'),
+                streaming=raw.get('streaming', False),
+                build_subtests=raw.get('build_subtests', False),
             )
-            sys.exit(1)
-        logger.info('Filtering tests to SDKs: %s', ', '.join(sorted(selected_sdks)))
+        )
+    return scenarios
 
-    # Filter test cases based on selected SDKs
-    test_cases = filter_test_cases(selected_sdks)
 
-    num_original = len(TEST_CASES)
-    num_filtered = len(test_cases)
+def filter_by_sdks(
+    scenarios: list[Scenario], selected: set[str] | None
+) -> list[Scenario]:
+    """Keep only scenarios whose agents are all in ``selected``.
 
-    if num_filtered < num_original:
-        logger.info(
-            'Running %d/%d test cases (filtered by SDKs)',
-            num_filtered,
-            num_original
+    All-or-nothing per scenario: a partial cluster would change what the
+    scenario actually tests, so a scenario naming an excluded peer is
+    dropped rather than trimmed.
+    """
+    if selected is None:
+        return scenarios
+    return [s for s in scenarios if all(sdk in selected for sdk in s.sdks)]
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog='run_tests.py',
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        '--scenarios', type=Path, default=_DEFAULT_SCENARIOS,
+        help=f'Scenario file to run (default: {_DEFAULT_SCENARIOS.name}). '
+             "Accepts any SDK's scenarios.json / scenarios_full.json.",
+    )
+    parser.add_argument(
+        '--sdks', type=str,
+        help='Comma-separated agent identifiers to keep, e.g. '
+             '"python_v10,go_v10". Scenarios naming anything outside this '
+             'set are skipped. Omit to run everything in the file.',
+    )
+    parser.add_argument(
+        '--mount', type=Path,
+        help=f"Directory to serve the '{SUT_ID}' agent from, e.g. "
+             '~/Source/a2a-python/itk. Required only if a scenario names '
+             f"'{SUT_ID}'.",
+    )
+    parser.add_argument(
+        '--log-dir', type=Path,
+        help='Capture each agent\'s stdout/stderr to <dir>/agent_<id>.log.',
+    )
+    parser.add_argument(
+        '--output', type=Path,
+        help='Write raw results as JSON here (same shape as the /run '
+             'response, which scripts/process_results.py consumes).',
+    )
+    parser.add_argument(
+        '--list-sdks', action='store_true',
+        help='List the agent identifiers matrix.yaml can resolve, then exit.',
+    )
+    parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Show which scenarios and agents would run, then exit. Does not '
+             'touch the network.',
+    )
+    return parser.parse_args(argv)
+
+
+def _print_available_sdks() -> None:
+    matrix = itk_runner.get_matrix()
+    ids = [f'{sdk}_{line}' for sdk, line in matrix.keys()]
+    width = max((len(i) for i in [*ids, SUT_ID]), default=0)
+    print('Agent identifiers available from matrix.yaml:')
+    for agent_id in ids:
+        entry = matrix.resolve(agent_id)
+        print(f'  {agent_id:<{width}}  {entry.repo} @ {entry.ref}')
+    print(f'  {SUT_ID:<{width}}  whatever --mount points at (the code under test)')
+    print(
+        '\nAppend _2 to any identifier to run a second, independently-ported '
+        'instance of it (e.g. python_v10_2).'
+    )
+
+
+def _report(results: dict[str, itk_runner.ScenarioResult]) -> bool:
+    width = max((len(n) for n in results), default=0)
+    passed_count = 0
+    for i, (name, r) in enumerate(sorted(results.items()), start=1):
+        status = 'PASS' if r.passed else 'FAIL'
+        passed_count += r.passed
+        logger.info('[%d/%d] %-*s %s', i, len(results), width, name, status)
+    all_passed = passed_count == len(results)
+    logger.info(
+        '%d/%d scenarios passed — %s',
+        passed_count, len(results), 'OK' if all_passed else 'FAILURES',
+    )
+    return all_passed
+
+
+async def main_async(args: argparse.Namespace) -> int:
+    scenarios = load_scenarios(args.scenarios)
+    total = len(scenarios)
+
+    selected = None
+    if args.sdks:
+        selected = {s.strip() for s in args.sdks.split(',') if s.strip()}
+        scenarios = filter_by_sdks(scenarios, selected)
+
+    if not scenarios:
+        logger.error(
+            'No scenarios left after filtering %d by --sdks=%s. '
+            'Run --list-sdks to see valid identifiers.',
+            total, args.sdks,
+        )
+        return 1
+    if len(scenarios) < total:
+        logger.info('Running %d/%d scenarios (filtered by --sdks)', len(scenarios), total)
+
+    needed = sorted({sdk for s in scenarios for sdk in s.sdks})
+
+    # Fail before any network or build work if the SUT is needed but absent.
+    if SUT_ID in needed:
+        if args.mount is None:
+            logger.error(
+                "Scenarios reference '%s' (the code under test) but --mount "
+                'was not given. Point it at an SDK\'s itk/ directory, or use '
+                '--sdks to select scenarios that only use fetched peers.',
+                SUT_ID,
+            )
+            return 1
+        mount = args.mount.expanduser().resolve()
+        if not mount.is_dir():
+            logger.error('--mount path is not a directory: %s', mount)
+            return 1
+        # How launcher.config.mount_dir() picks up the override.
+        os.environ['ITK_MOUNT_DIR'] = str(mount)
+        logger.info("Serving '%s' from %s", SUT_ID, mount)
+    elif args.mount is not None:
+        logger.warning(
+            "--mount given but no scenario references '%s'; ignoring it.", SUT_ID,
         )
 
-    # 1. Identify all unique SDKs needed across filtered test cases
-    all_required_sdks = set()
-    for case in test_cases:
-        all_required_sdks.update(case['sdks'])
-
-    # Convert to sorted list for deterministic port assignment
-    # (Though AGENT_DEFS currently have static ports anyway)
-    sdk_list = sorted(all_required_sdks)
-
-    # 2. Start the shared cluster
-    procs = []
-    ports = []
-    procs, _uris, ports = await start_itk_cluster(sdk_list)
+    if args.dry_run:
+        print(f'Would start {len(needed)} agent(s): {", ".join(needed)}')
+        print(f'Would run {len(scenarios)} scenario(s):')
+        for s in scenarios:
+            print(f'  {s.name}  [{", ".join(s.sdks)}]  {s.behavior}')
+        return 0
 
     try:
-        # 3. Run all scenarios sequentially to prevent overwhelming the shared cluster
-        logger.info('Starting sequential scenario execution...')
-        results = []
-        for case in test_cases:
-            logger.info("Executing parent scenario '%s'...", case['name'])
-            res_dict = await execute_itk_test(
-                sdks=case['sdks'],
-                behavior=case['behavior'],
-                edges=case['edges'],
-                scenario_name=case['name'],
-                protocols=case.get('protocols'),
-                streaming=case.get('streaming', False),
-                build_subtests=case.get('build_subtests', False),
-            )
-            results.append(res_dict)
+        results = await itk_runner.run_scenarios(scenarios, log_dir=args.log_dir)
+    except (MatrixError, PermanentError) as e:
+        logger.error('%s', e)  # noqa: TRY400 — a traceback adds nothing here
+        return 1
+    except (InfraFailure, ClusterStartupError) as e:
+        logger.error('%s', e)  # noqa: TRY400
+        if args.log_dir is None:
+            logger.error('Re-run with --log-dir to capture agent output.')
+        return 1
 
-        # Merge the results dictionaries
-        merged_results = {}
-        for res_dict in results:
-            merged_results.update(res_dict)
+    if args.output:
+        payload = {
+            'all_passed': all(r.passed for r in results.values()),
+            'results': {
+                n: {'passed': r.passed, 'sdks': r.sdks, 'edges': r.edges}
+                for n, r in results.items()
+            },
+        }
+        args.output.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+        logger.info('Results written to %s', args.output)
 
-        # 5. Report results
-        all_passed = True
-        for idx, (name, details) in enumerate(merged_results.items()):
-            passed = details['passed']
-            status = 'PASSED' if passed else 'FAILED'
-            logger.info(
-                "Scenario %s/%s '%s': %s",
-                idx + 1,
-                len(merged_results),
-                name,
-                status,
-            )
-            if not passed:
-                all_passed = False
-
-        output_file = os.environ.get('ITK_OUTPUT_FILE')
-        if output_file:
-            raw = {'all_passed': all_passed, 'results': merged_results}
-            with open(output_file, 'w') as f:
-                json.dump(raw, f, indent=2)
-            logger.info('Results written to %s', output_file)
-
-        if not all_passed:
-            logger.error('One or more test scenarios failed.')
-        else:
-            logger.info('All test scenarios passed.')
-
-    except Exception:
-        logger.exception('Concurrent test execution encountered an error.')
-        sys.exit(1)
-    finally:
-        logger.info('Decommissioning shared agent cluster...')
-        stop_itk_cluster(procs, ports)
+    return 0 if _report(results) else 1
 
 
 def main() -> None:
-    """Entry point for the integration test orchestrator."""
-    asyncio.run(main_async())
+    args = parse_args()
+    if args.list_sdks:
+        _print_available_sdks()
+        sys.exit(0)
+    sys.exit(asyncio.run(main_async(args)))
 
 
 if __name__ == '__main__':

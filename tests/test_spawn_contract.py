@@ -1,18 +1,15 @@
-"""Legacy contract for :func:`test_suite.current.spawn_agent`.
+"""Spawn contract for :func:`test_suite.current.spawn_from_dir`.
 
-``test_suite.current`` is the hot path for every SDK's blocking ITK CI:
-``itk_service.py`` -> ``testlib.start_itk_cluster`` -> per-SDK launcher
-functions, one of which is ``spawn_agent`` from this file (registered as
-``current`` in ``test_suite/__init__.py``).
+Every agent in every scenario — the SUT (``MOUNT``) and each peer fetched
+from its SDK repo (``CHECKOUT``) — starts through this one function, called
+by ``launcher.resolve.spawn`` and ``launcher.cluster.Cluster``. This suite
+pins the observable contract so a future edit can't silently regress a
+language:
 
-The launcher extraction refactored ``spawn_agent`` into a wrapper over
-``spawn_from_dir``. This suite pins the observable contract every SDK's
-existing CI depends on, so a future edit can't silently regress a language:
-
-  * mount-missing raises a specific error message
+  * an unmounted SUT raises the exact error message CI greps for
   * per-language argv is byte-identical to what production sees today
-  * cwd is the mount dir (or the mount's parent for Maven pre-build)
-  * DEBUG log filename stays ``agent_current.log`` under ``<root>/logs/``
+  * cwd is the agent dir (or its parent for the Maven pre-build)
+  * ``new_session`` stays opt-in
 
 subprocess.Popen is patched so no real toolchain is required.
 """
@@ -26,6 +23,8 @@ from typing import Any
 import pytest
 
 from test_suite import current
+from test_suite.launcher import resolve
+from test_suite.launcher.spec import Kind, TargetSpec
 
 
 # ---------------------------------------------------------------------------
@@ -62,33 +61,44 @@ class _RecRun:
 
 @pytest.fixture
 def mount(tmp_path, monkeypatch):
-    """Redirect the legacy _MOUNT_DIR / _ROOT_DIR to a per-test tmp path."""
+    """A per-test agent dir shaped like the container's bind mount."""
     _RecPopen.calls = []
     _RecRun.calls = []
-    monkeypatch.setattr(current, '_ROOT_DIR', tmp_path)
     mount_dir = tmp_path / 'agents' / 'repo' / 'itk'
     mount_dir.mkdir(parents=True)
-    monkeypatch.setattr(current, '_MOUNT_DIR', mount_dir)
     monkeypatch.setattr(subprocess, 'Popen', _RecPopen)
     monkeypatch.setattr(current.subprocess, 'run', _RecRun())
     return mount_dir
 
 
 # ---------------------------------------------------------------------------
-# Contract: mount-missing → RuntimeError with the message CI expects
+# Contract: unmounted SUT → RuntimeError with the message CI expects
 # ---------------------------------------------------------------------------
 
 
 class TestMountMissing:
     def test_error_message_exact(self, tmp_path, monkeypatch):
-        # Point _MOUNT_DIR at a path that does NOT exist.
-        monkeypatch.setattr(current, '_MOUNT_DIR', tmp_path / 'not-mounted')
+        # The message originates in launcher.resolve, which is what decides
+        # a MOUNT spec's directory. Point it at a path that isn't there.
+        monkeypatch.setenv('ITK_MOUNT_DIR', str(tmp_path / 'not-mounted'))
         with pytest.raises(RuntimeError) as e:
-            current.spawn_agent(8001, 8002)
+            resolve.resolve(TargetSpec(kind=Kind.MOUNT))
         # Exact message — some tooling greps for this.
         assert str(e.value) == (
             'current agent has not been mounted and is not available to test'
         )
+
+    def test_mount_dir_override_is_honoured(self, tmp_path, monkeypatch):
+        # `run_tests.py --mount` works by setting this env var, so a MOUNT
+        # spec must resolve to it rather than to the container path.
+        local_sut = tmp_path / 'a2a-python' / 'itk'
+        local_sut.mkdir(parents=True)
+        monkeypatch.setenv('ITK_MOUNT_DIR', str(local_sut))
+        assert resolve.resolve(TargetSpec(kind=Kind.MOUNT)) == local_sut
+
+    def test_spawn_from_dir_rejects_missing_dir(self, tmp_path):
+        with pytest.raises(RuntimeError, match='agent dir does not exist'):
+            current.spawn_from_dir(tmp_path / 'nope', 8001, 8002)
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +114,7 @@ class TestPerLanguageArgv:
 
     def test_go(self, mount):
         (mount / 'main.go').write_text('package main', encoding='utf-8')
-        current.spawn_agent(self.HTTP, self.GRPC)
+        current.spawn_from_dir(mount, self.HTTP, self.GRPC)
         argv, cwd, _ = _RecPopen.calls[0]
         assert argv == [
             'go', 'run', '-mod=readonly', 'main.go',
@@ -115,7 +125,7 @@ class TestPerLanguageArgv:
 
     def test_python(self, mount):
         (mount / 'main.py').write_text('# agent', encoding='utf-8')
-        current.spawn_agent(self.HTTP, self.GRPC)
+        current.spawn_from_dir(mount, self.HTTP, self.GRPC)
         argv, cwd, _ = _RecPopen.calls[0]
         assert argv == [
             'uv', 'run', '--locked', 'main.py',
@@ -127,7 +137,7 @@ class TestPerLanguageArgv:
     def test_ts(self, mount):
         # TS: parent dir has package.json; mount is the itk sub-dir.
         (mount.parent / 'package.json').write_text('{}', encoding='utf-8')
-        current.spawn_agent(self.HTTP, self.GRPC)
+        current.spawn_from_dir(mount, self.HTTP, self.GRPC)
         argv, cwd, _ = _RecPopen.calls[0]
         assert argv == [
             'npm', 'run', 'itk-agent', '--',
@@ -139,7 +149,7 @@ class TestPerLanguageArgv:
     def test_dotnet(self, mount):
         csproj = mount / 'Agent.csproj'
         csproj.write_text('<Project/>', encoding='utf-8')
-        current.spawn_agent(self.HTTP, self.GRPC)
+        current.spawn_from_dir(mount, self.HTTP, self.GRPC)
         argv, cwd, _ = _RecPopen.calls[0]
         assert argv == [
             'dotnet', 'run', '--project', str(csproj), '--',
@@ -150,7 +160,7 @@ class TestPerLanguageArgv:
 
     def test_java_prebuild_and_exec(self, mount):
         (mount / 'pom.xml').write_text('<project/>', encoding='utf-8')
-        current.spawn_agent(self.HTTP, self.GRPC)
+        current.spawn_from_dir(mount, self.HTTP, self.GRPC)
 
         # 1) sync pre-build via subprocess.run — argv and cwd (mount.parent)
         assert _RecRun.calls, 'expected `mvn ... install` pre-build call'
@@ -180,7 +190,7 @@ class TestPerLanguageArgv:
         canonical.write_text('bin', encoding='utf-8')
         canonical.chmod(0o755)
 
-        current.spawn_agent(self.HTTP, self.GRPC)
+        current.spawn_from_dir(mount, self.HTTP, self.GRPC)
         argv, cwd, _ = _RecPopen.calls[0]
         assert argv == [
             str(canonical),
@@ -203,38 +213,18 @@ class TestPerLanguageArgv:
         canonical.write_text('bin', encoding='utf-8')
         canonical.chmod(0o755)
 
-        current.spawn_agent(self.HTTP, self.GRPC)
+        current.spawn_from_dir(mount, self.HTTP, self.GRPC)
         argv, _cwd, _ = _RecPopen.calls[0]
         assert argv[0] == str(canonical)
 
 
-# ---------------------------------------------------------------------------
-# Contract: DEBUG log file goes to <root>/logs/agent_current.log
-# ---------------------------------------------------------------------------
+class TestNewSessionIsOptIn:
+    """Regression: detaching the POSIX session must stay opt-in.
 
-
-class TestDebugLog:
-    def test_debug_opens_agent_current_log(self, mount, monkeypatch):
-        (mount / 'main.py').write_text('# agent', encoding='utf-8')
-        monkeypatch.setenv('ITK_LOG_LEVEL', 'DEBUG')
-        proc = current.spawn_agent(8001, 8002)
-        try:
-            # The log file must be exactly logs/agent_current.log — developers
-            # tail this path today; the launcher extraction must not rename it.
-            assert (mount.parent.parent.parent / 'logs' / 'agent_current.log').exists()
-            assert hasattr(proc, '_log_file')
-            assert Path(proc._log_file.name).name == 'agent_current.log'  # noqa: SLF001
-        finally:
-            proc._log_file.close()  # noqa: SLF001
-
-
-class TestNoSessionOnLegacyPath:
-    """Regression: `spawn_agent` (legacy path used by every SDK's ITK CI)
-    must NOT spawn in a new POSIX session. Legacy `testlib.stop_itk_cluster`
-    only calls `proc.terminate()`, which signals the direct child only —
-    detaching would leak grandchildren (mvn -> java, npm -> tsx, etc).
-
-    Only `Cluster` opts into a new session (its teardown uses killpg).
+    A caller that reaps with `proc.terminate()` signals the direct child
+    only, so detaching behind its back would leak grandchildren (mvn ->
+    java, npm -> tsx, etc). Only `Cluster` opts in — its teardown uses
+    killpg and can reap the whole group.
     """
 
     def _capture_popen_kwargs(self, monkeypatch):
@@ -253,14 +243,14 @@ class TestNoSessionOnLegacyPath:
         monkeypatch.setattr(subprocess, 'Popen', _CapturingPopen)
         return seen
 
-    def test_legacy_spawn_agent_defaults_to_same_session(self, mount, monkeypatch):
+    def test_defaults_to_same_session(self, mount, monkeypatch):
         (mount / 'main.py').write_text('# agent', encoding='utf-8')
         seen = self._capture_popen_kwargs(monkeypatch)
-        current.spawn_agent(8001, 8002)
-        # Kwarg present on every recorded Popen — and False for the legacy path.
+        current.spawn_from_dir(mount, 8001, 8002)
+        # Kwarg present on every recorded Popen — and False by default.
         assert seen, 'expected at least one Popen call'
         assert seen[0].get('start_new_session') is False, (
-            f'legacy spawn_agent must not detach the session; '
+            f'spawn_from_dir must not detach the session unless asked; '
             f'saw start_new_session={seen[0].get("start_new_session")!r}'
         )
 
@@ -273,17 +263,9 @@ class TestNoSessionOnLegacyPath:
             f'saw start_new_session={seen[0].get("start_new_session")!r}'
         )
 
-    def test_non_debug_no_log_handle(self, mount, monkeypatch):
+    def test_no_log_dir_leaves_no_log_handle(self, mount):
         (mount / 'main.py').write_text('# agent', encoding='utf-8')
-        monkeypatch.setenv('ITK_LOG_LEVEL', 'INFO')
-        proc = current.spawn_agent(8001, 8002)
+        proc = current.spawn_from_dir(mount, 8001, 8002)
         assert not hasattr(proc, '_log_file'), (
-            'INFO-level runs must not leave an open log handle'
+            'runs without log_dir must not leave an open log handle'
         )
-
-    def test_debug_default_when_env_unset(self, mount, monkeypatch):
-        # Legacy code treated missing ITK_LOG_LEVEL as INFO. Preserve that.
-        (mount / 'main.py').write_text('# agent', encoding='utf-8')
-        monkeypatch.delenv('ITK_LOG_LEVEL', raising=False)
-        proc = current.spawn_agent(8001, 8002)
-        assert not hasattr(proc, '_log_file')

@@ -3,9 +3,8 @@
 The launcher provides the SDK build tool (uv/go/cargo/mvn/npm), but each
 agent's runtime code imports proto stubs derived from
 ``a2a-itk/protos/instruction.proto``. Without this step, a freshly-fetched
-CHECKOUT tree has no ``pyproto/``, no ``pb/``, no
-``a2a-itk/agents/ts/v10/pb/``, and no reachable ``a2a-itk/protos`` for
-``build.rs`` / ``protobuf-maven-plugin`` to read.
+CHECKOUT tree has no ``pyproto/``, no ``pb/``, and no reachable
+``a2a-itk/protos`` for ``build.rs`` / ``protobuf-maven-plugin`` to read.
 
 Per language (mirrors what each SDK's ``run_itk.sh`` does today):
 
@@ -15,10 +14,9 @@ Per language (mirrors what each SDK's ``run_itk.sh`` does today):
   a package).
 * **go**: copy ``instruction.proto`` in, run ``protoc`` with
   ``protoc-gen-go`` + ``protoc-gen-go-grpc``, output to ``pb/``.
-* **ts**: symlink ``a2a-itk/`` into the agent dir (the TS agent hard-codes
-  ``import … from './a2a-itk/agents/ts/v10/pb/instruction.js'``), stage
-  the proto under ``…/agents/ts/v10/protos/``, run ``buf generate`` from
-  the a2a-js SDK's ``node_modules/.bin/buf``.
+* **ts**: stage the proto under ``<agent_dir>/protos/`` and run ``buf
+  generate`` against the SDK's own ``buf.gen.yaml`` (from the a2a-js
+  SDK's ``node_modules/.bin/buf``), emitting ``pb/instruction.ts``.
 * **rust**: symlink ``a2a-itk/`` into the agent dir. ``build.rs`` looks at
   ``a2a-itk/protos/instruction.proto`` and runs ``prost_build`` itself
   when cargo triggers the build script.
@@ -159,16 +157,15 @@ def prepare_ts(
     next to ``main.ts`` / ``itk_agent.ts``. Regenerating on every call
     matches ``run_itk.sh``'s policy (committed ``pb/`` can lag the proto).
 
-    No symlink into a2a-itk any more — S17 deletes ``agents/`` and the
-    old symlink target vanishes; the SDK owns its codegen config now.
+    Unlike rust/java there is no symlink back into a2a-itk: the SDK owns
+    its codegen config, so nothing here depends on this repo's layout.
     """
     proto = proto_source or default_proto_source()
     if not (agent_dir / 'buf.gen.yaml').exists():
         raise RuntimeError(
             f'{agent_dir}/buf.gen.yaml missing — each SDK itk/ must own its '
-            'buf codegen config so the launcher does not need to reach into '
-            'a2a-itk/agents/ts/*/. Copy the reference config from '
-            'a2a-itk/agents/ts/v10/buf.gen.yaml (or the SDK\'s baseline).'
+            'buf codegen config. Copy the reference config from '
+            'a2a-js/itk/buf.gen.yaml.'
         )
     protos_stage = agent_dir / 'protos'
     protos_stage.mkdir(parents=True, exist_ok=True)

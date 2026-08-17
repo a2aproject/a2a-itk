@@ -1,13 +1,39 @@
+# Build context for the ITK service image.
+
+# Local environment / editor / VCS
 **/.venv
 **/__pycache__
 **/*.log
 **/.git
 **/.github
+**/.gitignore
 **/.vscode
 **/.ruff_cache
+**/.pytest_cache
 **/bin
+
+# Present in the repo, not used by the service:
+#   tests/     — CI runs pytest on the host (.github/workflows/ci.yml), never
+#                inside this image.
+#   scripts/   — each SDK's run_itk.sh runs process_results.py on the host
+#                from its own a2a-itk clone, not in the container.
+#   dashboard/ — deployed to GitHub Pages by its own workflow.
+tests
+scripts
 dashboard
-# NOTE: uv.lock is INCLUDED so `uv sync --frozen` at build time reproduces
-# exactly what CI resolved. Previously excluded because the legacy CMD
-# (`uv run itk_service.py`) resolved dependencies JIT on first run — the
-# baked venv means we resolve them once at build time instead.
+
+# Developer tooling, not runtime. pyproto/ is committed, so the image never
+# regenerates it.
+build_protos.sh
+Dockerfile
+.dockerignore
+
+# Deliberately INCLUDED — each of these is easy to mistake for dead weight:
+#   uv.lock    — `uv sync --frozen` reproduces exactly what CI resolved.
+#   README.md  — pyproject.toml declares `readme = "README.md"`; hatchling
+#                fails the build without it. It is a build input, not docs
+#                shipping by accident.
+#   protos/    — codegen.py symlinks the repo root into fetched rust and java
+#                agent dirs so build.rs / protobuf-maven-plugin can read
+#                protos/instruction.proto.
+#   scenarios/ — the default set for `uv run run_tests.py` inside the image.
