@@ -17,7 +17,8 @@
 #   agents  transports  behaviors  streaming  sut_sdk  unless_sut_sdk
 #   reason (required)   issue
 #
-# Every entry below was established by a real run, and names it.
+# Every entry below was established by a real cross-SDK run. Add `issue:`
+# once the defect has a tracking link.
 
 exclusions:
   # ---------------------------------------------------------------------
@@ -26,12 +27,7 @@ exclusions:
   - sut_sdk: [rust]
     agents: [python_v03, go_v03, ts_v03]
     reason: >
-      a2a-rs cannot parse a v0.3 agent card, so every hop to a v0.3 peer
-      fails at resolution — "failed to parse agent card: error decoding
-      response body for .well-known/agent-card.json". a2a-rs's own scenario
-      set contained no v0.3 peer at all, so nothing covered this before the
-      shared set added it.
-    issue: https://github.com/JakubWorek/a2a-rs/actions/runs/32209906014
+      a2a-rs does not support v0.3 agents.
 
   # ---------------------------------------------------------------------
   # a2a-js as SUT: v0.3 peers over JSON-RPC only, unless the peer is also TS
@@ -42,9 +38,7 @@ exclusions:
     reason: >
       The TypeScript v0.3 compat layer handles JSON-RPC against other SDKs
       but not gRPC or HTTP+JSON. ts_v10 <-> ts_v03 works on all three and is
-      deliberately not covered by this rule. Matches what a2a-js's own
-      scenario set encoded before the migration.
-    issue: https://github.com/JakubWorek/a2a-js/actions/runs/32210009778
+      deliberately not covered by this rule.
 
   # ---------------------------------------------------------------------
   # ts_v03 as a peer of anything that isn't TypeScript
@@ -55,9 +49,7 @@ exclusions:
     reason: >
       The v0.3 compat layer for gRPC and HTTP+JSON is implemented properly
       only on the TypeScript side, so ts_v03 serves them to a TS counterpart
-      but not to python, go, java or rust. JSON-RPC is fine everywhere —
-      a2a-java's nightly runs ts_v03 over it green.
-    issue: https://github.com/JakubWorek/a2a-java/actions/runs/32203080866
+      but not to python, go, java or rust.
 
   # ---------------------------------------------------------------------
   # a2a-java's REST inbound path rejects a v0.3 file part
@@ -75,4 +67,3 @@ exclusions:
       pass against the same peer. This is the one combination that exposes
       it, because go_v03 has no http_json at all and ts_v03 over http_json is
       already excluded for non-TS SUTs.
-    issue: https://github.com/JakubWorek/a2a-java/actions/runs/32234766416
