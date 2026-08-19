@@ -50,12 +50,14 @@ class _RecPopen:
 
 
 class _RecRun:
-    """subprocess.run stub for the java pre-build."""
+    """subprocess.run stub for the java pre-build and rust cargo build."""
 
     calls: list[tuple[list[str], Path]] = []
+    envs: list[dict | None] = []
 
-    def __call__(self, args, *, cwd=None, check=None, **_kw):  # noqa: ARG002
+    def __call__(self, args, *, cwd=None, check=None, env=None, **_kw):  # noqa: ARG002
         _RecRun.calls.append((list(args), Path(cwd) if cwd else Path.cwd()))
+        _RecRun.envs.append(env)
         return subprocess.CompletedProcess(args, 0, stdout='', stderr='')
 
 
@@ -64,6 +66,7 @@ def mount(tmp_path, monkeypatch):
     """A per-test agent dir shaped like the container's bind mount."""
     _RecPopen.calls = []
     _RecRun.calls = []
+    _RecRun.envs = []
     mount_dir = tmp_path / 'agents' / 'repo' / 'itk'
     mount_dir.mkdir(parents=True)
     monkeypatch.setattr(subprocess, 'Popen', _RecPopen)
@@ -184,7 +187,7 @@ class TestPerLanguageArgv:
         (mount / 'Cargo.toml').write_text('[package]\nname="x"\n', encoding='utf-8')
         target_dir = mount.parent.parent.parent / 'rust-target'
         monkeypatch.setenv('ITK_RUST_CURRENT_TARGET_DIR', str(target_dir))
-        release = target_dir / 'release'
+        release = current.rust_target_dir(mount) / 'release'
         release.mkdir(parents=True)
         canonical = release / 'itk-current-agent'
         canonical.write_text('bin', encoding='utf-8')
@@ -204,7 +207,7 @@ class TestPerLanguageArgv:
         (mount / 'Cargo.toml').write_text('[package]\nname="x"\n', encoding='utf-8')
         target_dir = mount.parent.parent.parent / 'rust-target'
         monkeypatch.setenv('ITK_RUST_CURRENT_TARGET_DIR', str(target_dir))
-        release = target_dir / 'release'
+        release = current.rust_target_dir(mount) / 'release'
         release.mkdir(parents=True)
         alt = release / 'itk-something-else'
         alt.write_text('bin', encoding='utf-8')
@@ -216,6 +219,61 @@ class TestPerLanguageArgv:
         current.spawn_from_dir(mount, self.HTTP, self.GRPC)
         argv, _cwd, _ = _RecPopen.calls[0]
         assert argv[0] == str(canonical)
+
+    def test_rust_isolates_target_dir_per_agent(self, mount, tmp_path, monkeypatch):
+        target_root = tmp_path / 'rust-targets'
+        monkeypatch.setenv('ITK_RUST_CURRENT_TARGET_DIR', str(target_root))
+        (mount / 'Cargo.toml').write_text(
+            '[package]\nname="itk-rust-current-agent"\n', encoding='utf-8',
+        )
+        rust_v10 = tmp_path / 'checkout' / 'a2a-rs' / 'itk'
+        rust_v10.mkdir(parents=True)
+        (rust_v10 / 'Cargo.toml').write_text(
+            '[package]\nname="itk-rust-current-agent"\n', encoding='utf-8',
+        )
+
+        binaries = []
+        for agent_dir in (mount, rust_v10):
+            release = current.rust_target_dir(agent_dir) / 'release'
+            release.mkdir(parents=True)
+            binary = release / 'itk-rust-current-agent'
+            binary.write_text(agent_dir.name, encoding='utf-8')
+            binary.chmod(0o755)
+            binaries.append(binary)
+
+        current.spawn_from_dir(mount, self.HTTP, self.GRPC)
+        current.spawn_from_dir(rust_v10, self.HTTP, self.GRPC)
+
+        env_current, env_v10 = _RecRun.envs
+        assert env_current is not None and env_v10 is not None
+        assert env_current['CARGO_TARGET_DIR'] != env_v10['CARGO_TARGET_DIR']
+        assert Path(env_current['CARGO_TARGET_DIR']).parent == target_root
+        assert Path(env_v10['CARGO_TARGET_DIR']).parent == target_root
+
+        argv_current = _RecPopen.calls[0][0]
+        argv_v10 = _RecPopen.calls[1][0]
+        assert argv_current[0] == str(binaries[0])
+        assert argv_v10[0] == str(binaries[1])
+        assert argv_current[0] != argv_v10[0]
+
+    def test_rust_skips_depinfo_and_non_executables(self, mount, monkeypatch):
+        (mount / 'Cargo.toml').write_text('[package]\nname="x"\n', encoding='utf-8')
+        target_dir = mount.parent.parent.parent / 'rust-target'
+        monkeypatch.setenv('ITK_RUST_CURRENT_TARGET_DIR', str(target_dir))
+        release = current.rust_target_dir(mount) / 'release'
+        release.mkdir(parents=True)
+        depinfo = release / 'itk-rust-current-agent.d'
+        depinfo.write_text('dep', encoding='utf-8')
+        non_exec = release / 'itk-current-agent'
+        non_exec.write_text('not exec', encoding='utf-8')
+        non_exec.chmod(0o644)
+        real = release / 'itk-fallback-agent'
+        real.write_text('bin', encoding='utf-8')
+        real.chmod(0o755)
+
+        current.spawn_from_dir(mount, self.HTTP, self.GRPC)
+        argv, _cwd, _ = _RecPopen.calls[0]
+        assert argv[0] == str(real)
 
 
 class TestNewSessionIsOptIn:

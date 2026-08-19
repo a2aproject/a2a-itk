@@ -178,19 +178,35 @@ def _spawn_java(
     return popen(args, agent_dir)
 
 
+def rust_target_dir(agent_dir: Path) -> Path:
+    """Writable ``CARGO_TARGET_DIR`` isolated per resolved ``agent_dir``.
+
+    Every rust ITK tree emits the same binary name
+    (``itk-rust-current-agent``). A shared target dir lets parallel
+    ``current`` and ``rust_v10`` builds overwrite each other, so
+    ``Cluster.start_all`` can exec the last-written binary twice.
+    """
+    root = Path(
+        os.environ.get(
+            'ITK_RUST_CURRENT_TARGET_DIR',
+            str(Path(gettempdir()) / 'itk-rust-targets'),
+        )
+    )
+    digest = hashlib.sha1(  # noqa: S324
+        str(agent_dir.resolve()).encode('utf-8')
+    ).hexdigest()
+    target = root / digest
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def _spawn_rust(
     agent_dir: Path, http_port: int, grpc_port: int, popen: _PopenFactory,
 ) -> subprocess.Popen:
     # Always build for current Rust agent so local source changes are used and
     # stale itk-* binaries from previous runs cannot mask regressions.
     build_env = os.environ.copy()
-    rust_target_root = Path(
-        build_env.get(
-            'ITK_RUST_CURRENT_TARGET_DIR',
-            str(Path(gettempdir()) / 'itk-rust-current-target'),
-        )
-    )
-    rust_target_root.mkdir(parents=True, exist_ok=True)
+    rust_target_root = rust_target_dir(agent_dir)
     build_env['CARGO_TARGET_DIR'] = str(rust_target_root)
     subprocess.run(  # noqa: S603
         ['cargo', 'build', '--locked', '--release'],  # noqa: S607
@@ -212,17 +228,21 @@ def _spawn_rust(
     return popen(args, agent_dir)
 
 
+def _is_runnable_rust_binary(path: Path) -> bool:
+    return path.is_file() and path.suffix != '.d' and os.access(path, os.X_OK)
+
+
 def _find_rust_binary(release_dir: Path) -> Path | None:
     if not release_dir.exists():
         return None
     current_named = release_dir / 'itk-rust-current-agent'
-    if current_named.exists():
+    if _is_runnable_rust_binary(current_named):
         return current_named
     canonical = release_dir / 'itk-current-agent'
-    if canonical.exists():
+    if _is_runnable_rust_binary(canonical):
         return canonical
     for candidate in sorted(release_dir.glob('itk-*')):
-        if candidate.is_file():
+        if _is_runnable_rust_binary(candidate):
             return candidate
     return None
 
