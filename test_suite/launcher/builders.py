@@ -20,7 +20,13 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from test_suite.current import maven_repo_dir, rust_target_dir
+from test_suite.current import (
+    maven_repo_dir,
+    rust_target_dir,
+    dotnet_csproj,
+    dotnet_publish_args,
+    dotnet_publish_dll,
+)
 from test_suite.launcher import codegen, config
 from test_suite.launcher.errors import InfraFailure, Stage
 
@@ -263,14 +269,27 @@ def _build_ts(agent_dir: Path, timeout: int) -> None:
         )
 
 
-def _build_dotnet(agent_dir: Path, timeout: int) -> None:  # noqa: ARG001
-    """No-op: ``dotnet run`` builds implicitly on spawn.
+def _build_dotnet(agent_dir: Path, timeout: int) -> None:
+    """``dotnet publish -c Release``; idempotent via publish/ inspection.
 
-    Kept for parity with ``spawn``'s detection so the launcher doesn't refuse
-    a .NET tree. Once .NET is an active SDK line we replace this with
-    ``dotnet publish`` or ``dotnet build`` here.
+    Publishing here rather than letting ``dotnet run`` build on spawn puts the
+    cost in the build budget (10 min) instead of the readiness one (35s local,
+    180s in CI), and leaves the output inside the cached tree so a second run
+    at the same SHA skips it entirely.
     """
-    return
+    csproj = dotnet_csproj(agent_dir)
+    if csproj is None:  # pragma: no cover — detection guarantees one exists
+        raise RuntimeError(f'no .csproj in {agent_dir}')
+    dll = dotnet_publish_dll(agent_dir, csproj)
+    if dll.exists():
+        return
+    subprocess.run(  # noqa: S603
+        dotnet_publish_args(csproj, dll.parent),
+        cwd=str(agent_dir),
+        check=True,
+        timeout=timeout,
+        capture_output=True,
+    )
 
 
 _BUILDERS: dict[Language, _Builder] = {
