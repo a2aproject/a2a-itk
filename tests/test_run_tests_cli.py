@@ -98,8 +98,42 @@ class TestLoadScenarios:
     def test_invalid_json_exits(self, tmp_path):
         p = tmp_path / 'scenarios.json'
         p.write_text('{not json', encoding='utf-8')
-        with pytest.raises(SystemExit, match='invalid JSON'):
+        with pytest.raises(SystemExit, match='could not parse'):
             run_tests.load_scenarios(p)
+
+    def test_loads_a_traversal_v1_file(self, tmp_path):
+        """The CLI takes the new schema too, so a shared set can be run
+        locally exactly as CI would."""
+        p = tmp_path / 'scenarios.yaml'
+        p.write_text(
+            'schema: traversal/v1\n'
+            'name: Local\n'
+            'roles:\n'
+            '  include_sut: false\n'
+            '  peers: [{sdk: python, line: v10}, {sdk: go, line: v10}]\n'
+            'transports: [jsonrpc]\n'
+            'behavior: send_message\n',
+            encoding='utf-8',
+        )
+        (s,) = run_tests.load_scenarios(p)
+        assert s.name == 'Local'
+        assert s.sdks == ['python_v10', 'go_v10']
+        assert s.edges == ['0->1', '1->0']
+
+    def test_test_when_filters_by_sut_sdk(self, tmp_path):
+        p = tmp_path / 'scenarios.yaml'
+        p.write_text(
+            'schema: traversal/v1\n'
+            'name: Python only\n'
+            'test_when: {sut_sdk: [python]}\n'
+            'roles: {peers: [{sdk: go, line: v10}]}\n'
+            'transports: [jsonrpc]\n'
+            'behavior: send_message\n',
+            encoding='utf-8',
+        )
+        assert len(run_tests.load_scenarios(p, 'python')) == 1
+        with pytest.raises(SystemExit, match='no scenarios left'):
+            run_tests.load_scenarios(p, 'java')
 
     def test_missing_tests_array_exits(self, tmp_path):
         with pytest.raises(SystemExit, match='"tests" array'):

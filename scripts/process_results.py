@@ -88,10 +88,23 @@ def fetch_existing_history(url: str) -> list:
         raise SystemExit(1) from None
 
 
-def load_scenarios(filepath: str) -> list:
-    """Loads the list of tests from the scenarios.json definitions."""
+def load_scenarios(filepath: str, required: bool = True) -> list:
+    """Loads the list of tests from the scenarios.json definitions.
+
+    Only needed as a fallback now: a result carrying its own metadata (see
+    :func:`build_record`) doesn't need looking up here at all. When every
+    result is self-describing the file may legitimately be absent — a run
+    driven by a shared scenario set has no local ``scenarios.json`` — so
+    ``required=False`` degrades to an empty list instead of exiting.
+    """
     path = pathlib.Path(filepath)
     if not path.exists():
+        if not required:
+            logger.info(
+                'Scenarios file %s not found; relying on result metadata.',
+                filepath,
+            )
+            return []
         logger.error('Scenarios file %s not found.', filepath)
         raise SystemExit(1)
 
@@ -102,6 +115,50 @@ def load_scenarios(filepath: str) -> list:
     except (OSError, json.JSONDecodeError, KeyError):
         logger.exception('Failed to load scenarios.json definitions')
         raise SystemExit(1) from None
+
+
+# Metadata the service now returns per result. Its presence is what lets a
+# record be built without matching the result name back to a scenario file.
+_SELF_DESCRIBING_KEYS = ('protocols', 'behavior')
+
+
+def is_self_describing(details: object) -> bool:
+    """Does this result carry its own scenario metadata?"""
+    return isinstance(details, dict) and any(
+        details.get(k) is not None for k in _SELF_DESCRIBING_KEYS
+    )
+
+
+def build_record(name: str, details: dict, base: dict | None) -> dict:
+    """Compile one history record from a result and, if needed, its scenario.
+
+    Prefers metadata carried on the result. ``base`` is the scenario file
+    entry, used only for results produced before the service returned
+    metadata.
+
+    The dashboard's record shape is unchanged — an explicit non-goal of this
+    work is altering what it ingests.
+    """
+    base = base or {}
+
+    def pick(key: str, default=None):
+        value = details.get(key)
+        return base.get(key, default) if value is None else value
+
+    record = {
+        'name': name,
+        'sdks': details.get('sdks') or base.get('sdks', []),
+        'edges': pick('edges'),
+        'protocols': pick('protocols'),
+        'behavior': pick('behavior'),
+        'traversal': base.get('traversal', 'euler'),
+        'passed': bool(details.get('passed', False)),
+    }
+    if 'streaming' in details or 'streaming' in base:
+        record['streaming'] = details.get('streaming', base.get('streaming'))
+    if 'build_subtests' in base:
+        record['build_subtests'] = base['build_subtests']
+    return record
 
 
 def save_history(filepath: str, history: list) -> None:
@@ -124,6 +181,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='ITK Compatibility Metrics Processor.')
     parser.add_argument('--history_output_file', required=True, help='Path to the output JSON file for historical metrics.')
     parser.add_argument('--history_url', required=True, help='URL to fetch the existing historical metrics JSON.')
+    parser.add_argument(
+        '--scenarios',
+        help='Scenario definitions used for this run. Only consulted for '
+             'results that lack their own metadata; defaults to '
+             'scenarios{,_full}.json in the working directory.',
+    )
     args = parser.parse_args()
 
     history_output_file = args.history_output_file
@@ -137,59 +200,56 @@ def main() -> None:
     # 2. Fetch existing history from rolling release
     history = fetch_existing_history(history_url)
 
-    # 3. Load scenarios list for base metadata
-    scenarios_file = (
+    # 3. Load scenarios only as a fallback. Results from a current service
+    # carry their own metadata; the file is needed just for older ones.
+    self_describing = all(is_self_describing(d) for d in results.values())
+    scenarios_file = args.scenarios or (
         'scenarios_full.json'
         if os.environ.get('ITK_NIGHTLY_RUN', '').lower() == 'true'
         else 'scenarios.json'
     )
-    base_scenarios = load_scenarios(scenarios_file)
-    # Merge definitions with current outcomes dynamically
+    base_scenarios = load_scenarios(scenarios_file, required=not self_describing)
+    by_name = {b['name']: b for b in base_scenarios if 'name' in b}
+
+    if not results:
+        # Belt and braces alongside itk_report.validate: publishing a run with
+        # no scenarios can push a real entry off the rolling window.
+        logger.error('No results to record; refusing to publish an empty run.')
+        raise SystemExit(1)
+
     compiled_scenarios = []
+    dropped = []
     for name, details in results.items():
-        # Extract the parent scenario name cleanly by splitting on the subtest suffix
-        parent_name = name.split('-sub-')[0]
-
-        # Find the matching base scenario with an EXACT match!
-        matched_base = None
-        for base in base_scenarios:
-            if parent_name == base['name']:
-                matched_base = base
-                break
-
-        if not matched_base:
-            logger.warning(
-                'No matching base scenario found for result key: %s', name
-            )
+        # A bare bool predates the structured result shape.
+        if isinstance(details, bool):
+            details = {'passed': details}
+        elif not isinstance(details, dict):
+            dropped.append((name, f'unusable result type {type(details).__name__}'))
             continue
 
-        # Build the metadata-rich scenario record
-        passed = False
-        sdks = matched_base.get('sdks', [])
-        edges = matched_base.get('edges')
+        # Subtests are named "<parent>-sub-<agents>" and share the parent's
+        # definition.
+        base = by_name.get(name) or by_name.get(name.split('-sub-')[0])
 
-        if isinstance(details, dict):
-            passed = details.get('passed', False)
-            sdks = details.get('sdks', sdks)
-            edges = details.get('edges', edges)
-        elif isinstance(details, bool):
-            passed = details
+        if base is None and not is_self_describing(details):
+            dropped.append((name, 'no metadata on the result and no matching scenario'))
+            continue
 
-        record = {
-            'name': name,
-            'sdks': sdks,
-            'edges': edges,
-            'protocols': matched_base.get('protocols'),
-            'behavior': matched_base.get('behavior'),
-            'traversal': matched_base.get('traversal', 'euler'),
-            'passed': passed,
-        }
-        if 'streaming' in matched_base:
-            record['streaming'] = matched_base['streaming']
-        if 'build_subtests' in matched_base:
-            record['build_subtests'] = matched_base['build_subtests']
+        compiled_scenarios.append(build_record(name, details, base))
 
-        compiled_scenarios.append(record)
+    # Dropping a scenario silently is how a renamed or generated scenario
+    # used to vanish from the published history while the run stayed green.
+    # Refuse to publish a partial history instead.
+    if dropped:
+        for name, why in dropped:
+            logger.error('Cannot record result %r: %s', name, why)
+        logger.error(
+            'Refusing to publish history missing %d of %d result(s). '
+            'Re-run against a service that returns scenario metadata, or '
+            'pass --scenarios pointing at the definitions used for this run.',
+            len(dropped), len(results),
+        )
+        raise SystemExit(1)
 
     # 4. Compile new run metadata
     new_run = {

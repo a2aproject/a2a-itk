@@ -1,0 +1,77 @@
+# Default scenario set for `uv run run_tests.py` — a cross-SDK smoke test of
+# this repo itself, not of any one SDK. The traversal/v1 twin of
+# ../smoke.json; the two are held equivalent by scripts/scenarios_diff.py, so
+# this file doubles as the worked example of the new schema.
+#
+# Deliberately peer-only (`include_sut: false`): nothing here names the SUT,
+# so it runs with nothing checked out but a2a-itk. Deliberately python+go
+# only — the two cheapest peers to build, so a cold run costs a couple of
+# minutes instead of waiting on cargo and maven.
+#
+# For broader coverage point --scenarios at scenarios/traversal/nightly.yaml,
+# and add --mount to bring a local checkout in as the SUT.
+
+tests:
+  - schema: traversal/v1
+    name: Smoke - python v1.0 <-> go v1.0 - all transports
+    tier: pr
+    roles:
+      include_sut: false
+      peers:
+        - {sdk: python, line: v10}
+        - {sdk: go, line: v10}
+    topology: star
+    transports: [jsonrpc, grpc, http_json]
+    behavior: send_message
+
+  - schema: traversal/v1
+    name: Smoke - python v1.0 <-> go v1.0 - all transports (streaming)
+    tier: pr
+    roles:
+      include_sut: false
+      peers:
+        - {sdk: python, line: v10}
+        - {sdk: go, line: v10}
+    topology: star
+    transports: [jsonrpc, grpc, http_json]
+    behavior: send_message
+    streaming: true
+
+  # v0.3 leads, because the traversal starts at the first agent and the
+  # request encoding is chosen from it — this is the v0.3-client direction.
+  - schema: traversal/v1
+    name: Smoke - backwards compat python v0.3 <-> v1.0
+    tier: pr
+    roles:
+      include_sut: false
+      peers:
+        - {sdk: python, line: v03}
+        - {sdk: python, line: v10}
+    topology: star
+    transports: [jsonrpc, grpc]
+    behavior: send_message
+
+  - schema: traversal/v1
+    name: Smoke - push notification - python v1.0 <-> go v1.0
+    tier: pr
+    roles:
+      include_sut: false
+      peers:
+        - {sdk: python, line: v10}
+        - {sdk: go, line: v10}
+    topology: star
+    transports: [jsonrpc]
+    behavior: push_notification
+
+  - schema: traversal/v1
+    name: Smoke - resubscribe - python v1.0 <-> go v1.0
+    tier: pr
+    roles:
+      include_sut: false
+      peers:
+        - {sdk: python, line: v10}
+        - {sdk: go, line: v10}
+    topology: star
+    transports: [jsonrpc]
+    behavior: resubscribe
+    streaming: true

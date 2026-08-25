@@ -19,15 +19,21 @@ whole consolidation exists to remove.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
-from collections.abc import Iterator
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from test_suite.agent_table import AgentTable
 from test_suite.launcher import Cluster, TargetSpec
 from test_suite.launcher.fetch import resolve_ref
 from test_suite.launcher.matrix import Matrix
+from test_suite.scenarios.loader import load_file, parse_tests
+from test_suite.scenarios.resolver import (
+    ResolutionReport,
+    ResolvedScenario,
+    resolve_all,
+)
 from test_suite.launcher.spec import Kind
 from testlib import execute_itk_test
 
@@ -45,28 +51,27 @@ SUT_ID = 'current'
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class Scenario:
-    """One scenario to execute.
-
-    Field-for-field the schema of an entry in an SDK's ``scenarios.json``,
-    so a file written for CI runs unchanged through the CLI.
-    """
-
-    name: str
-    sdks: list[str]
-    behavior: str
-    edges: list[str] | None = None
-    protocols: list[str] | None = None
-    streaming: bool = False
-    build_subtests: bool = False
+# Everything below this point sees only this shape, never which schema it
+# came from.
+Scenario = ResolvedScenario
 
 
 @dataclass(frozen=True)
 class ScenarioResult:
+    """One scenario's outcome, plus enough of its definition to record it.
+
+    The metadata rides along so the nightly metrics processor needn't recover
+    it by matching the result name back to a scenario file — a lookup that
+    silently dropped anything it couldn't match.
+    """
+
     passed: bool
     sdks: list[str]
     edges: list[str] | None = None
+    protocols: list[str] | None = None
+    behavior: str | None = None
+    streaming: bool = False
+    tier: str | None = None
 
 
 class ClusterStartupError(RuntimeError):
@@ -96,9 +101,9 @@ class _Plan:
 # Serialisation of runs
 # ---------------------------------------------------------------------------
 
-# Scenario execution reads agent ports from the process-global
-# ``test_suite._AGENT_DEFS``, so two concurrent runs in one process would
-# race on it. Both front ends go through here, so one lock covers both.
+# A run owns a whole cluster: host ports, the launcher's build cache, and the
+# fixed container port the notification server binds. Two at once would
+# contend on all three.
 _execution_lock = asyncio.Lock()
 
 _matrix: Matrix | None = None
@@ -121,6 +126,74 @@ def set_matrix(matrix: Matrix | None) -> None:
     """Override the cached matrix. For tests and for ``--matrix``."""
     global _matrix
     _matrix = matrix
+
+
+# ---------------------------------------------------------------------------
+# Input: either scenario schema -> executable scenarios
+# ---------------------------------------------------------------------------
+
+
+def prepare(raw_tests: object, *, sut_sdk: str | None = None) -> list[Scenario]:
+    """Resolve an already-parsed scenario document into runnable scenarios.
+
+    Accepts a ``{"tests": [...]}`` mapping or a bare list, holding legacy
+    entries, ``traversal/v1`` entries, or a mixture.
+
+    Args:
+        raw_tests: The parsed scenario document.
+        sut_sdk: SDK under test, for ``test_when`` and ``include_own_lines``.
+
+    Raises:
+        test_suite.scenarios.loader.ScenarioFileError: Malformed input.
+        test_suite.scenarios.resolver.ResolutionError: A scenario names a
+            peer the matrix doesn't have, or can't be bound.
+    """
+    return _report(
+        resolve_all(parse_tests(raw_tests), get_matrix(), sut_sdk=sut_sdk)
+    )
+
+
+def prepare_file(path: Path, *, sut_sdk: str | None = None) -> list[Scenario]:
+    """Same as :func:`prepare`, reading the document from a file.
+
+    Both front ends go through one of these two so a scenario behaves the
+    same over HTTP and on the CLI — including what gets reported about the
+    scenarios that won't run.
+    """
+    return _report(
+        resolve_all(load_file(path), get_matrix(), sut_sdk=sut_sdk)
+    )
+
+
+def _report(report: ResolutionReport) -> list[Scenario]:
+    """Log what won't run, and what will run short-handed.
+
+    At warning level, because a skip or a trim nobody notices is
+    indistinguishable from coverage that quietly vanished. Grouped by cause:
+    one exclusion typically hits dozens of scenarios, and repeating its
+    rationale per scenario buries the run's actual output.
+    """
+    if report.skipped:
+        by_reason: dict[str, int] = defaultdict(int)
+        for _, why in report.skipped:
+            by_reason[why] += 1
+        logger.warning('%d scenario(s) SKIPPED:', len(report.skipped))
+        for why, n in sorted(by_reason.items()):
+            logger.warning('  [%d] %s', n, why)
+
+    if report.trimmed:
+        by_peer: dict[tuple[str, str], int] = defaultdict(int)
+        for _, agent, why in report.trimmed:
+            by_peer[(agent, why)] += 1
+        logger.warning(
+            '%d scenario(s) running with a peer removed:',
+            len({name for name, _, _ in report.trimmed}),
+        )
+        for (agent, why), n in sorted(by_peer.items()):
+            logger.warning('  [%d] %s dropped — %s', n, agent, why)
+
+    logger.info('%d scenario(s) to run', len(report.scenarios))
+    return report.scenarios
 
 
 # ---------------------------------------------------------------------------
@@ -242,69 +315,43 @@ async def _run_locked(
         if failures:
             raise ClusterStartupError(failures)
 
-        id_to_handle = {plan.ids[i]: o.handle for i, o in enumerate(outcomes)}
-        with wire_ports(id_to_handle):
-            # Sequential on purpose — the cluster is shared, and running
-            # scenarios concurrently against it overloads the agents.
-            results: dict[str, ScenarioResult] = {}
-            for scenario in scenarios:
-                logger.info("Executing scenario '%s'", scenario.name)
-                raw = await execute_itk_test(
-                    sdks=scenario.sdks,
-                    behavior=scenario.behavior,
-                    edges=scenario.edges,
-                    scenario_name=scenario.name,
+        # Where the agents we just started are listening. Passed down the
+        # call chain rather than published to a global, so nothing can leak
+        # into the next run.
+        agents = AgentTable.from_handles(
+            {plan.ids[i]: o.handle for i, o in enumerate(outcomes)}
+        )
+        logger.info('Cluster up: %r', agents)
+
+        # Sequential on purpose — the cluster is shared, and running
+        # scenarios concurrently against it overloads the agents.
+        results: dict[str, ScenarioResult] = {}
+        for scenario in scenarios:
+            logger.info("Executing scenario '%s'", scenario.name)
+            raw = await execute_itk_test(
+                sdks=scenario.sdks,
+                behavior=scenario.behavior,
+                agents=agents,
+                edges=scenario.edges,
+                scenario_name=scenario.name,
+                protocols=scenario.protocols,
+                streaming=scenario.streaming,
+                build_subtests=scenario.build_subtests,
+            )
+            for name, details in raw.items():
+                # sdks/edges come from the execution because a subtest runs a
+                # smaller graph than its parent scenario declares; everything
+                # else is a property of the scenario and is copied across.
+                results[name] = ScenarioResult(
+                    passed=bool(details['passed']),
+                    sdks=list(details['sdks']),
+                    edges=details.get('edges'),
                     protocols=scenario.protocols,
+                    behavior=scenario.behavior,
                     streaming=scenario.streaming,
-                    build_subtests=scenario.build_subtests,
+                    tier=scenario.tier,
                 )
-                for name, details in raw.items():
-                    results[name] = ScenarioResult(
-                        passed=bool(details['passed']),
-                        sdks=list(details['sdks']),
-                        edges=details.get('edges'),
-                    )
     return results
 
 
-# ---------------------------------------------------------------------------
-# Adapter: launcher handles -> test_suite._AGENT_DEFS[sdk][httpPort/grpcPort]
-# ---------------------------------------------------------------------------
 
-
-@contextlib.contextmanager
-def wire_ports(id_to_handle: dict[str, object]) -> Iterator[None]:
-    """Publish launcher-owned ports to the agent registry, then withdraw them.
-
-    ``testlib.execute_itk_test`` resolves peer addresses through
-    ``test_suite.get_agent_card_uri`` / ``get_agent_def``, which read
-    ``test_suite._AGENT_DEFS[sdk]['httpPort'/'grpcPort']``. The registry
-    doesn't allocate ports — the launcher owns them — so this is where they
-    get handed over.
-
-    On exit only the keys we wrote are removed, so a second run in the same
-    process starts clean (the service is long-lived).
-
-    Unknown identifiers are skipped with a warning instead of raising: the
-    scenario will fail anyway, with a message from ``get_agent_card_uri``
-    that names the id.
-    """
-    from test_suite import _AGENT_DEFS  # noqa: PLC0415 — access is intentional
-
-    written: list[str] = []
-    try:
-        for sdk_id, handle in id_to_handle.items():
-            if sdk_id not in _AGENT_DEFS:
-                logger.warning(
-                    'Launcher handle for %r has no entry in _AGENT_DEFS; '
-                    'execute_itk_test will not see it', sdk_id,
-                )
-                continue
-            _AGENT_DEFS[sdk_id]['httpPort'] = handle.http_port  # type: ignore[attr-defined]
-            _AGENT_DEFS[sdk_id]['grpcPort'] = handle.grpc_port  # type: ignore[attr-defined]
-            written.append(sdk_id)
-        yield
-    finally:
-        for sdk_id in written:
-            _AGENT_DEFS[sdk_id].pop('httpPort', None)
-            _AGENT_DEFS[sdk_id].pop('grpcPort', None)

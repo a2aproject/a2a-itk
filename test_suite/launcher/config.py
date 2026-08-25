@@ -1,6 +1,6 @@
 """Launcher configuration — cache root, timeouts, budgets, image identity.
 
-Every knob is env-overridable so the CI wiring (Story 1.11) and local
+Every knob is env-overridable so the CI wiring and local
 developers can shape behaviour without patching code. Defaults match the
 values in the design doc.
 

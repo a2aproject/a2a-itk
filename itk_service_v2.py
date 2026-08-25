@@ -1,28 +1,30 @@
 """ITK service — the HTTP ``/run`` handler.
 
-The wire contract is frozen: request/response schema, ``/health``, port
-8000. Every SDK's ``run_itk.sh`` POSTs its ``scenarios.json`` here.
+``/health``, port 8000 and the legacy request/response schema are unchanged.
+``/run`` additionally accepts ``traversal/v1`` scenarios, and a batch may mix
+both, so each SDK can migrate on its own schedule.
 
-This module is deliberately thin. All the actual work — resolving agent
-identifiers against ``matrix.yaml``, starting the cluster, executing
-scenarios — lives in :mod:`itk_runner`, which ``run_tests.py`` also
-drives. Everything here is HTTP concerns: schema validation and mapping
-runner errors onto status codes.
+Thin by design: parsing, role binding, cluster lifecycle and execution all
+live in :mod:`itk_runner`, which ``run_tests.py`` also drives. Everything
+here is HTTP concerns.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 import itk_runner
-from itk_runner import ClusterStartupError, Scenario
+from itk_runner import ClusterStartupError
 from test_suite.launcher import InfraFailure, PermanentError
 from test_suite.launcher.matrix import MatrixError
+from test_suite.scenarios.loader import ScenarioFileError
+from test_suite.scenarios.resolver import ResolutionError
 
 
 logging.basicConfig(
@@ -31,31 +33,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Frozen wire schema — every SDK's scenarios.json is written against it
-# ---------------------------------------------------------------------------
-
-
-class TestCase(BaseModel):
-    """One scenario the caller wants executed."""
-
-    name: str
-    sdks: list[str]
-    behavior: str
-    edges: list[str] | None = None
-    protocols: list[str] | None = None
-    streaming: bool = False
-    build_subtests: bool = False
-
-
 class RunTestsRequest(BaseModel):
-    tests: list[TestCase]
+    # Untyped on purpose: both scenario schemas are live, and
+    # test_suite.scenarios owns their validation. A pydantic copy here would
+    # only give the definitions somewhere to drift apart.
+    tests: list[dict[str, Any]]
+    # SDK under test, for `test_when` and `include_own_lines`. Absent means
+    # nothing is filtered, which is what a legacy scenarios.json wants.
+    sut_sdk: str | None = None
 
 
 class TestResultDetails(BaseModel):
+    """One scenario's outcome.
+
+    ``passed``/``sdks``/``edges`` are unchanged. The rest are optional
+    additions, so a consumer reading only those three is unaffected.
+    """
+
     passed: bool
     sdks: list[str]
     edges: list[str] | None = None
+    protocols: list[str] | None = None
+    behavior: str | None = None
+    streaming: bool = False
+    tier: str | None = None
 
 
 class RunTestsResponse(BaseModel):
@@ -79,22 +80,37 @@ async def health() -> dict[str, str]:
 
 @app.post('/run', response_model=RunTestsResponse)
 async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
-    """Frozen — the request/response schema every SDK's scenarios.json targets."""
+    """Run a batch of scenarios in either schema.
+
+    The legacy request shape every SDK's ``scenarios.json`` targets is
+    unchanged. A ``traversal/v1`` entry is recognised by its ``schema`` key
+    and resolved against ``matrix.yaml`` first; a batch may mix the two.
+    """
     if not request.tests:
         raise HTTPException(status_code=400, detail='No tests provided')
 
-    scenarios = [
-        Scenario(
-            name=c.name,
-            sdks=c.sdks,
-            behavior=c.behavior,
-            edges=c.edges,
-            protocols=c.protocols,
-            streaming=c.streaming,
-            build_subtests=c.build_subtests,
+    try:
+        scenarios = itk_runner.prepare(
+            {'tests': request.tests}, sut_sdk=request.sut_sdk,
         )
-        for c in request.tests
-    ]
+    except (ScenarioFileError, ResolutionError) as e:
+        # Malformed or unbindable scenario — the caller sent something we
+        # can't run. 400 rather than 500: nothing here is retryable.
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    if not scenarios:
+        # Refused rather than returning an empty pass, which would read as a
+        # green run that tested nothing. The cause is in the service log:
+        # itk_runner reports every skip with its reason.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f'All {len(request.tests)} scenario declaration(s) resolved to '
+                f'nothing runnable for sut_sdk={request.sut_sdk!r} — filtered '
+                f'by test_when, or excluded as known failures. See the service '
+                f'log for the per-scenario reasons.'
+            ),
+        )
 
     try:
         results = await itk_runner.run_scenarios(
@@ -116,7 +132,15 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
         raise HTTPException(status_code=500, detail=f'Execution error: {e!s}') from e
 
     typed = {
-        name: TestResultDetails(passed=r.passed, sdks=r.sdks, edges=r.edges)
+        name: TestResultDetails(
+            passed=r.passed,
+            sdks=r.sdks,
+            edges=r.edges,
+            protocols=r.protocols,
+            behavior=r.behavior,
+            streaming=r.streaming,
+            tier=r.tier,
+        )
         for name, r in results.items()
     }
     return RunTestsResponse(

@@ -1,28 +1,43 @@
-# Matrix: scenario-level agent identifiers → (repo, ref).
+# Matrix: scenario-level agent identifiers → (repo, ref, transports).
 #
 # Consumed by :mod:`test_suite.launcher.matrix`. Scenarios reference peers
-# by identifier ("python_v10", "go_v03", "python_v10_2" — the _N suffix
-# means "second instance of the same source"). This file maps each
-# (sdk, line) pair to the GitHub repo and default ref to fetch. The
-# service resolves the ref to a SHA at plan time via `git ls-remote`, so
-# a symbolic ref like `main` means "latest at run time" (fine for
-# nightly), while a tag or SHA pins the peer.
+# either by identifier ("python_v10", "go_v03", "python_v10_2" — the _N suffix
+# means "second instance of the same source") or, in the traversal/v1 schema,
+# by (sdk, line). This file maps each (sdk, line) pair to the GitHub repo and
+# default ref to fetch. The service resolves the ref to a SHA at plan time via
+# `git ls-remote`, so a symbolic ref like `main` means "latest at run time"
+# (fine for nightly), while a tag or SHA pins the peer.
 #
 # Special case: "current" is the SUT and doesn't map through this file —
 # it's spawned via `Kind.MOUNT` from the container's bind mount.
 #
 # v03 lines point at `+itk` overlay tags: the underlying v0.3.X release
 # with the itk agent grafted onto its `itk/` subdir. `java` and `rust` have no v03.
+#
+# `transports` is the line's capability ceiling: a scenario runs a peer only
+# over transports the line supports. This holds whether the peer is named
+# explicitly or selected by the `peers: all` macro — a peer that cannot speak
+# a requested transport drops out of that transport's graph rather than
+# failing the traversal, which is what reproduces the hand-written
+# "No Go v03 - HTTP_JSON" legacy scenarios. Omitted means all three.
 
 sdks:
   python:
     v10: {repo: a2aproject/a2a-python, ref: main}
+    # a2a-python and a2a-go both drive this line over all three transports;
+    # a2a-js only ever drives it over jsonrpc. The permissive reading is
+    # recorded because two independent SUTs exercise it green today.
     v03: {repo: a2aproject/a2a-python, ref: "v0.3.24+itk"}
   go:
     v10: {repo: a2aproject/a2a-go, ref: main}
-    v03: {repo: a2aproject/a2a-go, ref: "v0.3.15+itk"}
+    # No SDK runs go_v03 over http_json, and a2a-python and a2a-java both
+    # carry an explicit "No Go v03 - HTTP_JSON" scenario to route around it.
+    v03: {repo: a2aproject/a2a-go, ref: "v0.3.15+itk", transports: [jsonrpc, grpc]}
   ts:
     v10: {repo: a2aproject/a2a-js, ref: main}
+    # All three. grpc and http_json only work against a TypeScript
+    # counterpart, but that is a property of the pair — see
+    # known_failures.yaml.
     v03: {repo: a2aproject/a2a-js, ref: "v0.3.14+itk"}
   java:
     v10: {repo: a2aproject/a2a-java, ref: main}

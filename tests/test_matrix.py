@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-from test_suite.launcher.matrix import Matrix, MatrixEntry, MatrixError
+from test_suite.launcher.matrix import (
+    ALL_TRANSPORTS,
+    Matrix,
+    MatrixEntry,
+    MatrixError,
+)
 from test_suite.launcher.spec import Kind
 
 
@@ -258,3 +263,73 @@ class TestFromDefault:
                 f'{sdk}_v03 must pin an overlay tag (contains "+itk"), '
                 f'got {entry.ref!r}'
             )
+
+
+class TestTransports:
+    """Per-line transport capability, used to expand the `peers: all` macro."""
+
+    def test_defaults_to_all_three_when_omitted(self):
+        m = Matrix.from_dict({
+            'sdks': {'python': {'v10': {'repo': 'a/b', 'ref': 'main'}}}
+        })
+        assert m.resolve('python_v10').transports == ALL_TRANSPORTS
+
+    def test_explicit_subset_is_read(self):
+        m = Matrix.from_dict({'sdks': {'go': {'v03': {
+            'repo': 'a/b', 'ref': 'v0.3.15+itk',
+            'transports': ['jsonrpc', 'grpc'],
+        }}}})
+        assert m.resolve('go_v03').transports == frozenset({'jsonrpc', 'grpc'})
+
+    def test_supports_checks_every_requested_transport(self):
+        entry = MatrixEntry(
+            sdk='go', line='v03', repo='a/b', ref='x',
+            transports=frozenset({'jsonrpc', 'grpc'}),
+        )
+        assert entry.supports(['jsonrpc']) is True
+        assert entry.supports(['jsonrpc', 'grpc']) is True
+        assert entry.supports(['jsonrpc', 'http_json']) is False
+
+    def test_unknown_transport_is_rejected(self):
+        """A typo would silently shrink which peers `peers: all` selects."""
+        with pytest.raises(MatrixError, match='unknown transport'):
+            Matrix.from_dict({'sdks': {'go': {'v10': {
+                'repo': 'a/b', 'ref': 'main', 'transports': ['jsonrpc', 'grcp'],
+            }}}})
+
+    def test_empty_transport_list_is_rejected(self):
+        with pytest.raises(MatrixError, match='must not be empty'):
+            Matrix.from_dict({'sdks': {'go': {'v10': {
+                'repo': 'a/b', 'ref': 'main', 'transports': [],
+            }}}})
+
+    def test_non_list_is_rejected(self):
+        with pytest.raises(MatrixError, match='must be a list of strings'):
+            Matrix.from_dict({'sdks': {'go': {'v10': {
+                'repo': 'a/b', 'ref': 'main', 'transports': 'jsonrpc',
+            }}}})
+
+    def test_only_go_v03_is_restricted_here(self):
+        """`transports` is only for a line that cannot speak one from
+        anywhere. go_v03 is the sole such case; ts_v03's grpc/http_json limit
+        is pairwise and lives in known_failures.yaml.
+        """
+        m = Matrix.from_default()
+        restricted = {
+            e.agent_id: sorted(e.transports)
+            for e in m.entries() if e.transports != ALL_TRANSPORTS
+        }
+        assert restricted == {'go_v03': ['grpc', 'jsonrpc']}
+
+
+class TestEntries:
+    def test_is_sorted_for_stable_peer_ordering(self):
+        """`peers: all` expands in this order, and edge indices are positional
+        — an unstable order would make runs incomparable."""
+        m = Matrix.from_default()
+        ids = [e.agent_id for e in m.entries()]
+        assert ids == sorted(ids)
+
+    def test_covers_every_key(self):
+        m = Matrix.from_default()
+        assert len(m.entries()) == len(m.keys()) == len(m)

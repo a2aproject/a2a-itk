@@ -10,7 +10,7 @@ tested independently in its own module — here we only verify the glue:
   * 'current' bypasses matrix -> MOUNT
   * Cluster.start_all called with the built specs
   * partial-startup failure -> 502 with per-target detail
-  * _AGENT_DEFS ports poked and cleared
+  * launcher handles reach the executor as an AgentTable
   * scenarios executed sequentially against the shared cluster
 """
 
@@ -166,8 +166,35 @@ class TestRunSchema:
         assert set(body) == {'results', 'all_passed'}
         assert body['all_passed'] is True
         assert 'test1' in body['results']
-        assert set(body['results']['test1']) == {'passed', 'sdks', 'edges'}
         assert body['results']['test1']['sdks'] == ['current', 'python_v10']
+
+    def test_original_response_fields_are_unchanged(self, client):
+        """Five SDK repos parse this response. The three original fields must
+        keep their names and meaning; anything added is additive."""
+        r = client.post('/run', json={
+            'tests': [{'name': 'test1', 'sdks': ['current', 'python_v10'],
+                       'behavior': 'echo'}],
+        })
+        details = r.json()['results']['test1']
+        assert {'passed', 'sdks', 'edges'} <= set(details)
+        assert details['passed'] is True
+        assert details['sdks'] == ['current', 'python_v10']
+
+    def test_scenario_metadata_is_returned(self, client):
+        """Carried so the nightly processor needn't match result names back
+        against the scenario file — a lookup that silently dropped anything
+        it couldn't find."""
+        r = client.post('/run', json={
+            'tests': [{
+                'name': 'test1', 'sdks': ['current', 'python_v10'],
+                'behavior': 'send_message', 'protocols': ['jsonrpc', 'grpc'],
+                'streaming': True,
+            }],
+        })
+        details = r.json()['results']['test1']
+        assert details['behavior'] == 'send_message'
+        assert details['protocols'] == ['jsonrpc', 'grpc']
+        assert details['streaming'] is True
 
 
 # ---------------------------------------------------------------------------
@@ -379,52 +406,80 @@ class TestClusterStartup:
 
 
 # ---------------------------------------------------------------------------
-# Adapter: launcher ports → _AGENT_DEFS
+# Adapter: launcher handles → AgentTable
 # ---------------------------------------------------------------------------
 
 
-class TestAdapter:
-    def test_ports_written_during_execute_and_cleared_after(self, client, monkeypatch):
-        """During execute_itk_test, _AGENT_DEFS[sdk][httpPort] must reflect
-        the launcher's handle. After /run returns, they must be gone.
-        """
-        from test_suite import _AGENT_DEFS
-        seen_ports: dict[str, tuple[int, int]] = {}
+class TestAgentTableWiring:
+    """The executor must be handed this run's real ports, and nothing else.
 
-        async def probing_execute(sdks, behavior, edges=None, scenario_name=None, **_kw):  # noqa: ARG001
+    Ports used to live in a process-global registry, where a leaked entry
+    silently retargeted the next run. Passing the table as an argument makes
+    that structurally impossible; these tests pin both halves.
+    """
+
+    def test_executor_receives_the_launchers_ports(self, client, monkeypatch):
+        seen: dict[str, tuple[int, int]] = {}
+
+        async def probing_execute(sdks, behavior, agents, edges=None, scenario_name=None, **_kw):  # noqa: ARG001
             for s in sdks:
-                seen_ports[s] = (
-                    _AGENT_DEFS[s].get('httpPort'),
-                    _AGENT_DEFS[s].get('grpcPort'),
-                )
+                seen[s] = (agents[s].http_port, agents[s].grpc_port)
             return {scenario_name: {'passed': True, 'sdks': sdks, 'edges': edges}}
 
         monkeypatch.setattr(itk_runner, 'execute_itk_test', probing_execute)
-
-        # Snapshot BEFORE — ports for current should not be set (or set to
-        # whatever was there; we care about our writes + cleanup).
-        before_current = _AGENT_DEFS['current'].get('httpPort')
-
         client.post('/run', json={
             'tests': [{'name': 't', 'sdks': ['current', 'python_v10'], 'behavior': 'echo'}],
         })
 
-        # DURING: probing_execute saw non-None ports for both.
-        assert seen_ports['current'][0] is not None
-        assert seen_ports['current'][1] is not None
-        assert seen_ports['python_v10'][0] is not None
-        # HTTP != gRPC per handle.
-        assert seen_ports['current'][0] != seen_ports['current'][1]
+        assert set(seen) == {'current', 'python_v10'}
+        for http_port, grpc_port in seen.values():
+            assert http_port and grpc_port
+            assert http_port != grpc_port
 
-        # AFTER: our writes are gone (compared to snapshot).
-        # We only delete keys we wrote — if something already had a value there,
-        # we don't restore it, we just don't touch what we didn't write.
-        after_current = _AGENT_DEFS['current'].get('httpPort')
-        assert after_current == before_current, (
-            f'adapter must not leave port keys behind '
-            f'(before={before_current!r}, after={after_current!r})'
-        )
-        assert _AGENT_DEFS['python_v10'].get('httpPort') is None
+    def test_table_holds_exactly_the_started_agents(self, client, monkeypatch):
+        """Not a fixed roster: only what the cluster actually started."""
+        tables = []
+
+        async def capturing_execute(sdks, behavior, agents, edges=None, scenario_name=None, **_kw):  # noqa: ARG001
+            tables.append(sorted(agents))
+            return {scenario_name: {'passed': True, 'sdks': sdks, 'edges': edges}}
+
+        monkeypatch.setattr(itk_runner, 'execute_itk_test', capturing_execute)
+        client.post('/run', json={
+            'tests': [{'name': 't', 'sdks': ['current', 'go_v10'], 'behavior': 'echo'}],
+        })
+        assert tables == [['current', 'go_v10']]
+
+    def test_consecutive_runs_get_independent_tables(self, client, monkeypatch):
+        """The service is long-lived; one run's ports must not reach the next."""
+        tables = []
+
+        async def capturing_execute(sdks, behavior, agents, edges=None, scenario_name=None, **_kw):  # noqa: ARG001
+            tables.append(dict(agents))
+            return {scenario_name: {'passed': True, 'sdks': sdks, 'edges': edges}}
+
+        monkeypatch.setattr(itk_runner, 'execute_itk_test', capturing_execute)
+        for sdk in ('python_v10', 'go_v10'):
+            client.post('/run', json={
+                'tests': [{'name': f't-{sdk}', 'sdks': ['current', sdk],
+                           'behavior': 'echo'}],
+            })
+
+        assert len(tables) == 2
+        assert set(tables[0]) == {'current', 'python_v10'}
+        assert set(tables[1]) == {'current', 'go_v10'}
+        # No carry-over of the first run's peer into the second.
+        assert 'python_v10' not in tables[1]
+
+    def test_unknown_agent_is_a_runtime_error_not_a_value_error(self):
+        """_get_valid_subgraphs swallows ValueError to skip untraversable
+        subgraphs. A peer that never started must not be silently skipped
+        that way — it has to surface."""
+        from test_suite.agent_table import AgentEndpoint, AgentTable
+
+        table = AgentTable({'current': AgentEndpoint(1, 2)})
+        with pytest.raises(RuntimeError, match='No running agent'):
+            table.card_uri('python_v10')
 
 
 # ---------------------------------------------------------------------------

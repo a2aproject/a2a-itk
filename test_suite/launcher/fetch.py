@@ -4,7 +4,7 @@ Two entry points:
 
   * :func:`resolve_ref` — one-shot ``git ls-remote`` to translate a symbolic
     ref (``main``, ``v1.2.3``) to a 40-hex SHA. Called at plan time by the
-    role-binding runner (Phase 2), not by :func:`fetch_commit` itself.
+    role-binding runner, not by :func:`fetch_commit` itself.
 
   * :func:`fetch_commit` — fetch exactly one commit into ``dst``, with
     bounded retry on transient errors. A 404-class failure (SHA not found)

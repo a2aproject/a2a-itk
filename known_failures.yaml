@@ -1,0 +1,69 @@
+# Combinations deliberately left out of every run.
+#
+# Applied to resolved scenarios just before they run; each is logged with its
+# reason, because an exclusion nobody can see is indistinguishable from
+# coverage that quietly disappeared. Where an exclusion names `agents`, that
+# peer is removed from the graph and the scenario still runs; it is skipped
+# only if fewer than two agents remain.
+#
+# This file is for combinations that are BROKEN. A line that cannot speak a
+# transport from anywhere belongs in matrix.yaml's per-line `transports`,
+# which also stops the peer being selected at all. Most entries here are v0.3
+# interop, where the compat layer lives in whichever SDK drives the hop — so
+# the limit is a property of the (SUT, peer) pair, which `sut_sdk` and
+# `unless_sut_sdk` express and a per-line capability cannot.
+#
+# Fields (all optional except `reason`; those set must all match):
+#   agents  transports  behaviors  streaming  sut_sdk  unless_sut_sdk
+#   reason (required)   issue
+#
+# Every entry below was established by a real cross-SDK run. Add `issue:`
+# once the defect has a tracking link.
+
+exclusions:
+  # ---------------------------------------------------------------------
+  # a2a-rs has no v0.3 client support at all
+  # ---------------------------------------------------------------------
+  - sut_sdk: [rust]
+    agents: [python_v03, go_v03, ts_v03]
+    reason: >
+      a2a-rs does not support v0.3 agents.
+
+  # ---------------------------------------------------------------------
+  # a2a-js as SUT: v0.3 peers over JSON-RPC only, unless the peer is also TS
+  # ---------------------------------------------------------------------
+  - sut_sdk: [ts]
+    agents: [python_v03, go_v03]
+    transports: [grpc, http_json]
+    reason: >
+      The TypeScript v0.3 compat layer handles JSON-RPC against other SDKs
+      but not gRPC or HTTP+JSON. ts_v10 <-> ts_v03 works on all three and is
+      deliberately not covered by this rule.
+
+  # ---------------------------------------------------------------------
+  # ts_v03 as a peer of anything that isn't TypeScript
+  # ---------------------------------------------------------------------
+  - agents: [ts_v03]
+    transports: [grpc, http_json]
+    unless_sut_sdk: [ts]
+    reason: >
+      The v0.3 compat layer for gRPC and HTTP+JSON is implemented properly
+      only on the TypeScript side, so ts_v03 serves them to a TS counterpart
+      but not to python, go, java or rust.
+
+  # ---------------------------------------------------------------------
+  # a2a-java's REST inbound path rejects a v0.3 file part
+  # ---------------------------------------------------------------------
+  - sut_sdk: [java]
+    agents: [python_v03]
+    transports: [http_json]
+    reason: >
+      On the return hop python v0.3 POSTs a REST file part carrying `name`,
+      which is a legitimate v0.3 FilePart field. java's compat-0.3
+      RestHandler_v0_3.parseRequestBody parses the body with protobuf
+      JsonFormat against a2a.v1.FilePart, which has no such field, and the
+      parser is strict — InvalidProtocolBufferException "Cannot find field:
+      name in message a2a.v1.FilePart". Inbound REST only: jsonrpc and grpc
+      pass against the same peer. This is the one combination that exposes
+      it, because go_v03 has no http_json at all and ts_v03 over http_json is
+      already excluded for non-TS SUTs.

@@ -1,0 +1,47 @@
+# Nightly: the SUT against every peer in matrix.yaml, one pair at a time.
+#
+# Replaces the 32-entry `scenarios_full.json` three repos each maintained a
+# near-copy of. `peers: all` reads the peer list from matrix.yaml, so adding
+# an SDK is a matrix change and nothing else, and `expand: per_peer` makes
+# each pair its own scenario.
+#
+# Three entries rather than one because behaviour and streaming are not
+# independent: push notifications are out of band, so streaming is
+# meaningless, and resubscribe only exists for a streaming subscription.
+
+tests:
+  - schema: traversal/v1
+    name: Nightly - current vs {peer} - send message
+    tier: nightly
+    roles:
+      sut: current
+      peers: all
+    expand: per_peer
+    topology: star
+    transports: [jsonrpc, grpc, http_json]
+    behavior: send_message
+    streaming_variants: [false, true]
+
+  - schema: traversal/v1
+    name: Nightly - current vs {peer} - push notification
+    tier: nightly
+    roles:
+      sut: current
+      peers: all
+    expand: per_peer
+    topology: star
+    transports: [jsonrpc, grpc, http_json]
+    behavior: push_notification
+    streaming: false
+
+  - schema: traversal/v1
+    name: Nightly - current vs {peer} - resubscribe
+    tier: nightly
+    roles:
+      sut: current
+      peers: all
+    expand: per_peer
+    topology: star
+    transports: [jsonrpc, grpc, http_json]
+    behavior: resubscribe
+    streaming: true

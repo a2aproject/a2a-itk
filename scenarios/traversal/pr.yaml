@@ -1,0 +1,61 @@
+# PR tier: a star of the SUT against a small, fixed peer set — the common
+# core of what the five repos each used to list, python and go on both lines.
+#
+# Peers are explicit rather than `peers: all`: the full matrix is nine agents
+# per scenario against today's five, and that cost has not been measured yet.
+# Nightly already runs the full set.
+#
+# `include_own_lines` adds the SUT's own released lines on top, and needs
+# `sut_sdk` passed with the run.
+#
+# Each transport is its own scenario and a peer that cannot speak one drops
+# out of that scenario alone, so there is no separate "no go_v03, http_json"
+# variant — matrix.yaml records the limit and the resolver acts on it.
+
+tests:
+  - schema: traversal/v1
+    name: PR - star - send message
+    tier: pr
+    roles:
+      sut: current
+      include_own_lines: true
+      peers:
+        - {sdk: python, line: v10}
+        - {sdk: python, line: v03}
+        - {sdk: go, line: v10}
+        - {sdk: go, line: v03}
+    topology: star
+    transports: [jsonrpc, grpc, http_json]
+    behavior: send_message
+    streaming_variants: [false, true]
+
+  - schema: traversal/v1
+    name: PR - star - push notification
+    tier: pr
+    roles:
+      sut: current
+      include_own_lines: true
+      peers:
+        - {sdk: python, line: v10}
+        - {sdk: python, line: v03}
+        - {sdk: go, line: v10}
+        - {sdk: go, line: v03}
+    topology: star
+    transports: [jsonrpc, grpc, http_json]
+    behavior: push_notification
+
+  - schema: traversal/v1
+    name: PR - star - resubscribe
+    tier: pr
+    roles:
+      sut: current
+      include_own_lines: true
+      peers:
+        - {sdk: python, line: v10}
+        - {sdk: python, line: v03}
+        - {sdk: go, line: v10}
+        - {sdk: go, line: v03}
+    topology: star
+    transports: [jsonrpc, grpc, http_json]
+    behavior: resubscribe
+    streaming: true

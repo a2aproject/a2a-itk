@@ -15,6 +15,7 @@ import test_suite
 
 
 from pyproto import instruction_pb2
+from test_suite.agent_table import AgentTable
 
 
 logger = logging.getLogger(__name__)
@@ -408,6 +409,7 @@ async def _read_sync_response(
 async def _execute_single_itk_test(  # noqa: PLR0913
     sdks: list[str],
     behavior: str,
+    agents: AgentTable,
     edges: list[str] | None = None,
     scenario_name: str | None = None,
     protocols: list[str] | None = None,
@@ -417,11 +419,12 @@ async def _execute_single_itk_test(  # noqa: PLR0913
 
     Args:
         sdks: List of SDK identifiers to include in the test.
+        behavior: The behavior to test ('send_message' or 'push_notification').
+        agents: Where this run's agents are listening.
         edges: Optional custom edges.
         scenario_name: Optional label for logging.
         protocols: Optional list of protocols to test.
         streaming: Whether to use streaming.
-        behavior: The behavior to test ('send_message' or 'push_notification').
     """
     label = scenario_name or 'euler'
 
@@ -446,6 +449,7 @@ async def _execute_single_itk_test(  # noqa: PLR0913
             expected_end_tokens,
         ) = test_suite.create_test_suite(
             sdks,
+            agents,
             edges=edges,
             protocols=protocols,
             streaming=streaming,
@@ -458,7 +462,7 @@ async def _execute_single_itk_test(  # noqa: PLR0913
         first_sdk = sdks[0]
         is_v0 = 'v03' in first_sdk
 
-        base_uri = test_suite.get_agent_card_uri(first_sdk)
+        base_uri = agents.card_uri(first_sdk)
         target_url = f'{base_uri.rstrip("/")}/jsonrpc'
         is_go_env = os.path.exists('/app/agents/repo/itk/go.mod') or os.path.exists(
             'agents/repo/itk/go.mod'
@@ -551,6 +555,7 @@ async def _execute_single_itk_test(  # noqa: PLR0913
 async def execute_itk_test(  # noqa: PLR0913
     sdks: list[str],
     behavior: str,
+    agents: AgentTable,
     edges: list[str] | None = None,
     scenario_name: str | None = None,
     protocols: list[str] | None = None,
@@ -564,6 +569,7 @@ async def execute_itk_test(  # noqa: PLR0913
         res = await _execute_single_itk_test(
             sdks=sdks,
             behavior=behavior,
+            agents=agents,
             edges=edges,
             scenario_name=label,
             protocols=protocols,
@@ -577,6 +583,7 @@ async def execute_itk_test(  # noqa: PLR0913
         sdks=sdks,
         edges=edges,
         behavior=behavior,
+        agents=agents,
         protocols=protocols,
         streaming=streaming,
     )
@@ -604,6 +611,7 @@ async def execute_itk_test(  # noqa: PLR0913
             passed = await _execute_single_itk_test(
                 sdks=sub_sdks,
                 behavior=behavior,
+                agents=agents,
                 edges=sub_edges,
                 scenario_name=sub_name,
                 protocols=protocols,

@@ -2,71 +2,10 @@ import itertools
 
 from pyproto import instruction_pb2
 
-
-# Scenario-level agent identifiers this suite knows how to address. The `_N`
-# suffix means "second instance of the same source" — the launcher allocates
-# it distinct ports.
-#
-# Nothing is spawned from here any more: itk_service_v2 injects each agent's
-# httpPort/grpcPort from the launcher's handles before scenario execution and
-# clears them afterwards. This registry only bounds which identifiers are
-# addressable and holds those ports for the duration of a run.
-_AGENT_DEFS: dict[str, dict] = {
-    'go_v03': {},
-    'python_v03': {},
-    'ts_v03': {},
-    'ts_v03_2': {},
-    'go_v10': {},
-    'java_v10': {},
-    'python_v10': {},
-    'python_v10_2': {},
-    'rust_v10': {},
-    'ts_v10': {},
-    'ts_v10_2': {},
-    'current': {},
-}
-
-
-_HOST = '127.0.0.1'
-
-_ALL_TRANSPORTS = {'jsonrpc', 'grpc', 'http_json'}
+from test_suite.agent_table import AgentTable
+from test_suite.transports import ALL_TRANSPORTS as _ALL_TRANSPORTS
 
 _END_OF_TRAVERSAL_TOKEN = 'traversal-completed'  # noqa: S105
-
-
-def _http_port(sdk_name: str) -> int:
-    """Returns the HTTP port the launcher assigned to ``sdk_name``.
-
-    Raises:
-        ValueError: The SDK identifier is not one this suite knows.
-        RuntimeError: The identifier is known but the cluster never started
-            it, so no port was injected. Deliberately NOT a ``ValueError``:
-            :func:`_get_valid_subgraphs` swallows those to skip untraversable
-            subgraphs, and a missing peer must not be mistaken for one.
-            Without this guard the URI would carry a ``None`` port and fail
-            much later as an opaque connection error.
-    """
-    agent_def = get_agent_def(sdk_name)
-    port = agent_def.get('httpPort')
-    if port is None:
-        raise RuntimeError(
-            f'No port assigned for SDK {sdk_name!r}; it was not started by '
-            f'the launcher for this run'
-        )
-    return port
-
-
-def get_agent_card_uri(sdk_name: str) -> str:
-    """Returns the well-known agent card URI."""
-    return f'http://{_HOST}:{_http_port(sdk_name)}'
-
-
-def get_agent_def(sdk_name: str) -> dict:
-    """Returns the agent definition dictionary for the given SDK."""
-    agent_def = _AGENT_DEFS.get(sdk_name)
-    if agent_def is None:
-        raise ValueError(f'Unknown SDK: {sdk_name}')
-    return agent_def
 
 
 def _parse_edge_strings(
@@ -164,9 +103,10 @@ def _verify_eulerian_graph(
     # (checked in step 1), making them independently traversable.
 
 
-def _traversal_to_instruction(
+def _traversal_to_instruction(  # noqa: PLR0913
     circuit: list[str],
     transport: str,
+    agents: AgentTable,
     streaming: bool = False,
     behavior: str = 'send_message',
     notification_server_url: str = '',
@@ -176,6 +116,7 @@ def _traversal_to_instruction(
     Args:
         circuit: Ordered list of SDK names representing the traversal path.
         transport: The transport protocol to use for hops.
+        agents: Where this run's agents are listening.
         streaming: Whether to use streaming.
         behavior: The behavior to set in CallAgent.
         notification_server_url: The URL of the notification server.
@@ -208,7 +149,7 @@ def _traversal_to_instruction(
 
         call_step = hop.steps.instructions.add()
 
-        call_step.call_agent.agent_card_uri = get_agent_card_uri(v)
+        call_step.call_agent.agent_card_uri = agents.card_uri(v)
         call_step.call_agent.transport = transport
         call_step.call_agent.streaming = streaming
         call_step.call_agent.instruction.CopyFrom(current_inst)
@@ -235,6 +176,7 @@ def _traversal_to_instruction(
 
 def create_test_suite(  # noqa: PLR0913
     sdks: list[str],
+    agents: AgentTable,
     edges: list[str] | None = None,
     protocols: list[str] | None = None,
     streaming: bool = False,
@@ -244,7 +186,18 @@ def create_test_suite(  # noqa: PLR0913
     instruction_pb2.Instruction,
     list[str],
 ]:
+    """Builds the nested instruction for one scenario, and its trace tokens.
 
+    Args:
+        sdks: Agent identifiers taking part, traversal start first.
+        agents: Where this run's agents are listening. Every identifier in
+            ``sdks`` must be present or the traversal cannot be addressed.
+        edges: Optional explicit edges; a complete digraph when omitted.
+        protocols: Transports to build a circuit for; all three when omitted.
+        streaming: Whether hops stream.
+        behavior: What each hop asks the next agent to do.
+        notification_server_url: Where push notifications are POSTed.
+    """
     testing_instruction = instruction_pb2.Instruction()
     testing_instruction.steps.response_generator = (
         instruction_pb2.SeriesOfSteps.RESPONSE_GENERATOR_CONCAT
@@ -267,6 +220,7 @@ def create_test_suite(  # noqa: PLR0913
             instruction_for_transport, trace_tokens = _traversal_to_instruction(
                 circuit,
                 transport,
+                agents,
                 streaming=streaming,
                 behavior=behavior,
                 notification_server_url=notification_server_url,
@@ -397,14 +351,22 @@ def _map_edges_to_subgraph(
     return mapped_edges
 
 
-def _get_valid_subgraphs(
+def _get_valid_subgraphs(  # noqa: PLR0913
     sdks: list[str],
     edges: list[str] | None,
     behavior: str,
+    agents: AgentTable,
     protocols: list[str] | None = None,
     streaming: bool = False,
 ) -> list[dict]:
-    """Generates all valid traversable induced subgraphs containing the root node of size >= 2."""
+    """Generates all valid traversable induced subgraphs containing the root node of size >= 2.
+
+    Traversability is decided by trying to build the instruction and seeing
+    whether it raises. Only ``ValueError`` counts as "not traversable" — a
+    missing agent raises ``RuntimeError`` from :meth:`AgentTable.card_uri`
+    and propagates, so a peer that failed to start can't be mistaken for an
+    unbalanced subgraph and silently dropped.
+    """
     if not sdks:
         return []
 
@@ -433,6 +395,7 @@ def _get_valid_subgraphs(
             try:
                 create_test_suite(
                     sdks=sub_sdks,
+                    agents=agents,
                     edges=new_edges,
                     protocols=protocols,
                     streaming=streaming,
