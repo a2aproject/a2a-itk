@@ -68,10 +68,7 @@ ITK is structured to validate in-development SDK codebases against a cluster of 
 | **TypeScript** | ✅ | ✅ | ✅ |
 | **Java** | ❌ | ✅ | ✅ |
 | **Rust** | ❌ | ✅ | ✅ |
-| **.NET** | ❌ | ❌ | ⚠️ |
-
-> [!NOTE]
-> ⚠️ *Indicates preliminary integration layout utilizing initial placeholders for current SDK state *
+| **.NET** | ❌ | ✅ | ✅ |
 
 ### 🛤 Multi-Protocol & Interaction Modes
 Executes standalone traversal scenarios dedicated to verifying compatibility across each primary transport protocol:
@@ -311,6 +308,11 @@ Review production integration structures, runner scripts, and CI workflow templa
   - **PR Validation Workflow**: Continuous integration gating for Pull Requests ([itk.yaml](https://github.com/a2aproject/a2a-go/blob/main/.github/workflows/itk.yaml)).
   - **Nightly Run Workflow**: Automated scheduled test matrix verification ([itk-nightly.yaml](https://github.com/a2aproject/a2a-go/blob/main/.github/workflows/itk-nightly.yaml)).
 
+- **.NET SDK (`a2a-dotnet`)**:
+  - **Integration Setup**: Core integration layout and runner configurations ([itk/](https://github.com/a2aproject/a2a-dotnet/tree/main/itk)).
+  - **PR Validation Workflow**: Continuous integration gating for Pull Requests ([itk.yaml](https://github.com/a2aproject/a2a-dotnet/blob/main/.github/workflows/itk.yaml)).
+  - **Nightly Run Workflow**: Automated scheduled test matrix verification ([itk-nightly.yaml](https://github.com/a2aproject/a2a-dotnet/blob/main/.github/workflows/itk-nightly.yaml)).
+
 ---
 
 ## 📊 Centralized Dashboard
@@ -334,7 +336,7 @@ The data presentation pipeline operates via a decoupled publication model:
 When integrating automated nightly matrix runs for a newly onboarded language library, follow these steps to render its compatibility outputs globally:
 
 1. Ensure the new SDK's nightly continuous integration workflow publishes its final output JSON artifacts to a rolling release tag named `nightly-metrics`.
-2. Modify the automated dashboard deployment workflow within this repository ([.github/workflows/deploy_dashboard.yaml](https://github.com/a2aproject/a2a-itk/blob/main/.github/workflows/deploy_dashboard.yaml)) to fetch the metric payload from the new target SDK's release space alongside existing baseline configurations.
+2. Modify the automated dashboard deployment workflow within this repository ([.github/workflows/deploy_dashboard.yml](https://github.com/a2aproject/a2a-itk/blob/main/.github/workflows/deploy_dashboard.yml)) to fetch the metric payload from the new target SDK's release space alongside existing baseline configurations.
 
 ---
 
@@ -358,4 +360,4 @@ Incorporate traversal test strategies evaluating additional native client API co
 - [ ] `get_extended_agent_card`
 
 ### 4. Client SDK Repository Onboarding
-- [ ] **.NET SDK**: Implement an instruction handling agent under `itk/`, add a `matrix.yaml` entry, and wire up the orchestration workflow.
+- [x] **.NET SDK**: Implement an instruction handling agent under `itk/`, add a `matrix.yaml` entry, and wire up the orchestration workflow.
