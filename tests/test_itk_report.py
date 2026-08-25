@@ -42,12 +42,10 @@ class TestScenarioPassed:
     def test_passing_result_object(self):
         assert scenario_passed({'passed': True, 'sdks': []}) is True
 
-    @pytest.mark.parametrize('value', [True, False])
-    def test_bare_bool_still_accepted(self, value):
-        assert scenario_passed(value) is value
-
-    @pytest.mark.parametrize('value', [None, 'yes', 0, [], {}])
+    @pytest.mark.parametrize('value', [None, 'yes', 0, [], {}, True, False])
     def test_unusable_values_are_failures(self, value):
+        """Only a result *object* with ``passed: true`` counts; a bare bool —
+        the pre-schema shape — is no longer trusted."""
         assert scenario_passed(value) is False
 
 

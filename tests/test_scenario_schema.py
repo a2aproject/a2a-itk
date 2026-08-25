@@ -7,7 +7,6 @@ from pydantic import ValidationError
 
 from test_suite.scenarios.schema import (
     Behavior,
-    Expected,
     LegacyScenario,
     PeerRef,
     Tier,
@@ -48,7 +47,6 @@ class TestDefaults:
         s = TraversalScenarioV1.model_validate(_scenario())
         assert s.topology is Topology.STAR
         assert s.tier is Tier.NIGHTLY
-        assert s.expected is Expected.PASS
         assert s.build_subtests is False
         assert s.edges is None
         assert s.roles.include_sut is True

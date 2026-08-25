@@ -72,7 +72,6 @@ class ScenarioResult:
     behavior: str | None = None
     streaming: bool = False
     tier: str | None = None
-    expected: str | None = None
 
 
 class ClusterStartupError(RuntimeError):
@@ -351,7 +350,6 @@ async def _run_locked(
                     behavior=scenario.behavior,
                     streaming=scenario.streaming,
                     tier=scenario.tier,
-                    expected=scenario.expected,
                 )
     return results
 

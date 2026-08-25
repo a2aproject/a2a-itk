@@ -57,7 +57,6 @@ class TestResultDetails(BaseModel):
     behavior: str | None = None
     streaming: bool = False
     tier: str | None = None
-    expected: str | None = None
 
 
 class RunTestsResponse(BaseModel):
@@ -141,7 +140,6 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
             behavior=r.behavior,
             streaming=r.streaming,
             tier=r.tier,
-            expected=r.expected,
         )
         for name, r in results.items()
     }

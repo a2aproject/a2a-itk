@@ -28,7 +28,6 @@ from test_suite.scenarios.schema import (
     SUT_ID,
     Behavior,
     Expand,
-    Expected,
     LegacyScenario,
     Tier,
     Transport,
@@ -59,7 +58,6 @@ class ResolvedScenario:
     build_subtests: bool = False
     # Carried for the nightly metrics record and for diffing; not used to run.
     tier: str = Tier.NIGHTLY.value
-    expected: str = Expected.PASS.value
 
     def peer_ids(self) -> list[str]:
         return [s for s in self.sdks if s != SUT_ID]
@@ -265,7 +263,6 @@ def _expand(  # noqa: PLR0913
                 streaming=streaming,
                 build_subtests=scenario.build_subtests,
                 tier=scenario.tier.value,
-                expected=scenario.expected.value,
             ))
     return out
 
@@ -364,9 +361,10 @@ def _peer_ids(
     for peer in scenario.roles.peers:
         agent_id = peer.agent_id()
         try:
-            # Validates the (sdk, line) pair exists. Explicit peers are NOT
-            # transport-filtered: the author named them, and dropping one
-            # would quietly change what a migrated scenario covers.
+            # Validates the (sdk, line) pair exists. Transport filtering is
+            # deliberately not done here: _groups drops a peer that can't
+            # speak a requested transport, named or selected by `all` alike
+            # (see _supports/_intersect), so naming a peer does not exempt it.
             matrix.resolve(agent_id)
         except MatrixError as e:
             raise ResolutionError(f'{scenario.name!r}: {e}') from None

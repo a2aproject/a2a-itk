@@ -1,8 +1,9 @@
 """Known failures: combinations deliberately left out of a run.
 
-Generated scenarios can't carry an inline ``expected: fail`` marker — with
-``peers: all`` there is no entry in a file to annotate — so exceptions live
-in one list, matched against resolved scenarios just before they run.
+A generated scenario has no per-entry place to mark a combination as a known
+incompatibility — with ``peers: all`` there is no line in a file to annotate
+— so these exceptions live in one list, matched against resolved scenarios
+just before they run.
 
 See ``known_failures.yaml`` for when to use this rather than ``matrix.yaml``,
 and for the field reference.

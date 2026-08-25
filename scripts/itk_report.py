@@ -69,14 +69,10 @@ def scenario_passed(value: Any) -> bool:
     """Read one scenario's outcome.
 
     ``/run`` returns ``{"passed": bool, "sdks": [...], "edges": [...]}`` per
-    scenario. A bare bool is also accepted — that was the shape before the
-    response schema grew the extra fields, and some fixtures still use it.
+    scenario. Anything that isn't such an object — including a bare bool — is
+    treated as a failure rather than trusted.
     """
-    if isinstance(value, dict):
-        return bool(value.get('passed', False))
-    if isinstance(value, bool):
-        return value
-    return False
+    return isinstance(value, dict) and bool(value.get('passed', False))
 
 
 def format_report(data: dict[str, Any], title: str) -> tuple[str, bool]:

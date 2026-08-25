@@ -16,7 +16,7 @@ know about the other.
 from __future__ import annotations
 
 import enum
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -39,18 +39,6 @@ class Tier(str, enum.Enum):
 
     PR = 'pr'
     NIGHTLY = 'nightly'
-
-
-class Expected(str, enum.Enum):
-    """The scenario's designed outcome.
-
-    Almost everything is ``pass``. ``fail`` is for scenarios that pin a known
-    incompatibility — asserting the pair still *doesn't* interoperate, so the
-    day it starts working is a deliberate decision rather than a silent one.
-    """
-
-    PASS = 'pass'
-    FAIL = 'fail'
 
 
 class Behavior(str, enum.Enum):
@@ -161,7 +149,6 @@ class TraversalScenarioV1(BaseModel):
     roles: Roles
     topology: Topology = Topology.STAR
     tier: Tier = Tier.NIGHTLY
-    expected: Expected = Expected.PASS
     test_when: TestWhen | None = None
     expand: Expand = Field(
         default=Expand.TOGETHER,
@@ -277,12 +264,6 @@ class LegacyScenario(BaseModel):
     protocols: list[str] | None = None
     streaming: bool = False
     build_subtests: bool = False
-
-
-AnyScenario = Annotated[
-    TraversalScenarioV1 | LegacyScenario,
-    Field(union_mode='left_to_right'),
-]
 
 
 def is_traversal_v1(raw: object) -> bool:

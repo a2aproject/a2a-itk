@@ -14,11 +14,12 @@
 # v03 lines point at `+itk` overlay tags: the underlying v0.3.X release
 # with the itk agent grafted onto its `itk/` subdir. `java` and `rust` have no v03.
 #
-# `transports` is the line's capability ceiling. It is used ONLY to expand the
-# `peers: all` macro — a line is included in a scenario only if it supports
-# every transport that scenario requests. A scenario naming its peers
-# explicitly gets exactly those peers, unfiltered, which is what keeps the
-# migrated legacy scenarios behaving identically. Omitted means all three.
+# `transports` is the line's capability ceiling: a scenario runs a peer only
+# over transports the line supports. This holds whether the peer is named
+# explicitly or selected by the `peers: all` macro — a peer that cannot speak
+# a requested transport drops out of that transport's graph rather than
+# failing the traversal, which is what reproduces the hand-written
+# "No Go v03 - HTTP_JSON" legacy scenarios. Omitted means all three.
 
 sdks:
   python:
