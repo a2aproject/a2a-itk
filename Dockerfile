@@ -42,8 +42,8 @@ RUN curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin --channel 8
 ENV PATH=$PATH:/usr/local/dotnet
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 
-# Install Rust 1.85.0 (minimum required by a2a-lf crate family)
-ENV RUST_VERSION=1.85.0
+# Install Rust 1.98.0
+ENV RUST_VERSION=1.98.0
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain ${RUST_VERSION} --no-modify-path
 ENV PATH=$PATH:/root/.cargo/bin
