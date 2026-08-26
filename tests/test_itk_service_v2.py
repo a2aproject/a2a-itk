@@ -10,7 +10,9 @@ tested independently in its own module — here we only verify the glue:
   * 'current' bypasses matrix -> MOUNT
   * Cluster.start_all called with the built specs
   * a peer that fails to start is dropped (scenario trimmed or skipped),
-    the run staying green; a SUT failure or a fully-unrunnable batch is 502
+    the run staying green; a SUT failure or a fully-unrunnable batch is
+    recorded as an all-failed run (200 + cluster_error) so the nightly
+    history gets an entry instead of a gap
   * launcher handles reach the executor as an AgentTable
   * scenarios executed sequentially against the shared cluster
 """
@@ -403,11 +405,11 @@ class TestClusterStartup:
         last = _FakeCluster.instances[-1]
         assert last.init_kwargs.get('log_dir') is None
 
-    def test_only_scenario_unrunnable_after_peer_drop_is_fatal(self, client, monkeypatch, stub_deps):  # noqa: ARG002
+    def test_only_scenario_unrunnable_after_peer_drop_records_all_failed(self, client, monkeypatch, stub_deps):  # noqa: ARG002
         """A peer that fails to start is dropped — but if that leaves nothing
         runnable (here the sole scenario is the SUT plus that one peer), the
-        run must fail rather than return a green result set that tested
-        nothing."""
+        run is recorded as an all-failed run rather than a bare error the
+        nightly metrics step would discard, leaving a gap in the history."""
         cluster = _FakeCluster()
         monkeypatch.setattr(itk_runner, 'Cluster', lambda *a, **kw: cluster)
         _fail_peer(cluster, 'a2aproject/a2a-python', stage=Stage.READY,
@@ -418,17 +420,21 @@ class TestClusterStartup:
                 'name': 't', 'sdks': ['current', 'python_v10'], 'behavior': 'echo',
             }],
         })
-        assert r.status_code == 502
-        detail = r.json()['detail']
-        assert 'Cluster startup failed' in detail
-        # Names the specific peer that didn't come up, and why nothing ran.
-        assert 'python_v10' in detail
-        assert 'ready' in detail  # Stage.READY.value
-        assert 'every scenario needed a peer' in detail
+        # Recordable (200), not a discarded 502; the scenario is FAILED, not
+        # a false pass, and all_passed is false so the PR job still fails.
+        assert r.status_code == 200
+        body = r.json()
+        assert body['all_passed'] is False
+        assert body['results']['t']['passed'] is False
+        err = body['startup']['cluster_error']
+        assert 'python_v10' in err
+        assert 'ready' in err  # Stage.READY.value
+        assert 'every scenario needed a peer' in err
 
-    def test_sut_failure_is_always_fatal(self, client, monkeypatch, stub_deps):  # noqa: ARG002
-        """The SUT is the code under test; if it can't start there is nothing
-        to test, so unlike a peer it is never dropped-and-tolerated."""
+    def test_sut_failure_records_all_failed(self, client, monkeypatch, stub_deps):  # noqa: ARG002
+        """The SUT is the code under test; if it can't start nothing can be
+        verified, so every scenario is recorded FAILED (not silently dropped)
+        — the run is red, and the nightly history gets an entry."""
         cluster = _FakeCluster()
         monkeypatch.setattr(itk_runner, 'Cluster', lambda *a, **kw: cluster)
         _fail_mount(cluster, message='uv sync --locked failed')
@@ -438,10 +444,13 @@ class TestClusterStartup:
                 'name': 't', 'sdks': ['current', 'python_v10'], 'behavior': 'echo',
             }],
         })
-        assert r.status_code == 502
-        detail = r.json()['detail']
-        assert 'current' in detail
-        assert 'code under test' in detail
+        assert r.status_code == 200
+        body = r.json()
+        assert body['all_passed'] is False
+        assert body['results']['t']['passed'] is False
+        err = body['startup']['cluster_error']
+        assert 'current' in err
+        assert 'code under test' in err
 
     def test_cluster_teardown_on_scenario_exception(self, client, monkeypatch, stub_deps):  # noqa: ARG002
         async def raising_execute(**_kw):

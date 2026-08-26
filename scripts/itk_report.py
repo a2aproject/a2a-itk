@@ -76,14 +76,28 @@ def scenario_passed(value: Any) -> bool:
 
 
 def startup_lines(startup: Any) -> list[str]:
-    """Render the dropped-peer summary, empty when nothing was dropped.
+    """Render the startup summary, empty when the cluster came up clean.
 
-    A peer that failed to build/start is not a scenario failure — the run
-    stays green — but the coverage it cost has to be visible, because on a
-    passing run the container log (where the service logged it) is never
-    dumped. This block is that visibility.
+    Two shapes. A *total* failure (``cluster_error`` set) means the cluster
+    never produced a testable run, so every scenario is a failed placeholder —
+    say so plainly, as that is why the run is red and, on nightly, why the
+    rolling entry exists at all. A *partial* failure lists the peers dropped
+    and the coverage lost: not a scenario failure (the run stays green), but
+    it has to be visible, because on a passing run the container log (where
+    the service logged it) is never dumped.
     """
-    if not isinstance(startup, dict) or not startup.get('dropped_peers'):
+    if not isinstance(startup, dict):
+        return []
+
+    cluster_error = startup.get('cluster_error')
+    if cluster_error:
+        return [
+            _RULE,
+            f'CLUSTER STARTUP FAILED: {cluster_error}',
+            'Every scenario is recorded as FAILED for this run.',
+        ]
+
+    if not startup.get('dropped_peers'):
         return []
 
     lines = [_RULE, 'PEERS DROPPED (failed to build/start, excluded):']

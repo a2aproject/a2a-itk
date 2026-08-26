@@ -156,6 +156,38 @@ class TestStartupSection:
         assert 'PEERS DROPPED' in report
         assert 'python_v10' in report
 
+    def test_total_cluster_failure_banner(self):
+        """A total startup failure prints the reason plainly instead of the
+        per-peer breakdown."""
+        lines = startup_lines({
+            'dropped_peers': {'current': 'build: uv sync --locked failed'},
+            'cluster_error': "Cluster startup failed (the code under test "
+                             "('current') failed to start): current: build: ...",
+        })
+        text = '\n'.join(lines)
+        assert 'CLUSTER STARTUP FAILED' in text
+        assert 'code under test' in text
+        assert 'recorded as FAILED' in text
+        # The per-peer 'PEERS DROPPED' block is superseded by the banner.
+        assert 'PEERS DROPPED' not in text
+
+    def test_cluster_failure_run_is_failed_and_recordable(self):
+        """The all-failed placeholders make the verdict red (so the PR fails)
+        while remaining a non-empty, recordable result set (so the nightly
+        history gets an entry rather than a gap)."""
+        data = _response(
+            {'t': {'passed': False, 'sdks': ['current', 'python_v10']}},
+            all_passed=False,
+        )
+        data['startup'] = {
+            'dropped_peers': {'current': 'build: boom'},
+            'cluster_error': 'Cluster startup failed: current: build: boom',
+        }
+        report, all_passed = format_report(data, 'NIGHTLY ITK SUMMARY')
+        assert all_passed is False
+        assert 't: FAILED' in report
+        assert 'CLUSTER STARTUP FAILED' in report
+
 
 # ---------------------------------------------------------------------------
 # CLI

@@ -62,16 +62,25 @@ class TestResultDetails(BaseModel):
 class StartupReport(BaseModel):
     """What a peer failing to start cost this run.
 
-    Populated only when a peer was actually dropped (``null`` otherwise, so
-    the common case adds a single null key and nothing more). Lets
+    Populated only when the cluster didn't come up clean (``null`` otherwise,
+    so the common case adds a single null key and nothing more). Lets
     ``scripts/itk_report.py`` print the lost coverage: on a passing run the
     container log isn't dumped, so this is the only place the operator sees
-    which peers went missing.
+    what went missing.
+
+    Two shapes: a *partial* failure (some peers dropped, run still ran) fills
+    ``dropped_peers``/``trimmed``/``skipped``; a *total* failure (the SUT
+    didn't start, or nothing was runnable) sets ``cluster_error`` and every
+    scenario is reported failed — see :func:`_cluster_failure_response`.
     """
 
     dropped_peers: dict[str, str]
     trimmed: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
+    # Set only on a total cluster-startup failure. Its presence is what tells
+    # a reader the run didn't test anything — the scenarios are all failed
+    # placeholders recorded so the nightly history gets an entry, not a gap.
+    cluster_error: str | None = None
 
 
 class RunTestsResponse(BaseModel):
@@ -145,8 +154,17 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
         # Reached only when a peer being down could not be tolerated: the SUT
         # itself failed to start, or every scenario needed a peer that did.
         # A lone peer build hiccup no longer lands here — it is dropped and
-        # the run continues. 502: a retry can still recover a transient build.
-        raise HTTPException(status_code=502, detail=str(e)) from e
+        # the run continues.
+        #
+        # Deliberately NOT a 502: a bare error envelope is discarded by the
+        # nightly metrics step (itk_report rejects it, so process_results
+        # never runs), leaving a *gap* in the rolling history — the failure
+        # looks like "no run happened". Instead return a recordable run with
+        # every scenario failed and the reason attached, so the nightly
+        # appends a red entry and the PR job still fails (all_passed=false).
+        # Genuinely transient infra (fetch/ls-remote) is InfraFailure above
+        # and still 502s — that is not a test outcome to record.
+        return _cluster_failure_response(scenarios, e)
     except Exception as e:
         logger.exception('Test execution failed')
         raise HTTPException(status_code=500, detail=f'Execution error: {e!s}') from e
@@ -182,6 +200,41 @@ def _startup_report(report: itk_runner.RunReport) -> StartupReport | None:
         dropped_peers=report.dropped_peers,
         trimmed=[{'name': n, 'dropped': d} for n, d in report.trimmed],
         skipped=[{'name': n, 'missing': m} for n, m in report.skipped],
+    )
+
+
+def _cluster_failure_response(
+    scenarios: list[itk_runner.Scenario], err: ClusterStartupError,
+) -> RunTestsResponse:
+    """Represent a total cluster-startup failure as a recordable, failed run.
+
+    The cluster couldn't provide anything to test, so no scenario produced a
+    result. Rather than let that surface as a bare error the nightly metrics
+    step discards — a gap in the rolling history — mark every resolved
+    scenario failed and attach the reason. The nightly then records a red run
+    (dashboard shows the night), and the PR job still fails on
+    ``all_passed=false``. Each placeholder keeps its scenario metadata so the
+    metrics processor records it the same way it records a real result.
+    """
+    typed = {
+        s.name: TestResultDetails(
+            passed=False,
+            sdks=s.sdks,
+            edges=s.edges,
+            protocols=s.protocols,
+            behavior=s.behavior,
+            streaming=s.streaming,
+            tier=s.tier,
+        )
+        for s in scenarios
+    }
+    return RunTestsResponse(
+        results=typed,
+        all_passed=False,
+        startup=StartupReport(
+            dropped_peers=dict(err.failures),
+            cluster_error=str(err),
+        ),
     )
 
 
