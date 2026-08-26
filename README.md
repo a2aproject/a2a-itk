@@ -358,6 +358,3 @@ Incorporate traversal test strategies evaluating additional native client API co
 - [ ] `get_task` / `list_tasks`
 - [ ] `create_task_push_notification_config` / `delete_task_push_notification_config`
 - [ ] `get_extended_agent_card`
-
-### 4. Client SDK Repository Onboarding
-- [x] **.NET SDK**: Implement an instruction handling agent under `itk/`, add a `matrix.yaml` entry, and wire up the orchestration workflow.
