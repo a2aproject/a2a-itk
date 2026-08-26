@@ -75,12 +75,45 @@ def scenario_passed(value: Any) -> bool:
     return isinstance(value, dict) and bool(value.get('passed', False))
 
 
+def startup_lines(startup: Any) -> list[str]:
+    """Render the dropped-peer summary, empty when nothing was dropped.
+
+    A peer that failed to build/start is not a scenario failure — the run
+    stays green — but the coverage it cost has to be visible, because on a
+    passing run the container log (where the service logged it) is never
+    dumped. This block is that visibility.
+    """
+    if not isinstance(startup, dict) or not startup.get('dropped_peers'):
+        return []
+
+    lines = [_RULE, 'PEERS DROPPED (failed to build/start, excluded):']
+    for agent, detail in sorted(startup['dropped_peers'].items()):
+        lines.append(f'  {agent}: {detail}')
+
+    trimmed = startup.get('trimmed') or []
+    if trimmed:
+        lines.append('Scenarios run with a peer removed:')
+        for entry in trimmed:
+            dropped = ', '.join(entry.get('dropped', []))
+            lines.append(f'  {entry.get("name")} (without {dropped})')
+
+    skipped = startup.get('skipped') or []
+    if skipped:
+        lines.append('Scenarios SKIPPED (a required peer was down):')
+        for entry in skipped:
+            missing = ', '.join(entry.get('missing', []))
+            lines.append(f'  {entry.get("name")} (needs {missing})')
+    return lines
+
+
 def format_report(data: dict[str, Any], title: str) -> tuple[str, bool]:
     """Render the human-readable summary and report whether everything passed.
 
     ``all_passed`` is taken from the response rather than recomputed, so the
     printed verdict matches what the service concluded. An empty result set
-    counts as a failure: a run that executed nothing did not pass.
+    counts as a failure: a run that executed nothing did not pass. A dropped
+    peer is reported but does not change the verdict — the surviving
+    scenarios stand on their own.
     """
     results = data['results']
     lines = [_RULE, f'{title}:', _RULE]
@@ -88,6 +121,7 @@ def format_report(data: dict[str, Any], title: str) -> tuple[str, bool]:
         f'{name}: {"PASSED" if scenario_passed(value) else "FAILED"}'
         for name, value in results.items()
     )
+    lines.extend(startup_lines(data.get('startup')))
     all_passed = bool(data.get('all_passed', False)) and bool(results)
     lines.append(_RULE)
     lines.append(f'OVERALL STATUS: {"PASSED" if all_passed else "FAILED"}')

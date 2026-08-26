@@ -9,7 +9,8 @@ tested independently in its own module — here we only verify the glue:
   * matrix + resolve_ref invoked with the right args per unique SDK
   * 'current' bypasses matrix -> MOUNT
   * Cluster.start_all called with the built specs
-  * partial-startup failure -> 502 with per-target detail
+  * a peer that fails to start is dropped (scenario trimmed or skipped),
+    the run staying green; a SUT failure or a fully-unrunnable batch is 502
   * launcher handles reach the executor as an AgentTable
   * scenarios executed sequentially against the shared cluster
 """
@@ -104,6 +105,44 @@ class _FakeCluster:
         return None
 
 
+def _fail_peer(cluster, repo, *, stage=Stage.BUILD, message='build failed'):
+    """Wrap ``cluster.start_all`` so the spec for ``repo`` fails to start.
+
+    Matches by repo rather than position: ``_plan`` sorts agent ids, so the
+    failing peer's index isn't fixed.
+    """
+    original = cluster.start_all
+
+    def start(specs, **kw):
+        out = original(specs, **kw)
+        for i, s in enumerate(specs):
+            if getattr(s, 'repo', None) == repo:
+                out[i] = _FakeOutcome(
+                    spec=s, handle=None,
+                    error=InfraFailure(s.repo, s.sha, stage, message=message),
+                )
+        return out
+
+    cluster.start_all = start
+
+
+def _fail_mount(cluster, *, message='build failed'):
+    """Wrap ``cluster.start_all`` so the MOUNT spec (the SUT) fails to start."""
+    original = cluster.start_all
+
+    def start(specs, **kw):
+        out = original(specs, **kw)
+        for i, s in enumerate(specs):
+            if s.kind is Kind.MOUNT:
+                out[i] = _FakeOutcome(
+                    spec=s, handle=None,
+                    error=InfraFailure(None, None, Stage.BUILD, message=message),
+                )
+        return out
+
+    cluster.start_all = start
+
+
 @pytest.fixture(autouse=True)
 def stub_deps(monkeypatch):
     """Every test gets: an injected matrix + a fake Cluster + a stub
@@ -163,7 +202,10 @@ class TestRunSchema:
         })
         assert r.status_code == 200
         body = r.json()
-        assert set(body) == {'results', 'all_passed'}
+        # `startup` is additive and null on a clean run; the two original
+        # top-level fields are unchanged.
+        assert set(body) == {'results', 'all_passed', 'startup'}
+        assert body['startup'] is None
         assert body['all_passed'] is True
         assert 'test1' in body['results']
         assert body['results']['test1']['sdks'] == ['current', 'python_v10']
@@ -361,23 +403,15 @@ class TestClusterStartup:
         last = _FakeCluster.instances[-1]
         assert last.init_kwargs.get('log_dir') is None
 
-    def test_partial_startup_502_lists_failed(self, client, monkeypatch, stub_deps):  # noqa: ARG002
+    def test_only_scenario_unrunnable_after_peer_drop_is_fatal(self, client, monkeypatch, stub_deps):  # noqa: ARG002
+        """A peer that fails to start is dropped — but if that leaves nothing
+        runnable (here the sole scenario is the SUT plus that one peer), the
+        run must fail rather than return a green result set that tested
+        nothing."""
         cluster = _FakeCluster()
         monkeypatch.setattr(itk_runner, 'Cluster', lambda *a, **kw: cluster)
-
-        # First succeeds, second fails at READY.
-        original_start = cluster.start_all
-        def start_with_failure(specs, **kw):
-            out = original_start(specs, **kw)
-            out[1] = _FakeOutcome(
-                spec=specs[1], handle=None,
-                error=InfraFailure(
-                    specs[1].repo, specs[1].sha, Stage.READY,
-                    message='agent did not respond within 35s',
-                ),
-            )
-            return out
-        cluster.start_all = start_with_failure
+        _fail_peer(cluster, 'a2aproject/a2a-python', stage=Stage.READY,
+                   message='agent did not respond within 35s')
 
         r = client.post('/run', json={
             'tests': [{
@@ -387,10 +421,27 @@ class TestClusterStartup:
         assert r.status_code == 502
         detail = r.json()['detail']
         assert 'Cluster startup failed' in detail
-        # The failed peer's name (python_v10) must appear so the operator
-        # knows which specific target didn't come up.
+        # Names the specific peer that didn't come up, and why nothing ran.
         assert 'python_v10' in detail
         assert 'ready' in detail  # Stage.READY.value
+        assert 'every scenario needed a peer' in detail
+
+    def test_sut_failure_is_always_fatal(self, client, monkeypatch, stub_deps):  # noqa: ARG002
+        """The SUT is the code under test; if it can't start there is nothing
+        to test, so unlike a peer it is never dropped-and-tolerated."""
+        cluster = _FakeCluster()
+        monkeypatch.setattr(itk_runner, 'Cluster', lambda *a, **kw: cluster)
+        _fail_mount(cluster, message='uv sync --locked failed')
+
+        r = client.post('/run', json={
+            'tests': [{
+                'name': 't', 'sdks': ['current', 'python_v10'], 'behavior': 'echo',
+            }],
+        })
+        assert r.status_code == 502
+        detail = r.json()['detail']
+        assert 'current' in detail
+        assert 'code under test' in detail
 
     def test_cluster_teardown_on_scenario_exception(self, client, monkeypatch, stub_deps):  # noqa: ARG002
         async def raising_execute(**_kw):
@@ -432,6 +483,67 @@ class TestClusterStartup:
         assert body['results']['t']['passed'] is False
         assert body['results']['t']['sdks'] == ['current', 'python_v10']
         assert _FakeCluster.instances[-1].exited
+
+
+# ---------------------------------------------------------------------------
+# Peer startup failure is tolerated, not fatal
+# ---------------------------------------------------------------------------
+
+
+class TestPeerDropTolerance:
+    """A peer that fails to build/start is dropped, not fatal: scenarios that
+    can lose it run trimmed, those that cannot are skipped, the run stays
+    green — and the response's ``startup`` block says loudly what was lost."""
+
+    @staticmethod
+    def _cluster(monkeypatch):
+        cluster = _FakeCluster()
+        monkeypatch.setattr(itk_runner, 'Cluster', lambda *a, **kw: cluster)
+        return cluster
+
+    def test_peer_drop_trims_scenario_that_survives(self, client, monkeypatch, stub_deps):  # noqa: ARG002
+        cluster = self._cluster(monkeypatch)
+        _fail_peer(cluster, 'a2aproject/a2a-python', message='uv sync --locked failed')
+
+        r = client.post('/run', json={'tests': [{
+            'name': 'trio', 'sdks': ['current', 'python_v10', 'go_v10'],
+            'behavior': 'send_message',
+        }]})
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body['all_passed'] is True
+        # Ran with python_v10 removed rather than being skipped whole.
+        assert body['results']['trio']['sdks'] == ['current', 'go_v10']
+        startup = body['startup']
+        assert 'python_v10' in startup['dropped_peers']
+        assert startup['trimmed'] == [{'name': 'trio', 'dropped': ['python_v10']}]
+        assert startup['skipped'] == []
+
+    def test_peer_drop_skips_unsurvivable_but_runs_the_rest(self, client, monkeypatch, stub_deps):  # noqa: ARG002
+        cluster = self._cluster(monkeypatch)
+        _fail_peer(cluster, 'a2aproject/a2a-python', message='uv sync --locked failed')
+
+        r = client.post('/run', json={'tests': [
+            {'name': 'pair', 'sdks': ['current', 'python_v10'], 'behavior': 'send_message'},
+            {'name': 'trio', 'sdks': ['current', 'python_v10', 'go_v10'], 'behavior': 'send_message'},
+        ]})
+
+        assert r.status_code == 200
+        body = r.json()
+        # 'pair' loses its only peer and is skipped; 'trio' runs trimmed. The
+        # run is green on what survived, not on a set that tested nothing.
+        assert set(body['results']) == {'trio'}
+        assert body['all_passed'] is True
+        startup = body['startup']
+        assert startup['skipped'] == [{'name': 'pair', 'missing': ['python_v10']}]
+        assert startup['trimmed'] == [{'name': 'trio', 'dropped': ['python_v10']}]
+
+    def test_clean_run_has_no_startup_block(self, client, stub_deps):  # noqa: ARG002
+        r = client.post('/run', json={'tests': [{
+            'name': 't', 'sdks': ['current', 'python_v10'], 'behavior': 'send_message',
+        }]})
+        assert r.json()['startup'] is None
 
 
 # ---------------------------------------------------------------------------

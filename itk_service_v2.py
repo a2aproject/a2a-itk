@@ -59,9 +59,27 @@ class TestResultDetails(BaseModel):
     tier: str | None = None
 
 
+class StartupReport(BaseModel):
+    """What a peer failing to start cost this run.
+
+    Populated only when a peer was actually dropped (``null`` otherwise, so
+    the common case adds a single null key and nothing more). Lets
+    ``scripts/itk_report.py`` print the lost coverage: on a passing run the
+    container log isn't dumped, so this is the only place the operator sees
+    which peers went missing.
+    """
+
+    dropped_peers: dict[str, str]
+    trimmed: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+
+
 class RunTestsResponse(BaseModel):
     results: dict[str, TestResultDetails]
     all_passed: bool
+    # ``null`` on a clean run; an object when a peer failed to start. Additive
+    # and optional — the three fields every SDK already reads are untouched.
+    startup: StartupReport | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +131,7 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
         )
 
     try:
-        results = await itk_runner.run_scenarios(
+        report = await itk_runner.run_scenarios(
             scenarios, log_dir=_agent_log_dir(),
         )
     except (MatrixError, PermanentError) as e:
@@ -124,8 +142,10 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
         # Transient (ls-remote timed out after retries) — caller can retry.
         raise HTTPException(status_code=502, detail=str(e)) from e
     except ClusterStartupError as e:
-        # At least one peer's startup was transient-class (build hiccup,
-        # git flake); a retry can recover. Detail names which peer.
+        # Reached only when a peer being down could not be tolerated: the SUT
+        # itself failed to start, or every scenario needed a peer that did.
+        # A lone peer build hiccup no longer lands here — it is dropped and
+        # the run continues. 502: a retry can still recover a transient build.
         raise HTTPException(status_code=502, detail=str(e)) from e
     except Exception as e:
         logger.exception('Test execution failed')
@@ -141,10 +161,27 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
             streaming=r.streaming,
             tier=r.tier,
         )
-        for name, r in results.items()
+        for name, r in report.results.items()
     }
     return RunTestsResponse(
-        results=typed, all_passed=all(r.passed for r in typed.values()),
+        results=typed,
+        all_passed=all(r.passed for r in typed.values()),
+        startup=_startup_report(report),
+    )
+
+
+def _startup_report(report: itk_runner.RunReport) -> StartupReport | None:
+    """Render a peer-drop summary for the response, or ``None`` if clean.
+
+    ``trimmed``/``skipped`` become lists of objects rather than tuples so the
+    JSON is self-describing for whoever reads it.
+    """
+    if not report.dropped_peers:
+        return None
+    return StartupReport(
+        dropped_peers=report.dropped_peers,
+        trimmed=[{'name': n, 'dropped': d} for n, d in report.trimmed],
+        skipped=[{'name': n, 'missing': m} for n, m in report.skipped],
     )
 
 
