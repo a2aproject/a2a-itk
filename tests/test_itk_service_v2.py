@@ -404,6 +404,35 @@ class TestClusterStartup:
         # Cluster must have exited despite the scenario raising.
         assert _FakeCluster.instances[-1].exited
 
+    def test_hop_error_is_failed_result_not_500(self, client, monkeypatch, stub_deps):  # noqa: ARG002
+        """JSON-RPC / hop errors must not abort /run with detail=500.
+
+        SDK scenarios omit build_subtests. execute_itk_test must record
+        passed=false so run_itk.sh still prints the per-scenario listing.
+        """
+        import testlib
+
+        async def raising_single(**_kw):
+            raise RuntimeError("JSON-RPC error: bad")
+
+        monkeypatch.setattr(testlib, '_execute_single_itk_test', raising_single)
+        monkeypatch.setattr(itk_runner, 'execute_itk_test', testlib.execute_itk_test)
+
+        r = client.post('/run', json={
+            'tests': [{
+                'name': 't',
+                'sdks': ['current', 'python_v10'],
+                'behavior': 'send_message',
+            }],
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert 'detail' not in body
+        assert body['all_passed'] is False
+        assert body['results']['t']['passed'] is False
+        assert body['results']['t']['sdks'] == ['current', 'python_v10']
+        assert _FakeCluster.instances[-1].exited
+
 
 # ---------------------------------------------------------------------------
 # Adapter: launcher handles → AgentTable

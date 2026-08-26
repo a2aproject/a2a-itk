@@ -566,15 +566,19 @@ async def execute_itk_test(  # noqa: PLR0913
     label = scenario_name or 'euler'
 
     if not build_subtests:
-        res = await _execute_single_itk_test(
-            sdks=sdks,
-            behavior=behavior,
-            agents=agents,
-            edges=edges,
-            scenario_name=label,
-            protocols=protocols,
-            streaming=streaming,
-        )
+        try:
+            res = await _execute_single_itk_test(
+                sdks=sdks,
+                behavior=behavior,
+                agents=agents,
+                edges=edges,
+                scenario_name=label,
+                protocols=protocols,
+                streaming=streaming,
+            )
+        except Exception as e:
+            logger.exception('Test %s failed with exception: %s', label, e)
+            res = False
         return {label: {'passed': res, 'sdks': sdks, 'edges': edges}}
 
     from test_suite import _get_valid_subgraphs
