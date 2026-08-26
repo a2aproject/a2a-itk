@@ -15,10 +15,12 @@ Every builder is idempotent (skip if the artifact already exists), so calling
 from __future__ import annotations
 
 import enum
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+from test_suite.current import rust_target_dir
 from test_suite.launcher import codegen, config
 from test_suite.launcher.errors import InfraFailure, Stage
 
@@ -206,15 +208,22 @@ def _build_java(agent_dir: Path, timeout: int) -> None:
 
 def _build_rust(agent_dir: Path, timeout: int) -> None:
     """``cargo build --locked --release``; idempotent via target/ inspection."""
-    release_dir = agent_dir / 'target' / 'release'
-    if release_dir.exists() and any(release_dir.glob('itk-*')):
+    rust_target_root = rust_target_dir(agent_dir)
+    release_dir = rust_target_root / 'release'
+    if release_dir.exists() and any(
+        p.is_file() and p.suffix != '.d' and os.access(p, os.X_OK)
+        for p in release_dir.glob('itk-*')
+    ):
         return
+    env = os.environ.copy()
+    env['CARGO_TARGET_DIR'] = str(rust_target_root)
     subprocess.run(  # noqa: S603
         ['cargo', 'build', '--locked', '--release'],  # noqa: S607
         cwd=str(agent_dir),
         check=True,
         timeout=timeout,
         capture_output=True,
+        env=env,
     )
 
 
