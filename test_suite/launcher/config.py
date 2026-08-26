@@ -189,6 +189,27 @@ def image_digest() -> str:
     return 'unpinned'
 
 
+def proto_digest() -> str:
+    """Identity of ``instruction.proto``, folded into cache keys.
+
+    Codegen copies this proto into each peer and generates language stubs.
+    A proto-only change must bust cached trees; otherwise a host cache that
+    outlives the container (``$HOME/.cache/a2a-itk-launcher``) keeps serving
+    stale stubs after an ITK commit that does not touch the Dockerfile.
+
+    Never raises: launcher must be usable without the proto present
+    (e.g. unit tests that only exercise cache layout).
+    """
+    proto = _repo_root() / 'protos' / 'instruction.proto'
+    if proto.is_file():
+        try:
+            data = proto.read_bytes()
+        except OSError:
+            return 'unpinned'
+        return 'sha256_' + hashlib.sha256(data).hexdigest()[:16]
+    return 'unpinned'
+
+
 def _repo_root() -> Path:
     """Locate a2a-itk's root.
 
