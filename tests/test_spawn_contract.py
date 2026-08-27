@@ -168,9 +168,11 @@ class TestPerLanguageArgv:
         # 1) sync pre-build via subprocess.run — argv and cwd (mount.parent)
         assert _RecRun.calls, 'expected `mvn ... install` pre-build call'
         pre_argv, pre_cwd = _RecRun.calls[0]
+        local_repo = f'-Dmaven.repo.local={current.maven_repo_dir(mount)}'
         assert pre_argv == [
             'mvn', '-Pitk', '-pl', 'itk', '-am', 'install',
             '-DskipTests', '-Dmaven.javadoc.skip=true',
+            local_repo,
         ]
         assert pre_cwd == mount.parent
 
@@ -180,6 +182,7 @@ class TestPerLanguageArgv:
             'mvn', 'exec:java',
             '-Dexec.mainClass=org.a2aproject.sdk.itk.Main',
             f'-Dexec.args=--httpPort {self.HTTP} --grpcPort {self.GRPC}',
+            local_repo,
         ]
         assert cwd == mount
 
