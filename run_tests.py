@@ -232,7 +232,7 @@ async def main_async(args: argparse.Namespace) -> int:
         return 0
 
     try:
-        results = await itk_runner.run_scenarios(scenarios, log_dir=args.log_dir)
+        report = await itk_runner.run_scenarios(scenarios, log_dir=args.log_dir)
     except (MatrixError, PermanentError) as e:
         logger.error('%s', e)  # noqa: TRY400 — a traceback adds nothing here
         return 1
@@ -242,6 +242,10 @@ async def main_async(args: argparse.Namespace) -> int:
             logger.error('Re-run with --log-dir to capture agent output.')
         return 1
 
+    # A dropped peer already logged loudly inside run_scenarios; nothing more
+    # to do here but run what survived.
+    results = report.results
+
     if args.output:
         payload = {
             'all_passed': all(r.passed for r in results.values()),
@@ -250,6 +254,12 @@ async def main_async(args: argparse.Namespace) -> int:
                 for n, r in results.items()
             },
         }
+        if report.dropped_peers:
+            payload['startup'] = {
+                'dropped_peers': report.dropped_peers,
+                'trimmed': [{'name': n, 'dropped': d} for n, d in report.trimmed],
+                'skipped': [{'name': n, 'missing': m} for n, m in report.skipped],
+            }
         args.output.write_text(json.dumps(payload, indent=2), encoding='utf-8')
         logger.info('Results written to %s', args.output)
 

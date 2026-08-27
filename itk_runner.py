@@ -35,6 +35,7 @@ from test_suite.scenarios.resolver import (
     resolve_all,
 )
 from test_suite.launcher.spec import Kind
+from test_suite.scenarios.topology import restrict_to_available
 from testlib import execute_itk_test
 
 
@@ -74,17 +75,47 @@ class ScenarioResult:
     tier: str | None = None
 
 
-class ClusterStartupError(RuntimeError):
-    """One or more agents failed to start.
+@dataclass(frozen=True)
+class RunReport:
+    """Everything a run produced: the results, and what a down peer cost.
 
-    Carries per-agent detail so the caller can say *which* peer died and at
-    which stage, rather than reporting a blanket failure.
+    ``results`` holds only scenarios that actually ran (as authored, or with
+    a failed peer trimmed out). The other three record coverage lost to a
+    peer that didn't start, so it can be surfaced rather than silently
+    dropped — a run that quietly tests less than the file describes and still
+    goes green is the failure mode this pipeline exists to prevent.
     """
 
-    def __init__(self, failures: list[tuple[str, str]]) -> None:
+    results: dict[str, ScenarioResult]
+    # agent id -> "<stage>: <error>" for each peer that failed to start.
+    dropped_peers: dict[str, str] = field(default_factory=dict)
+    # (scenario name, agents removed) for scenarios that ran a peer short.
+    trimmed: list[tuple[str, list[str]]] = field(default_factory=list)
+    # (scenario name, agents missing) for scenarios that couldn't run at all.
+    skipped: list[tuple[str, list[str]]] = field(default_factory=list)
+
+
+class ClusterStartupError(RuntimeError):
+    """The run cannot proceed because a required agent didn't start.
+
+    Raised only when a *peer* being down cannot be tolerated: the SUT
+    (``current``) itself failed to start, or every scenario needed a peer
+    that failed. A peer failure that leaves at least one scenario runnable
+    does **not** raise — the peer is dropped and the run continues (see
+    :func:`_select_runnable`).
+
+    Carries per-agent detail so the caller can say *which* agent died and at
+    which stage, plus an optional headline naming why it was fatal.
+    """
+
+    def __init__(
+        self, failures: list[tuple[str, str]], *, summary: str | None = None,
+    ) -> None:
         self.failures = failures
+        self.summary = summary
+        headline = f' ({summary})' if summary else ''
         super().__init__(
-            'Cluster startup failed: '
+            f'Cluster startup failed{headline}: '
             + '; '.join(f'{sid}: {detail}' for sid, detail in failures)
         )
 
@@ -258,8 +289,15 @@ async def run_scenarios(
     scenarios: list[Scenario],
     *,
     log_dir: Path | None = None,
-) -> dict[str, ScenarioResult]:
+) -> RunReport:
     """Start one cluster and run every scenario against it.
+
+    A peer that fails to build or start is dropped rather than sinking the
+    run: scenarios that can lose it run with it trimmed out, scenarios that
+    can't are skipped, and both are recorded on the returned report so the
+    lost coverage is visible instead of a quietly smaller green run. The SUT
+    (``current``) is the exception — it is the code under test, so if it
+    can't start there is nothing to test and the run fails.
 
     Args:
         scenarios: What to run. Must be non-empty.
@@ -267,12 +305,14 @@ async def run_scenarios(
             ``<log_dir>/agent_<id>.log``.
 
     Returns:
-        Results keyed by scenario name. A scenario with ``build_subtests``
-        contributes one entry per expanded subgraph, not just one for itself.
+        A :class:`RunReport`: results keyed by scenario name (a scenario with
+        ``build_subtests`` contributes one entry per expanded subgraph), plus
+        the peers dropped and the scenarios trimmed or skipped as a result.
 
     Raises:
         ValueError: ``scenarios`` is empty.
-        ClusterStartupError: At least one agent didn't come up.
+        ClusterStartupError: The SUT failed to start, or every scenario
+            needed a peer that did — nothing runnable is left.
         test_suite.launcher.matrix.MatrixError: Unknown agent id.
         test_suite.launcher.errors.PermanentError: Unresolvable ref.
         test_suite.launcher.errors.InfraFailure: Transient fetch failure.
@@ -284,11 +324,87 @@ async def run_scenarios(
         return await _run_locked(scenarios, log_dir=log_dir)
 
 
+def _select_runnable(
+    scenarios: list[Scenario],
+    agents: AgentTable,
+) -> tuple[
+    list[tuple[Scenario, list[str], list[str] | None]],
+    list[tuple[str, list[str]]],
+    list[tuple[str, list[str]]],
+]:
+    """Decide what each scenario can still run without the missing peers.
+
+    ``agents`` holds only the agents that came up. For each scenario this
+    keeps it as authored when nothing is missing, rebuilds it for the
+    survivors when a downed peer can be dropped, or gives up on it when it
+    can't — the same trim/skip rule the resolver applies to known failures,
+    via the shared :func:`restrict_to_available`.
+
+    Returns ``(runnable, trimmed, skipped)`` where ``runnable`` is
+    ``(scenario, sdks, edges)`` ready to execute (sdks/edges are rebuilt for
+    the smaller set when trimmed), ``trimmed`` is ``(name, dropped)`` and
+    ``skipped`` is ``(name, missing)``.
+    """
+    started = set(agents)
+    runnable: list[tuple[Scenario, list[str], list[str] | None]] = []
+    trimmed: list[tuple[str, list[str]]] = []
+    skipped: list[tuple[str, list[str]]] = []
+
+    for s in scenarios:
+        missing = [sdk for sdk in s.sdks if sdk not in started]
+        if not missing:
+            runnable.append((s, s.sdks, s.edges))
+            continue
+        restricted = restrict_to_available(s.sdks, s.topology, s.edges, started)
+        if restricted is None:
+            skipped.append((s.name, missing))
+        else:
+            kept, kept_edges = restricted
+            runnable.append((s, kept, kept_edges))
+            trimmed.append((s.name, missing))
+    return runnable, trimmed, skipped
+
+
+def _report_startup(
+    dropped_peers: dict[str, str],
+    trimmed: list[tuple[str, list[str]]],
+    skipped: list[tuple[str, list[str]]],
+) -> None:
+    """Log peers that didn't start and the coverage that cost.
+
+    At warning level and naming names: silently dropping a peer and going
+    green on a smaller run is the exact failure mode this pipeline guards
+    against. Reported the way resolution-time skips are (see :func:`_report`)
+    so both kinds of lost coverage read alike in the log. In CI this reaches
+    the job output two ways — the container log on a failing run, and the
+    ``/run`` response (hence :class:`RunReport`) on a passing one, where the
+    container log is not dumped.
+    """
+    logger.warning(
+        '%d peer(s) failed to start and were dropped:', len(dropped_peers),
+    )
+    for agent, detail in sorted(dropped_peers.items()):
+        logger.warning('  %s — %s', agent, detail)
+    if trimmed:
+        logger.warning(
+            '%d scenario(s) running with a peer removed:', len(trimmed),
+        )
+        for name, dropped in trimmed:
+            logger.warning('  %s — without %s', name, ', '.join(sorted(dropped)))
+    if skipped:
+        logger.warning(
+            '%d scenario(s) SKIPPED — a required peer did not start:',
+            len(skipped),
+        )
+        for name, missing in skipped:
+            logger.warning('  %s — needs %s', name, ', '.join(sorted(missing)))
+
+
 async def _run_locked(
     scenarios: list[Scenario],
     *,
     log_dir: Path | None,
-) -> dict[str, ScenarioResult]:
+) -> RunReport:
     logger.info(
         'Planning cluster for %d scenario(s): %s',
         len(scenarios),
@@ -307,41 +423,63 @@ async def _run_locked(
             cluster.start_all, plan.specs, log_names=log_names,
         )
 
-        failures = [
-            (plan.ids[i], f'{o.error.stage.value}: {o.error}')
+        started_handles = {
+            plan.ids[i]: o.handle for i, o in enumerate(outcomes) if o.ok()
+        }
+        dropped_peers = {
+            plan.ids[i]: f'{o.error.stage.value}: {o.error}'
             for i, o in enumerate(outcomes)
             if not o.ok()
-        ]
-        if failures:
-            raise ClusterStartupError(failures)
+        }
 
-        # Where the agents we just started are listening. Passed down the
-        # call chain rather than published to a global, so nothing can leak
-        # into the next run.
-        agents = AgentTable.from_handles(
-            {plan.ids[i]: o.handle for i, o in enumerate(outcomes)}
-        )
+        # The SUT is the code under test; a peer being down is tolerable, the
+        # SUT being down is not — there would be nothing to test, and a green
+        # empty run is worse than a red one.
+        if SUT_ID in dropped_peers:
+            raise ClusterStartupError(
+                sorted(dropped_peers.items()),
+                summary=f'the code under test ({SUT_ID!r}) failed to start',
+            )
+
+        # Where the agents we started are listening. Passed down the call
+        # chain rather than published to a global, so nothing can leak into
+        # the next run. Holds only the agents that actually came up.
+        agents = AgentTable.from_handles(started_handles)
         logger.info('Cluster up: %r', agents)
+
+        runnable, trimmed, skipped = _select_runnable(scenarios, agents)
+        if dropped_peers:
+            _report_startup(dropped_peers, trimmed, skipped)
+
+        if not runnable:
+            # Every scenario needed a peer that didn't come up. Refuse rather
+            # than return an empty result set that reads as a green run which
+            # tested nothing.
+            raise ClusterStartupError(
+                sorted(dropped_peers.items()),
+                summary='every scenario needed a peer that failed to start',
+            )
 
         # Sequential on purpose — the cluster is shared, and running
         # scenarios concurrently against it overloads the agents.
         results: dict[str, ScenarioResult] = {}
-        for scenario in scenarios:
+        for scenario, run_sdks, run_edges in runnable:
             logger.info("Executing scenario '%s'", scenario.name)
             raw = await execute_itk_test(
-                sdks=scenario.sdks,
+                sdks=run_sdks,
                 behavior=scenario.behavior,
                 agents=agents,
-                edges=scenario.edges,
+                edges=run_edges,
                 scenario_name=scenario.name,
                 protocols=scenario.protocols,
                 streaming=scenario.streaming,
                 build_subtests=scenario.build_subtests,
             )
             for name, details in raw.items():
-                # sdks/edges come from the execution because a subtest runs a
-                # smaller graph than its parent scenario declares; everything
-                # else is a property of the scenario and is copied across.
+                # sdks/edges come from the execution because a subtest (or a
+                # trimmed scenario) runs a smaller graph than the scenario
+                # declares; everything else is a property of the scenario and
+                # is copied across.
                 results[name] = ScenarioResult(
                     passed=bool(details['passed']),
                     sdks=list(details['sdks']),
@@ -351,7 +489,13 @@ async def _run_locked(
                     streaming=scenario.streaming,
                     tier=scenario.tier,
                 )
-    return results
+
+    return RunReport(
+        results=results,
+        dropped_peers=dropped_peers,
+        trimmed=trimmed,
+        skipped=skipped,
+    )
 
 
 

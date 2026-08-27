@@ -33,7 +33,7 @@ from test_suite.scenarios.schema import (
     Transport,
     TraversalScenarioV1,
 )
-from test_suite.scenarios.topology import topology_to_edges
+from test_suite.scenarios.topology import Topology, restrict_to_available
 
 
 class ResolutionError(ValueError):
@@ -58,6 +58,11 @@ class ResolvedScenario:
     build_subtests: bool = False
     # Carried for the nightly metrics record and for diffing; not used to run.
     tier: str = Tier.NIGHTLY.value
+    # The shape to rebuild from if an agent later goes missing (a peer that
+    # fails to start), or ``None`` when ``edges`` is an explicit author list
+    # that must not be re-indexed. Lets the runner reuse the resolver's
+    # trim/skip decision via ``restrict_to_available``. Not part of the run.
+    topology: Topology | None = None
 
     def peer_ids(self) -> list[str]:
         return [s for s in self.sdks if s != SUT_ID]
@@ -215,6 +220,12 @@ def _expand(  # noqa: PLR0913
     ))
     multi = _multi_axes(scenario)
 
+    # None when the author gave an explicit edge list — those indices are
+    # positional and must not be re-indexed if a peer drops; a named topology
+    # carries its shape and is rebuilt for the smaller set. Carried onto the
+    # ResolvedScenario so the runner makes the same trim/skip call at runtime.
+    resolved_topology = None if scenario.edges is not None else scenario.topology
+
     out = []
     for behavior, transports, streaming in variants:
         for sdks, used, peer_label in _groups(
@@ -232,11 +243,14 @@ def _expand(  # noqa: PLR0913
             kept, dropped = _apply_exclusions(
                 sdks, known, used, behavior, streaming, sut_sdk,
             )
+            # Same decision the runner makes for a peer that fails to start:
+            # rebuild for the survivors, or skip if what's left can't run.
+            restricted = restrict_to_available(
+                sdks, resolved_topology, scenario.edges, set(kept),
+                min_agents=_MIN_AGENTS,
+            )
             if dropped:
-                # An explicit edge list is indexed by agent position, so
-                # removing one would silently rewire the graph.
-                unrunnable = scenario.edges is not None or len(kept) < _MIN_AGENTS
-                if unrunnable:
+                if restricted is None:
                     why = '; '.join(
                         f'{a} — {e.summary()}' for a, e in dropped  # type: ignore[union-attr]
                     )
@@ -247,22 +261,20 @@ def _expand(  # noqa: PLR0913
                     trimmed.extend(
                         (name, a, e.summary()) for a, e in dropped  # type: ignore[union-attr]
                     )
-                sdks = kept
 
-            edges = (
-                scenario.edges
-                if scenario.edges is not None
-                else topology_to_edges(scenario.topology, len(sdks))
-            )
+            # Not None here: with no drop, kept == sdks (>= _MIN_AGENTS by the
+            # guard above); with a drop, the skip case already `continue`d.
+            final_sdks, edges = restricted  # type: ignore[misc]
             out.append(ResolvedScenario(
                 name=name,
-                sdks=sdks,
+                sdks=final_sdks,
                 behavior=behavior.value,
                 edges=edges,
                 protocols=[t.value for t in used],
                 streaming=streaming,
                 build_subtests=scenario.build_subtests,
                 tier=scenario.tier.value,
+                topology=resolved_topology,
             ))
     return out
 
