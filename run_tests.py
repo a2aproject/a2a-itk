@@ -250,7 +250,15 @@ async def main_async(args: argparse.Namespace) -> int:
         payload = {
             'all_passed': all(r.passed for r in results.values()),
             'results': {
-                n: {'passed': r.passed, 'sdks': r.sdks, 'edges': r.edges}
+                n: {
+                    'passed': r.passed,
+                    'sdks': r.sdks,
+                    'edges': r.edges,
+                    'protocols': r.protocols,
+                    'behavior': r.behavior,
+                    'streaming': r.streaming,
+                    'tier': r.tier,
+                }
                 for n, r in results.items()
             },
         }
