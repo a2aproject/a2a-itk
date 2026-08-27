@@ -11,7 +11,25 @@ from __future__ import annotations
 import asyncio
 
 import testlib
+from notifications_app import _extract_task_id_v03
 from test_suite.agent_table import AgentTable
+
+
+class TestExtractTaskIdV03:
+    def test_status_update_uses_task_id(self):
+        assert (
+            _extract_task_id_v03(
+                {
+                    'kind': 'status-update',
+                    'taskId': 't1',
+                    'status': {'message': {'role': 'agent'}},
+                }
+            )
+            == 't1'
+        )
+
+    def test_task_kind_still_uses_id(self):
+        assert _extract_task_id_v03({'kind': 'task', 'id': 't2'}) == 't2'
 
 
 class TestExecuteItkTestExceptions:
