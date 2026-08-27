@@ -35,7 +35,7 @@ from test_suite.scenarios.resolver import (
     resolve_all,
 )
 from test_suite.launcher.spec import Kind
-from test_suite import induced_runnable_scenario
+from test_suite.scenarios.topology import restrict_to_available
 from testlib import execute_itk_test
 
 
@@ -335,12 +335,14 @@ def _select_runnable(
     """Decide what each scenario can still run without the missing peers.
 
     ``agents`` holds only the agents that came up. For each scenario this
-    keeps it as authored when nothing is missing, trims a downed peer when
-    the remainder still traverses, or gives up on it when it doesn't.
+    keeps it as authored when nothing is missing, rebuilds it for the
+    survivors when a downed peer can be dropped, or gives up on it when it
+    can't — the same trim/skip rule the resolver applies to known failures,
+    via the shared :func:`restrict_to_available`.
 
     Returns ``(runnable, trimmed, skipped)`` where ``runnable`` is
-    ``(scenario, sdks, edges)`` ready to execute (sdks/edges are the induced
-    subgraph for a trimmed scenario), ``trimmed`` is ``(name, dropped)`` and
+    ``(scenario, sdks, edges)`` ready to execute (sdks/edges are rebuilt for
+    the smaller set when trimmed), ``trimmed`` is ``(name, dropped)`` and
     ``skipped`` is ``(name, missing)``.
     """
     started = set(agents)
@@ -353,14 +355,11 @@ def _select_runnable(
         if not missing:
             runnable.append((s, s.sdks, s.edges))
             continue
-        induced = induced_runnable_scenario(
-            s.sdks, s.edges, started, agents,
-            behavior=s.behavior, protocols=s.protocols, streaming=s.streaming,
-        )
-        if induced is None:
+        restricted = restrict_to_available(s.sdks, s.topology, s.edges, started)
+        if restricted is None:
             skipped.append((s.name, missing))
         else:
-            kept, kept_edges = induced
+            kept, kept_edges = restricted
             runnable.append((s, kept, kept_edges))
             trimmed.append((s.name, missing))
     return runnable, trimmed, skipped
