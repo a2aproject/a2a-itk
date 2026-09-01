@@ -168,7 +168,12 @@ def _spawn_java(
         'mvn', '-Pitk', '-pl', 'itk', '-am', 'install',
         '-DskipTests', '-Dmaven.javadoc.skip=true',
     ]
-    subprocess.run(compile_args, cwd=str(agent_dir.parent), check=True)  # noqa: S603
+    subprocess.run(  # noqa: S603
+        compile_args,
+        cwd=str(agent_dir.parent),
+        check=True,
+        timeout=int(os.environ.get('ITK_BUILD_TIMEOUT', str(10 * 60))),
+    )
 
     args = [  # noqa: S607
         'mvn', 'exec:java',
@@ -213,6 +218,7 @@ def _spawn_rust(
         cwd=str(agent_dir),
         env=build_env,
         check=True,
+        timeout=int(os.environ.get('ITK_BUILD_TIMEOUT', str(10 * 60))),
     )
     binary = _find_rust_binary(rust_target_root / 'release')
     if binary is None:
