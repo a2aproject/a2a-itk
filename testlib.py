@@ -550,6 +550,21 @@ async def _execute_single_itk_test(  # noqa: PLR0913
     finally:
         if notif_server_process and notif_port:
             logger.info('Stopping notification server for test %s', label)
+            notif_server_process.terminate()
+            try:
+                notif_server_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                notif_server_process.kill()
+                notif_server_process.wait(timeout=5)
+            if getattr(notif_server_process, 'stdout', None) not in (
+                None,
+                subprocess.PIPE,
+                subprocess.DEVNULL,
+            ):
+                try:
+                    notif_server_process.stdout.close()
+                except Exception:
+                    pass
             _clean_ports(notif_port)
 
     return test_result
