@@ -19,7 +19,7 @@ suites:
             params:
               id: "00000000-0000-0000-0000-000000000000"
             expect_error:
-              error_type: TaskNotFoundError
+              code: TaskNotFoundError
               message:
                 type: string
 
@@ -33,7 +33,7 @@ suites:
             params:
               id: "00000000-0000-0000-0000-000000000000"
             expect_error:
-              error_type:
+              code:
                 one_of: [TaskNotFoundError, TaskNotCancelableError]
 
       - id: CORE-ERR-003
@@ -65,7 +65,7 @@ suites:
             params:
               id: "{{setup-completed-task.taskId}}"
             expect_error:
-              error_type: TaskNotCancelableError
+              code: TaskNotCancelableError
 
       - id: CORE-ERR-004
         name: "SendMessage to terminal task returns UnsupportedOperationError"
@@ -100,7 +100,7 @@ suites:
                 parts:
                   - text: "tck-complete-task second"
             expect_error:
-              error_type: UnsupportedOperationError
+              code: UnsupportedOperationError
 
       - id: JSONRPC-ERR-001
         name: "Unknown method returns MethodNotFoundError"
@@ -158,7 +158,7 @@ suites:
             params:
               id: "00000000-0000-0000-0000-000000000000"
             expect_error:
-              error_type: TaskNotFoundError
+              code: TaskNotFoundError
               message:
                 all_of:
                   - type: string
@@ -217,13 +217,13 @@ suites:
             capture:
               taskId: "task.id"
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create-task.taskId}}"
               pushNotificationConfig:
                 url: "https://example.com/webhooks/a2a-tests"
             expect_error:
-              error_type: UnsupportedOperationError
+              code: UnsupportedOperationError
 
       - id: CORE-CAP-002
         name: "Streaming not supported returns error"
@@ -241,7 +241,7 @@ suites:
                 parts:
                   - text: "tck-complete-task streaming unsupported"
             expect_error:
-              error_type: UnsupportedOperationError
+              code: UnsupportedOperationError
 
       - id: CORE-ERR-007
         name: "Error data contains structured error info"
@@ -252,7 +252,7 @@ suites:
             params:
               id: "00000000-0000-0000-0000-000000000000"
             expect_error:
-              error_type: TaskNotFoundError
+              code: TaskNotFoundError
               data:
                 type: object
 

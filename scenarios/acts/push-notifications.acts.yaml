@@ -41,7 +41,7 @@ suites:
                     type: string
 
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               pushNotificationConfig:
@@ -84,7 +84,7 @@ suites:
                     type: string
 
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               pushNotificationConfig:
@@ -98,7 +98,7 @@ suites:
                   type: string
 
           - id: get-config
-            operation: get_push_config
+            operation: get_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               id: "{{set-config.configId}}"
@@ -137,7 +137,7 @@ suites:
                     type: string
 
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               pushNotificationConfig:
@@ -151,7 +151,7 @@ suites:
                   type: string
 
           - id: delete-config
-            operation: delete_push_config
+            operation: delete_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               id: "{{set-config.configId}}"
@@ -187,13 +187,13 @@ suites:
                     type: string
 
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               pushNotificationConfig:
                 url: "{{webhookUrl}}"
             expect_error:
-              error_type: UnsupportedOperationError
+              code: UnsupportedOperationError
 
       - id: PUSH-LIST-001
         name: "List push configs"
@@ -220,7 +220,7 @@ suites:
               taskId: "task.id"
 
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               pushNotificationConfig:
@@ -234,7 +234,7 @@ suites:
               configId: "id"
 
           - id: list-configs
-            operation: list_push_configs
+            operation: list_push_notification_configs
             params:
               taskId: "{{create.taskId}}"
             expect:
@@ -269,12 +269,12 @@ suites:
               taskId: "task.id"
 
           - id: get-config
-            operation: get_push_config
+            operation: get_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               id: "00000000-0000-0000-0000-000000000000"
             expect_error:
-              error_type: TaskNotFoundError
+              code: TaskNotFoundError
 
       - id: PUSH-IDEM-001
         name: "Delete push config is idempotent"
@@ -301,7 +301,7 @@ suites:
               taskId: "task.id"
 
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               pushNotificationConfig:
@@ -315,7 +315,7 @@ suites:
               configId: "id"
 
           - id: delete-config
-            operation: delete_push_config
+            operation: delete_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               id: "{{set-config.configId}}"
@@ -323,7 +323,7 @@ suites:
               status: 200
 
           - id: delete-config-again
-            operation: delete_push_config
+            operation: delete_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               id: "{{set-config.configId}}"
@@ -359,7 +359,7 @@ suites:
               taskId: "task.id"
 
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               pushNotificationConfig:
@@ -402,7 +402,7 @@ suites:
               taskId: "task.id"
 
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               pushNotificationConfig:
@@ -442,7 +442,7 @@ suites:
               taskId: "task.id"
 
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create.taskId}}"
               pushNotificationConfig:

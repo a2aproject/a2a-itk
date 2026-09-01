@@ -14,6 +14,10 @@ Flattening is the loader's job rather than the runner's because the checks
 that matter are cross-file: a test id duplicated between two suite files
 would silently overwrite a row in the report, and no single-file validation
 can see it.
+
+Both entry points apply :mod:`test_suite.acts.compat` by default, which
+rewrites the known CDDL violations in the pinned upstream corpus on the way
+in. Pass ``compat=False`` to validate a document exactly as written.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from test_suite.acts.compat import Rewrite, normalize_document
 from test_suite.acts.schema import (
     ActsDocument,
     Level,
@@ -97,6 +102,10 @@ class LoadedSuite:
     variables: dict[str, str] = field(default_factory=dict)
     sources: list[Path] = field(default_factory=list)
     errors: list[LoadError] = field(default_factory=list)
+    #: Upstream defects rewritten on the way in; empty when ``compat=False``.
+    #: Surfaced rather than swallowed so a run can report that it did not
+    #: execute the corpus quite as shipped.
+    rewrites: list[Rewrite] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.tests)
@@ -120,8 +129,7 @@ class LoadedSuite:
     def required_behaviors(self) -> frozenset[str]:
         """Every ``tck-*`` prefix any loaded test needs.
 
-        The set an SDK's ``acts/sut-behaviors.yaml`` is checked against in
-        story 4.5.
+        The set an SDK's ``acts/sut-behaviors.yaml`` is checked against.
         """
         out: set[str] = set()
         for loaded in self.tests:
@@ -137,22 +145,28 @@ class LoadedSuite:
         return seen
 
 
-def load_document(path: Path) -> ActsDocument:
+def load_document(path: Path, compat: bool = True) -> ActsDocument:
     """Read and validate one ACTS file.
+
+    Args:
+        path: The file to read.
+        compat: Rewrite the known upstream defects first. Set ``False`` to
+            validate the file exactly as written.
 
     Raises:
         ActsFileError: Missing file, malformed YAML, or a document that fails
             schema validation.
     """
-    return parse_document(_read_yaml(path), source=path)
+    return parse_document(_read_yaml(path), source=path, compat=compat)
 
 
-def parse_document(data: Any, source: Path | None = None) -> ActsDocument:
+def parse_document(
+    data: Any, source: Path | None = None, compat: bool = True
+) -> ActsDocument:
     """Validate an already-parsed mapping into an :class:`ActsDocument`.
 
-    Separate from :func:`load_document` so a document arriving over HTTP —
-    which is how story 4.6's ``/run-acts`` will receive one — takes the same
-    path as a file on disk.
+    Separate from :func:`load_document` so a document arriving over HTTP
+    takes the same path as a file on disk, compat rules included.
 
     Raises:
         ActsFileError: The document is not a mapping, or fails validation.
@@ -163,22 +177,30 @@ def parse_document(data: Any, source: Path | None = None) -> ActsDocument:
             f'{where}expected a mapping at the top level, '
             f'got {type(data).__name__}'
         )
+    if compat:
+        data, _ = normalize_document(data)
     try:
         return ActsDocument.model_validate(data)
     except ValidationError as e:
         raise ActsFileError(f'{where}{render_validation_error(e)}') from None
 
 
-def load_suite(path: Path, strict: bool = True) -> LoadedSuite:
+def load_suite(
+    path: Path, strict: bool = True, compat: bool = True
+) -> LoadedSuite:
     """Load a manifest and everything it includes, flattened.
 
     Args:
         path: The manifest, normally ``scenarios/acts/suite.acts.yaml``. A
             plain suite file works too — it just includes nothing.
         strict: Raise on the first invalid test. Set ``False`` to load what is
-            valid and collect the rest in ``LoadedSuite.errors`` — for the
-            pinned upstream corpus, where a known-bad test should not stop the
-            other 110 from running.
+            valid and collect the rest in ``LoadedSuite.errors`` — for
+            triaging a corpus refresh, where a newly-broken test should not
+            stop the other 110 from loading.
+        compat: Rewrite the known upstream defects on the way in, recording
+            each in ``LoadedSuite.rewrites``. Set ``False`` to see the corpus
+            exactly as shipped — with which the pinned snapshot has 26 invalid
+            tests, so pair it with ``strict=False``.
 
     Raises:
         ActsFileError: A file is missing or unparseable; an ``include:``
@@ -191,6 +213,10 @@ def load_suite(path: Path, strict: bool = True) -> LoadedSuite:
     seen_suite_ids: dict[str, Path] = {}
 
     for doc_path, raw in _resolve_includes(path, root):
+        if compat:
+            raw, rewrites = normalize_document(raw)
+            loaded.rewrites.extend(rewrites)
+        # Already normalized above, so validation runs on the document as-is.
         doc, doc_errors = _validate_document(raw, doc_path, strict=strict)
         loaded.errors.extend(doc_errors)
         loaded.sources.append(doc_path)
@@ -226,9 +252,12 @@ def _validate_document(
     for the upstream corpus would throw away a whole file over one bad test. So
     when ``strict`` is off and the document fails, retry test by test and keep
     the ones that stand up.
+
+    ``compat=False`` throughout: :func:`load_suite` normalizes each document
+    once, up front, so re-running the rules here would only deep-copy again.
     """
     try:
-        return parse_document(raw, source=path), []
+        return parse_document(raw, source=path, compat=False), []
     except ActsFileError:
         if strict:
             raise
@@ -280,7 +309,9 @@ def _salvage_document(raw: Any, path: Path) -> tuple[ActsDocument | None, list[L
         return None, errors
 
     # If this still fails, the remaining fault was never per-test.
-    return parse_document({**raw, 'suites': kept_suites}, source=path), errors
+    return parse_document(
+        {**raw, 'suites': kept_suites}, source=path, compat=False
+    ), errors
 
 
 def _resolve_includes(path: Path, root: Path) -> list[tuple[Path, Any]]:

@@ -93,15 +93,14 @@ suites:
               configuration:
                 returnImmediately: true
             expect:
-              body:
-                task:
-                  id:
-                    type: string
-                  status:
-                    state:
-                      one_of:
-                        - TASK_STATE_SUBMITTED
-                        - TASK_STATE_WORKING
+              task:
+                id:
+                  type: string
+                status:
+                  state:
+                    one_of:
+                      - TASK_STATE_SUBMITTED
+                      - TASK_STATE_WORKING
             capture:
               taskId: task.id
           - id: subscribe
@@ -155,25 +154,25 @@ suites:
                 parts:
                   - text: "tck-complete-task setup"
             expect:
-              body:
-                task:
-                  id:
-                    type: string
-                  status:
-                    state:
-                      one_of:
-                        - TASK_STATE_COMPLETED
-                        - TASK_STATE_FAILED
-                        - TASK_STATE_CANCELED
-                        - TASK_STATE_REJECTED
+              task:
+                id:
+                  type: string
+                status:
+                  state:
+                    one_of:
+                      - TASK_STATE_COMPLETED
+                      - TASK_STATE_FAILED
+                      - TASK_STATE_CANCELED
+                      - TASK_STATE_REJECTED
             capture:
               taskId: task.id
           - id: subscribe
             operation: subscribe_to_task
             params:
               id: "{{setup.taskId}}"
-            expect_error:
-              error_type: UnsupportedOperationError
+            expect:
+              error:
+                exists: true
 
       - id: STREAM-SSE-004
         name: "First event on subscribe is current task state"

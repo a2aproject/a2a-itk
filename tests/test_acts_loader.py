@@ -94,8 +94,8 @@ class TestLoadDocument:
 
 class TestParseDocument:
     def test_accepts_an_already_parsed_mapping(self):
-        """`/run-acts` will receive a document over HTTP; it must take the
-        same path as one read off disk."""
+        """A document delivered over HTTP must take the same path as one
+        read off disk."""
         doc = parse_document({
             'acts_version': '1.0',
             'spec_version': '1.0',
@@ -367,3 +367,63 @@ class TestLoadedSuiteQueries:
         assert entry.suite_id == 'core'
         assert entry.source.name == 'core.acts.yaml'
         assert 'T-MUST' in str(entry) and 'core.acts.yaml' in str(entry)
+
+
+class TestCompatFlag:
+    """`compat` decides whether the known upstream defects are rewritten.
+
+    The rules themselves are tested in `test_acts_compat.py`; what matters
+    here is that every entry point honours the flag, and that a document
+    needing a rewrite is genuinely invalid without one.
+    """
+
+    DEFECTIVE = HEADER + textwrap.dedent("""\
+        suites:
+          - id: core
+            name: Core
+            tests:
+              - id: CORE-001
+                name: A test
+                level: must
+                steps:
+                  - id: get
+                    operation: get_task
+                    expect_error:
+                      code: TaskNotFoundError
+        """)
+
+    def test_load_document_rewrites_by_default(self, tmp_path):
+        p = _write(tmp_path, 'core.acts.yaml', self.DEFECTIVE)
+        doc = load_document(p)
+        step = doc.suites[0].tests[0].steps[0]
+        assert step.expect_error.error_type == 'TaskNotFoundError'
+
+    def test_load_document_without_compat_rejects_it(self, tmp_path):
+        p = _write(tmp_path, 'core.acts.yaml', self.DEFECTIVE)
+        with pytest.raises(ActsFileError, match='expect_error.code'):
+            load_document(p, compat=False)
+
+    def test_parse_document_honours_the_flag(self):
+        import yaml
+
+        raw = yaml.safe_load(self.DEFECTIVE)
+        assert parse_document(raw).suites[0].tests[0].steps[0].expect_error
+        with pytest.raises(ActsFileError, match='expect_error.code'):
+            parse_document(raw, compat=False)
+
+    def test_load_suite_records_what_it_rewrote(self, tmp_path):
+        p = _write(tmp_path, 'suite.acts.yaml', self.DEFECTIVE)
+        loaded = load_suite(p)
+        assert len(loaded) == 1
+        assert [r.where for r in loaded.rewrites] == ['CORE-001.get']
+
+    def test_load_suite_without_compat_records_nothing(self, tmp_path):
+        p = _write(tmp_path, 'suite.acts.yaml', self.DEFECTIVE)
+        loaded = load_suite(p, strict=False, compat=False)
+        assert loaded.rewrites == []
+        assert len(loaded) == 0
+        assert len(loaded.errors) == 1
+
+    def test_a_clean_suite_records_no_rewrites(self, tmp_path):
+        p = _write(tmp_path, 'suite.acts.yaml', _suite_file())
+        assert load_suite(p).rewrites == []

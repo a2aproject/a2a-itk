@@ -184,7 +184,7 @@ suites:
             params:
               id: "00000000-0000-0000-0000-000000000000"
             expect_error:
-              error_type: TaskNotFoundError
+              code: TaskNotFoundError
 
       - id: GRPC-STREAM-001
         name: "gRPC streaming delivers proper message structure"

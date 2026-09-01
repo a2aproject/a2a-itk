@@ -38,7 +38,7 @@ suites:
               status: 200
               body:
                 error:
-                  code: -32006
+                  code: -32009
                   message:
                     type: string
 

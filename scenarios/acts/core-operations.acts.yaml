@@ -294,7 +294,7 @@ suites:
                     metadata:
                       contentType: "application/x-unsupported-type-12345"
             expect_error:
-              error_type: ContentTypeNotSupportedError
+              code: ContentTypeNotSupportedError
 
       - id: CORE-LIST-001
         name: "ListTasks returns tasks for a context"

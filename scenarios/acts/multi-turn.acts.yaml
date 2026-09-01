@@ -150,8 +150,10 @@ suites:
                 role: ROLE_USER
                 parts:
                   - text: "should fail"
-            expect_error:
-              error_type: InvalidParamsError
+            expect:
+              status: error
+              error:
+                exists: true
 
       - id: CORE-MULTI-003
         name: Mismatched contextId and taskId is rejected

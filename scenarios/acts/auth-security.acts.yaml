@@ -199,7 +199,7 @@ suites:
               taskId: "task.id"
 
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create-task.taskId}}"
               pushNotificationConfig:
@@ -243,7 +243,7 @@ suites:
               taskId: "task.id"
 
           - id: set-config
-            operation: create_push_config
+            operation: set_push_notification_config
             params:
               taskId: "{{create-task.taskId}}"
               pushNotificationConfig:
@@ -329,7 +329,7 @@ suites:
             params:
               extended: true
             expect_error:
-              error_type: UnsupportedOperationError
+              code: UnsupportedOperationError
 
       - id: SEC-EXTCARD-004
         name: "Extended cards enforce access controls"

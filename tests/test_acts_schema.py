@@ -322,7 +322,8 @@ class TestAssertionTreesArePreserved:
         assert s.params == {'anything': {'at': ['all', 1, None]}}
 
     def test_stray_key_directly_under_expect_is_rejected(self):
-        """The corpus made exactly this mistake twice; see PROVENANCE.md §B."""
+        """The corpus does this at four sites; `compat.py` moves them under
+        `body` before validation, so the schema itself stays strict."""
         with pytest.raises(ValidationError):
             Step.model_validate(_step(expect={'task': {'id': {'type': 'string'}}}))
 
@@ -346,7 +347,8 @@ class TestExpectError:
 
     def test_error_type_may_be_omitted(self):
         """Five corpus tests assert only a message — "some error, don't
-        constrain which". See PROVENANCE.md §C."""
+        constrain which" — and the `expect.error` compat rule produces the
+        same shape. See PROVENANCE.md §C."""
         e = ExpectError.model_validate({'message': {'type': 'string'}})
         assert e.error_type is None
         assert e.literal_error_type() is None
@@ -421,8 +423,9 @@ class TestNamedAssertion:
 
 class TestEnumsMatchTheSpec:
     def test_operations_are_the_spec_set(self):
-        """Guards against a push-config style rename drifting back in; the
-        corpus needed 18 such corrections (PROVENANCE.md §A.1)."""
+        """Guards against a push-config style rename drifting into the enum.
+        The corpus uses the legacy spellings at 18 sites; they belong in
+        `compat.PUSH_CONFIG_OPERATIONS`, never here."""
         assert {o.value for o in Operation} == {
             'send_message', 'send_streaming_message', 'get_task', 'list_tasks',
             'cancel_task', 'subscribe_to_task', 'get_agent_card',

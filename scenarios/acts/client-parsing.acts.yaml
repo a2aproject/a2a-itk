@@ -213,7 +213,7 @@ suites:
                         - file:
                             name: "report.pdf"
                             mediaType: "application/pdf"
-                            raw: "JVBERi0xLjQ="
+                            bytes: "JVBERi0xLjQ="
                     - artifactId: "art-url"
                       parts:
                         - fileUrl:

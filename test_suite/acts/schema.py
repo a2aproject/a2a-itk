@@ -1,8 +1,12 @@
 """ACTS document models, from the CDDL grammar in the spec's Appendix A.
 
 Mirrors [A2A#1882](https://github.com/a2aproject/A2A/pull/1882) — see
-``scenarios/acts/PROVENANCE.md`` for the pinned snapshot and the corrections
-applied to the corpus locally.
+``scenarios/acts/PROVENANCE.md`` for the pinned snapshot.
+
+This module states what the CDDL permits, and nothing else. The shipped corpus
+violates it in 26 tests; those are rewritten on the way in by
+:mod:`test_suite.acts.compat`, deliberately kept out of here so that this stays
+a description of the format rather than of one snapshot of one corpus.
 
 **What this validates, and what it deliberately does not.** The document
 envelope, the suite and test envelopes, and the *shape* of every step are
@@ -15,7 +19,7 @@ an exact match, while ``{type: array, count_gte: 1}`` is two operators on one
 value — and *nothing in the syntax distinguishes them*. Only the evaluator,
 walking a real response, can tell which a given map is. Modelling assertions
 as pydantic types here would either reject valid documents or invent a
-distinction the format does not have. Story 4.3 owns that evaluation.
+distinction the format does not have.
 
 So: this module rejects a document no runner could execute, and passes
 everything else through intact.
@@ -55,8 +59,8 @@ class TransportBinding(str, enum.Enum):
     Deliberately **not** :class:`test_suite.transports.Transport`. The two
     vocabularies disagree: ACTS says ``rest`` where the traversal engine says
     ``http_json``. Sharing one enum would silently mistranslate whichever
-    suite lost the coin toss, so they stay separate and story 4.2's
-    ``wire_map`` owns the correspondence.
+    suite lost the coin toss, so they stay separate and the wire mapping
+    owns the correspondence.
     """
 
     JSONRPC = 'jsonrpc'
@@ -312,7 +316,7 @@ class Repeat(_Model):
         min_length=1,
         description='Expression over the latest response, e.g. '
                     '"status.state in [TASK_STATE_COMPLETED]". Evaluated by '
-                    'the runner (story 4.3).',
+                    'the runner.',
     )
     max_attempts: int | None = Field(default=None, ge=1)
     delay_ms: int | None = Field(default=None, ge=0)
@@ -322,9 +326,10 @@ class Repeat(_Model):
 class ExpectBlock(_Model):
     """Assertions on a non-streaming response.
 
-    Only ``status`` and ``body``. A response field placed directly here is a
-    mistake the corpus made twice (see PROVENANCE.md §B) and ``extra='forbid'``
-    is what catches it.
+    Only ``status`` and ``body``. A response field placed directly here would
+    make the runner look for a top-level ``task`` on the response and always
+    fail, so ``extra='forbid'`` catches it. The corpus does it at four sites;
+    :mod:`test_suite.acts.compat` moves them before validation.
     """
 
     status: Assertion = None
@@ -340,6 +345,9 @@ class ExpectError(_Model):
                     'requires it; five corpus tests omit it and assert only a '
                     '`message`, which reads as "any A2A error". Optional here '
                     'for exactly that case — see PROVENANCE.md §C.',
+        # Do not tighten this to match the CDDL: it would reject those five
+        # tests, and the compat rule for `expect: {error: ...}` produces the
+        # same shape.
     )
     message: Assertion = None
     data: Assertion = None
@@ -586,7 +594,7 @@ class Test(_Model):
         default=None,
         description='`tck-*` prefixes the SUT must implement. An SDK that '
                     'lacks one FAILS the test rather than skipping it — the '
-                    'point is that lagging support stays visible (story 4.5).',
+                    'point is that lagging support stays visible.',
     )
     origin: str | None = None
     runner_requirements: list[RunnerRequirement] | None = None

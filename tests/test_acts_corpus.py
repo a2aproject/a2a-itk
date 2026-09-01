@@ -1,45 +1,117 @@
 """The pinned ACTS corpus in ``scenarios/acts/`` loads, and stays as pinned.
 
-This is story 4.1's acceptance test. Two things are being asserted:
+Three things are being asserted:
 
-1. the schema and loader handle the real corpus, not just fixtures; and
-2. the corpus is exactly what ``PROVENANCE.md`` says it is — the upstream
-   snapshot plus the recorded corrections, and nothing else.
+1. the schema and loader handle the real corpus, not just fixtures;
+2. the corpus is byte-for-byte the upstream snapshot named in
+   ``PROVENANCE.md`` — nothing here is hand-edited; and
+3. the compat rules that make it loadable fire on exactly the sites they are
+   documented to fire on.
 
 The second matters because a conformance corpus that quietly drifts from
-upstream is the failure ACTS exists to remove. A refresh should make these
-fail; that is the prompt to re-read PROVENANCE.md and update it.
+upstream is the failure ACTS exists to remove. The third is what lets the
+first two coexist: the corpus stays verbatim *and* runnable, with the gap
+between them stated as a number that a refresh will move.
+
+A refresh should make these fail. That is the prompt to re-read
+``PROVENANCE.md``, and — where a site count has dropped to zero — to delete
+the corresponding compat rule.
 """
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from test_suite.acts import (
-    ErrorType,
+    EXPECTED_SITES,
     Level,
     Operation,
     StepKind,
     TransportBinding,
     load_suite,
+    site_counts,
 )
 
 
 CORPUS = Path(__file__).resolve().parent.parent / 'scenarios' / 'acts'
 MANIFEST = CORPUS / 'suite.acts.yaml'
 
+#: SHA-256 of every corpus file at the pinned upstream snapshot, so that a
+#: hand-edit cannot happen quietly. Regenerate *only* as part of a deliberate
+#: refresh, alongside the SHA in PROVENANCE.md:
+#:
+#:     python -c "import hashlib,pathlib; [print(f\"    '{p.name}': \
+#: '{hashlib.sha256(p.read_bytes()).hexdigest()}',\") \
+#: for p in sorted(pathlib.Path('scenarios/acts').glob('*.acts.yaml'))]"
+UPSTREAM_DIGESTS: dict[str, str] = {
+    'auth-security.acts.yaml': 'a2df73242b194dd88fcd012a56c92b0ae99271568ae438ad501961aed68c1b8b',
+    'client-parsing.acts.yaml': '254fe68a39f962ede00015f2bed5c63341f5b34461941b62f0f913c12d0bcbf9',
+    'core-operations.acts.yaml': 'e07aa58b14397066294480bb231861436324f43e756db9b46abea62c1efaa845',
+    'data-types.acts.yaml': 'cfe727b65176ae07b1ae2bd7d6dd4b437df8ee2cc56eb270b36bb1ded1c7d09c',
+    'discovery.acts.yaml': '912a39309171e9664f3864c8c46f3ff81b488268b7f9b281e9956548f13bc191',
+    'error-handling.acts.yaml': '8c3f98a671f553cd10ce46047e1e40e5ae3ac25411d23600aec29533d6ef4e86',
+    'history.acts.yaml': '05694d7462562b1eaafb485e01d3787f76c40a8d99b456b5a3a313a1a755d514',
+    'multi-turn.acts.yaml': '4b9121a9bb31da48c276cc196780a8bb4a64ae1186fe7ce04c15b19b15f1ee2d',
+    'polling.acts.yaml': 'c129082f235e1637de49c635d4818c7237b4695b59882b714afd34dc08ccca30',
+    'push-notifications.acts.yaml': '7d5a035c9a0d8b83f9a13e6e3fb7fe4013426a56589f2d7eb8c6379c7da52aae',
+    'streaming.acts.yaml': '4c844f676f331420a96ac6e8161ddf7cfcc435f9b7f3e7d0b401bf433f811371',
+    'suite.acts.yaml': '2ff73423445f012a8ddaaae1b193ce023a848db989e3fc7c68894c97d2d03707',
+    'transport-bindings.acts.yaml': '934454e1bba631ae423cb571ea014797d49f201dd5e175cfa91fe12fa311027a',
+    'version-negotiation.acts.yaml': 'db09a865f9b36cbdb13819836539e53aa1021dfcef804e8399429dd7fe8839c2',
+    'wire-format.acts.yaml': '83ed452740fb2e63af51b6c5012e819c88049ec773fcc8f4cc0c530a193be2cd',
+}
+
 
 @pytest.fixture(scope='module')
 def corpus():
-    """The whole corpus, loaded strictly.
+    """The whole corpus, loaded strictly, with compat rules applied.
 
-    Strict on purpose: after the corrections in PROVENANCE.md the corpus is
-    fully valid, and the day it stops being so is the day we want to hear
-    about it.
+    Strict on purpose: with the rules in ``compat.py`` the corpus is fully
+    valid, and the day it stops being so is the day we want to hear about it.
     """
     return load_suite(MANIFEST)
+
+
+@pytest.fixture(scope='module')
+def verbatim():
+    """The corpus exactly as upstream ships it — no compat, so not strict.
+
+    Every assertion made against this fixture is a statement about a defect
+    that is still open upstream. When one is fixed, the assertion fails, and
+    that is the signal to drop both it and the rule that worked around it.
+    """
+    return load_suite(MANIFEST, strict=False, compat=False)
+
+
+class TestCorpusIsAVerbatimMirror:
+    """No file here is hand-edited. Not one character.
+
+    Everything we know about the corpus's defects lives in `compat.py` and
+    `PROVENANCE.md`; the YAML stays byte-identical to upstream so a refresh is
+    a copy rather than a merge. This is the test that makes that a rule rather
+    than an intention.
+    """
+
+    def test_every_file_matches_its_pinned_digest(self):
+        actual = {
+            p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(CORPUS.glob('*.acts.yaml'))
+        }
+        assert actual == UPSTREAM_DIGESTS, (
+            'the corpus differs from the pinned upstream snapshot. If this is '
+            'a deliberate refresh, update the SHA in PROVENANCE.md and '
+            'regenerate UPSTREAM_DIGESTS. If it is a hand-edit, revert it — '
+            'corrections belong in test_suite/acts/compat.py.'
+        )
+
+    def test_no_stray_files_in_the_corpus_directory(self):
+        """`PROVENANCE.md` is ours; everything else must come from upstream."""
+        assert {p.name for p in CORPUS.iterdir()} == (
+            set(UPSTREAM_DIGESTS) | {'PROVENANCE.md'}
+        )
 
 
 class TestCorpusLoads:
@@ -130,9 +202,9 @@ class TestCorpusShape:
     def test_runner_supplied_variables(self, corpus):
         """Undotted `{{name}}` references that no document variable defines.
 
-        The runner has to inject these, so story 4.6 needs the list — and an
-        unnoticed addition to it would surface as an unsubstituted `{{...}}`
-        going out on the wire.
+        The runner has to inject these, and an unnoticed addition to the
+        list would surface as an unsubstituted `{{...}}` going out on the
+        wire.
         """
         bare = {
             ref
@@ -148,7 +220,7 @@ class TestCorpusShape:
 
 
 class TestBehaviorContract:
-    """The `tck-*` set story 4.5 has to implement in each SDK's agent."""
+    """The `tck-*` set each SDK's agent has to implement."""
 
     def test_required_behaviors(self, corpus):
         assert sorted(corpus.required_behaviors()) == [
@@ -172,7 +244,7 @@ class TestBehaviorContract:
 
     def test_how_many_tests_need_a_behavior(self, corpus):
         """A test needing no behavior exercises stock protocol handling; one
-        that does needs the SUT to play along, which is what 4.5 builds.
+        that does needs the SUT to recognise the `tck-*` prefix and play along.
 
         Note the corpus also writes `requires_behaviors: []` explicitly on
         some tests, so "declares the key" (80) is not "needs a behavior" (70).
@@ -181,17 +253,51 @@ class TestBehaviorContract:
         assert len([e for e in corpus if e.test.requires_behaviors is not None]) == 80
 
 
-class TestProvenanceCorrectionsHeld:
-    """The corrections recorded in PROVENANCE.md, asserted as properties.
+class TestVerbatimCorpusIsStillBroken:
+    """PROVENANCE §A — the corpus as upstream ships it, load-blocking defects.
 
-    If upstream fixes one of these and we refresh, the corresponding
-    assertion keeps passing — it describes the corrected state, not the act
-    of correcting. If a refresh *reintroduces* a defect, it fails here.
+    Each assertion here describes a defect that is **still open upstream**.
+    They are written to fail when it is fixed, because that is precisely when
+    the matching compat rule should be deleted.
     """
 
-    def test_no_push_notification_config_operation_names(self, corpus):
-        """PROVENANCE §A.1 — the spec's abstract-operation enum has no
-        `*_push_notification_config` member."""
+    def test_twenty_six_tests_fail_the_cddl(self, verbatim):
+        assert len(verbatim.errors) == 26
+        assert len(verbatim.tests) == 85
+
+    def test_the_whole_push_suite_is_unloadable(self, verbatim):
+        """The most expensive consequence: no push-notification coverage at
+        all without compat, which is why the rules exist rather than the 26
+        tests simply being skipped."""
+        loaded = {entry.id for entry in verbatim}
+        assert not [tid for tid in loaded if tid.startswith('PUSH-')]
+
+    def test_strict_load_of_the_verbatim_corpus_raises(self):
+        from test_suite.acts import ActsFileError
+
+        with pytest.raises(ActsFileError, match='expect_error.code'):
+            load_suite(MANIFEST, compat=False)
+
+
+class TestCompatRulesFireWherePinned:
+    """PROVENANCE §A — the rewrite table, asserted site by site.
+
+    A count that moves means the corpus moved. A count that reaches zero
+    means upstream fixed that defect and the rule is now dead code.
+    """
+
+    def test_site_counts_match_the_pinned_table(self, corpus):
+        assert site_counts(corpus.rewrites) == EXPECTED_SITES
+
+    def test_every_rewrite_names_a_real_test(self, corpus):
+        known = {entry.id for entry in corpus}
+        for rewrite in corpus.rewrites:
+            test_id = rewrite.where.split('.', 1)[0]
+            assert test_id in known, rewrite
+
+    def test_no_push_notification_config_operation_names_survive(self, corpus):
+        """The spec's abstract-operation enum has no `*_push_notification_config`
+        member, so a surviving one would be undispatchable."""
         used = {
             step.operation for entry in corpus for step in entry.test.steps
             if step.operation is not None
@@ -199,65 +305,87 @@ class TestProvenanceCorrectionsHeld:
         assert Operation.CREATE_PUSH_CONFIG in used
         assert all('push_notification' not in op.value for op in used)
 
-    def test_expect_error_uses_error_type_not_code(self, corpus):
-        """PROVENANCE §A.2 — `code` is not a field of `expect-error`; the
-        schema forbids extras, so this holds by construction. Asserted
-        anyway, because a refresh reintroducing `code` would fail the load
-        with a less obvious message."""
-        blocks = [
-            step.expect_error for entry in corpus for step in entry.test.steps
-            if step.expect_error is not None
-        ]
-        assert blocks
-        assert all(not hasattr(b, 'code') for b in blocks)
-
-    def test_version_not_supported_maps_to_32006(self, corpus):
-        """PROVENANCE §A.5 — the spec assigns -32006, not -32009."""
-        entry = corpus.by_id('VER-NEG-001')
-        assert entry is not None
-        assert entry.test.steps[0].expect.body['error']['code'] == -32006
-
-    def test_failure_assertions_use_expect_error(self, corpus):
-        """PROVENANCE §A.4/§A.6 — a failure is asserted with `expect_error`,
-        never by smuggling an `error` key into `expect`."""
-        for test_id, step_id, error_type in [
-            ('CORE-MULTI-006', 'turn2', ErrorType.INVALID_PARAMS),
-            ('STREAM-SUB-003', 'subscribe', ErrorType.UNSUPPORTED_OPERATION),
+    def test_failure_assertions_become_expect_error(self, corpus):
+        """`expect: {error: ...}` becomes a bare `expect_error` — "some A2A
+        error". Deliberately not a *named* error: picking which one would be
+        us writing the test rather than running it."""
+        for test_id, step_id in [
+            ('CORE-MULTI-006', 'turn2'),
+            ('STREAM-SUB-003', 'subscribe'),
         ]:
             entry = corpus.by_id(test_id)
             assert entry is not None, test_id
             step = next(s for s in entry.test.steps if s.id == step_id)
             assert step.expect is None
-            assert step.expect_error.literal_error_type() is error_type
+            assert step.expect_error is not None
+            assert step.expect_error.error_type is None
 
-    def test_response_assertions_live_under_expect_body(self, corpus):
-        """PROVENANCE §B — a response field directly under `expect` is never
-        evaluated. Forbidden by the schema; pinned here so the reason is
-        recorded next to the corpus it was found in."""
+    def test_response_assertions_move_under_expect_body(self, corpus):
         for test_id in ('STREAM-SUB-001', 'STREAM-SUB-003'):
             entry = corpus.by_id(test_id)
             first = entry.test.steps[0]
             assert first.expect is not None
             assert 'task' in first.expect.body
 
-    def test_inline_file_part_uses_raw(self, corpus):
-        """PROVENANCE §A.3 — the `Part` proto calls it `raw`, not `bytes`."""
+
+class TestKnownDefectsLeftInPlace:
+    """PROVENANCE §B — defects that parse, so they are simply left wrong.
+
+    Compensating for these in code would mean deciding what a conformance
+    test *meant*. They stay broken, visibly, until upstream fixes them.
+    """
+
+    def test_version_negotiation_uses_the_normative_jsonrpc_code(self, corpus):
+        """Not a defect, despite a review comment on #1882 calling it one.
+
+        `VER-NEG-001` asserts -32009, matching A2A §5.4 and the reference SDK.
+        ACTS §6.2 says -32006 and
+        [r3305157228](https://github.com/a2aproject/A2A/pull/1882#discussion_r3305157228)
+        asks the corpus to follow it — but -32006 is
+        `InvalidAgentResponseError`, and the ACTS table's own footnote defers
+        to A2A. Pinned so nobody "corrects" this into being wrong.
+        """
+        entry = corpus.by_id('VER-NEG-001')
+        assert entry.test.steps[0].expect.body['error']['code'] == -32009
+
+    def test_inline_file_part_uses_bytes_not_raw(self, corpus):
+        """The `Part` proto calls the base64 field `raw`."""
         entry = corpus.by_id('CLIENT-PARSE-006')
         payload = entry.test.steps[0].client_response.wire_payload
         files = list(_find_key(payload, 'file'))
         assert files, 'expected an inline file part in the golden payload'
-        assert any('raw' in f for f in files)
-        assert not any('bytes' in f for f in files)
+        assert any('bytes' in f for f in files)
+        assert not any('raw' in f for f in files)
+
+    def test_rest_problem_details_asserts_a_format_a2a_does_not_use(self, corpus):
+        """A2A §11.6 mandates the `google.rpc.Status` shape, not RFC 7807."""
+        step = corpus.by_id('REST-PD-001').test.steps[0]
+        assert set(step.expect.body) == {'type', 'title', 'status'}
+
+    def test_a_grpc_only_test_asserts_an_http_status(self, corpus):
+        """gRPC has no HTTP status, so both of these are silent no-ops."""
+        entry = corpus.by_id('GRPC-STREAM-002')
+        assert entry.test.transport == [TransportBinding.GRPC]
+        assert [s.expect.status for s in entry.test.steps] == [200, 200]
+
+    def test_runner_requirements_is_never_used(self, corpus):
+        """The spec field for "this test needs a runner capability" — and 23
+        tests that need one say so only in prose, tagged `runner-special`."""
+        assert all(e.test.runner_requirements is None for e in corpus)
+        special = [e for e in corpus if 'runner-special' in (e.test.tags or [])]
+        assert len(special) == 23
 
 
 class TestKnownDivergencesStillPresent:
-    """PROVENANCE §C — shapes left uncorrected on purpose.
+    """PROVENANCE §C — shapes that are legal, or arguably so.
 
     Pinned so that "we decided not to touch this" stays a decision on the
     record rather than something a later reader assumes was an oversight.
     """
 
-    def test_five_error_assertions_do_not_name_an_error_type(self, corpus):
+    def test_error_assertions_that_do_not_name_an_error_type(self, corpus):
+        """Five come from the corpus, two from the `expect.error` compat
+        rule; all seven mean "some A2A error, don't constrain which"."""
         unconstrained = [
             (entry.id, step.id)
             for entry in corpus for step in entry.test.steps
@@ -267,8 +395,10 @@ class TestKnownDivergencesStillPresent:
             ('CORE-CTX-001', 'send'),
             ('CORE-ERR-009', 'get-missing'),
             ('CORE-MULTI-003', 'mismatch'),
+            ('CORE-MULTI-006', 'turn2'),
             ('SEC-AUTH-003', 'get-missing-task'),
             ('SEC-AUTH-003', 'get-other-user-task'),
+            ('STREAM-SUB-003', 'subscribe'),
         ]
 
     def test_one_error_assertion_is_an_assertion_object(self, corpus):
