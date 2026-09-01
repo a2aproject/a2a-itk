@@ -30,6 +30,10 @@ def _extract_task_id_v03(data: dict) -> str | None:
     # Handles v0.3 task messages
     if data.get('kind') == 'task' and 'id' in data:
         return data['id']
+    if data.get('kind') in {'status-update', 'artifact-update'}:
+        task_id = data.get('taskId')
+        if isinstance(task_id, str) and task_id:
+            return task_id
     return None
 
 
