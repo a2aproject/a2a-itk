@@ -28,30 +28,52 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}dashboard/
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Node 24 strips TypeScript natively, so `npm test` needs no build step.
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies (locked)
+        run: npm ci
+
+      - name: Typecheck and test
+        run: npm test
+
       - name: Fetch live nightly compatibility metrics
         run: |
           echo "Syncing latest interop logs from SDK rolling releases..."
-          # Download Python Metrics directly into the dashboard directory
-          curl -L -f -o dashboard/itk_python.json https://github.com/a2aproject/a2a-python/releases/download/nightly-metrics/itk_python.json || echo "{}" > dashboard/itk_python.json
-          # Download Go Metrics directly into the dashboard directory
-          curl -L -f -o dashboard/itk_go.json https://github.com/a2aproject/a2a-go/releases/download/nightly-metrics/itk_go.json || echo "{}" > dashboard/itk_go.json
-          # Download Rust Metrics directly into the dashboard directory
-          curl -L -f -o dashboard/itk_rust.json https://github.com/a2aproject/a2a-rs/releases/download/nightly-metrics/itk_rust.json || echo "{}" > dashboard/itk_rust.json
-          # Download Java Metrics directly into the dashboard directory
-          curl -L -f -o dashboard/itk_java.json https://github.com/a2aproject/a2a-java/releases/download/nightly-metrics/itk_java.json || echo "{}" > dashboard/itk_java.json
-          # Download JavaScript Metrics directly into the dashboard directory
-          curl -L -f -o dashboard/itk_ts.json https://github.com/a2aproject/a2a-js/releases/download/nightly-metrics/itk_js.json || echo "{}" > dashboard/itk_ts.json
+          # Metrics land in public/ so Vite copies them verbatim into dist/.
+          base=https://github.com/a2aproject
+          fetch() {
+            curl -L -f -o "public/$1" "$base/$2/releases/download/nightly-metrics/$3" \
+              || echo "[]" > "public/$1"
+          }
+          fetch itk_python.json a2a-python itk_python.json
+          fetch itk_go.json     a2a-go     itk_go.json
+          fetch itk_rust.json   a2a-rs     itk_rust.json
+          fetch itk_java.json   a2a-java   itk_java.json
+          fetch itk_ts.json     a2a-js     itk_js.json
           echo "Metrics synchronized successfully!"
+
+      - name: Build static site
+        run: npm run build
 
       - name: Prepare static site structure
         run: |
-          # Create a clean temporary distribution directory serving only the dashboard folder
-          mkdir -p deploy_dist/dashboard
-          cp -r dashboard/* deploy_dist/dashboard/
+          # The site is published under <pages-url>/dashboard/, so nest the
+          # build output one level deep and upload only that.
+          mkdir -p ../deploy_dist/dashboard
+          cp -r dist/. ../deploy_dist/dashboard/
           echo "Site structure prepared under deploy_dist/"
 
       - name: Setup GitHub Pages

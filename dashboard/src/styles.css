@@ -1,0 +1,981 @@
+/* Palette and typography follow modelcontextprotocol.org: a monochrome
+   Tailwind-gray scale, near-black/near-white accents, Inter + JetBrains Mono. */
+
+:root {
+  /* Off-white ground with cards lifted to near-white, rather than a full page
+     of #fff. Same true-neutral scale as the dark theme, so neither side
+     carries the blue cast of Tailwind gray. */
+  --bg: #f4f4f4;
+  --bg-subtle: #ebebeb;
+  --bg-raised: #fcfcfc;
+  --border: #e0e0e0;
+  --border-strong: #c6c6c6;
+  --text: #171717;
+  --text-muted: #525252;
+  --text-faint: #6b6b6b;
+  --accent: #09090b;
+  --pass: #065f46;
+  --fail: #b91c1c;
+  --mixed: #92400e;
+  --focus: #2563eb;
+
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --radius: 10px;
+  --shell: 1400px;
+
+  color-scheme: light;
+}
+
+/* `auto` follows the OS; the toggle stamps an explicit data-theme. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"],
+:root:not([data-theme="light"]) {
+  /* True neutral rather than the blue-leaning Tailwind gray, and several
+     steps darker: near-black page, cards lifted just enough to read. */
+  --dark-bg: #0a0a0a;
+  --dark-bg-subtle: #161616;
+  --dark-bg-raised: #121212;
+  --dark-border: #262626;
+  --dark-border-strong: #3d3d3d;
+  --dark-text: #e5e5e5;
+  --dark-text-muted: #a3a3a3;
+  --dark-text-faint: #8a8a8a;
+  --dark-accent: #fafafa;
+  --dark-pass: #34d399;
+  --dark-fail: #f87171;
+  --dark-mixed: #fbbf24;
+  --dark-focus: #60a5fa;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: var(--dark-bg);
+    --bg-subtle: var(--dark-bg-subtle);
+    --bg-raised: var(--dark-bg-raised);
+    --border: var(--dark-border);
+    --border-strong: var(--dark-border-strong);
+    --text: var(--dark-text);
+    --text-muted: var(--dark-text-muted);
+    --text-faint: var(--dark-text-faint);
+    --accent: var(--dark-accent);
+    --pass: var(--dark-pass);
+    --fail: var(--dark-fail);
+    --mixed: var(--dark-mixed);
+    --focus: var(--dark-focus);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: var(--dark-bg);
+  --bg-subtle: var(--dark-bg-subtle);
+  --bg-raised: var(--dark-bg-raised);
+  --border: var(--dark-border);
+  --border-strong: var(--dark-border-strong);
+  --text: var(--dark-text);
+  --text-muted: var(--dark-text-muted);
+  --text-faint: var(--dark-text-faint);
+  --accent: var(--dark-accent);
+  --pass: var(--dark-pass);
+  --fail: var(--dark-fail);
+  --mixed: var(--dark-mixed);
+  --focus: var(--dark-focus);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* `scrollbar-color` inherits, so this one declaration themes the page scrollbar
+   and every inner scroller, and follows whichever palette is active. A
+   transparent track lets each scroller's own background show through.
+   The thumb is a control, so it takes a text-weight grey to clear the 3:1 of
+   WCAG 1.4.11 — `--border-strong` would only manage 1.7:1. */
+:root {
+  scrollbar-color: var(--text-faint) transparent;
+}
+
+.tabs:hover,
+.run-list:hover,
+.matrix-wrap:hover {
+  scrollbar-color: var(--text-muted) transparent;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+}
+
+.skip:focus {
+  left: 12px;
+  top: 12px;
+  z-index: 10;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+
+/* Header */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar-inner {
+  max-width: var(--shell);
+  margin: 0 auto;
+  padding: 0 24px;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  white-space: nowrap;
+}
+
+.brand:hover {
+  text-decoration: none;
+}
+
+.brand strong {
+  font-weight: 600;
+}
+
+.brand-mark {
+  width: 22px;
+  height: 22px;
+  flex: none;
+}
+
+.topbar-links {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.topbar-links a:hover {
+  color: var(--text);
+}
+
+/* Too narrow for brand and links side by side: drop the links to their own
+   row rather than letting them push the page into a horizontal scroll. */
+@media (max-width: 640px) {
+  .topbar-inner {
+    height: auto;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    padding: 10px 16px;
+    gap: 6px 16px;
+  }
+
+  .topbar-links {
+    order: 2;
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    font-size: 13px;
+  }
+}
+
+.theme-toggle {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+
+.theme-toggle:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+/* Page shell */
+
+/* React mounts into #root, so the sticky-footer column lives there, not on
+   body: main takes the slack so the footer stays put on short pages. */
+#root {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.page {
+  flex: 1 0 auto;
+  width: 100%;
+  max-width: var(--shell);
+  margin: 0 auto;
+  padding: 48px 24px 72px;
+}
+
+.intro {
+  max-width: 68ch;
+  margin-bottom: 32px;
+}
+
+.intro h1 {
+  font-size: clamp(28px, 4vw, 38px);
+  line-height: 1.2;
+}
+
+.intro p {
+  margin: 12px 0 0;
+  color: var(--text-muted);
+}
+
+.intro a {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* SDK tabs — Mintlify-style underlined nav */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  margin-bottom: 28px;
+  scrollbar-width: thin;
+  /* An inset shadow, not border-bottom: the tabs' own 2px underline can then
+     sit flush at the bottom without a negative margin. That margin used to
+     overflow the nav by 1px, and `overflow-x: auto` turns `overflow-y` into
+     `auto` too, which showed a stray vertical scrollbar. */
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+
+.tab {
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.tab-active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+/* Layout */
+
+.layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.detail {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
+
+/* Same grid blowout as `.pair`: without this the nowrap matrices widen the
+   summary card past the column instead of scrolling inside `.matrix-wrap`. */
+.detail > * {
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.card-head h2 {
+  font-size: 15px;
+  letter-spacing: 0;
+}
+
+.section-heading {
+  font-size: 15px;
+  letter-spacing: 0;
+  margin-bottom: 12px;
+}
+
+.pill {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 9px;
+}
+
+.status {
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 999px;
+  padding: 2px 10px;
+  border: 1px solid transparent;
+}
+
+.status-pass {
+  color: var(--pass);
+  background: color-mix(in srgb, var(--pass) 14%, transparent);
+  border-color: color-mix(in srgb, var(--pass) 25%, transparent);
+}
+
+.status-fail {
+  color: var(--fail);
+  background: color-mix(in srgb, var(--fail) 14%, transparent);
+  border-color: color-mix(in srgb, var(--fail) 25%, transparent);
+}
+
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin: 0;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+/* Run history */
+
+.history {
+  position: sticky;
+  top: 84px;
+  max-height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+  padding-right: 12px;
+  /* The panel is height-capped and `.run-list` scrolls inside it. Without this
+     the capped-away runs still count towards the document's scrollable area,
+     which leaves dead space below the footer. */
+  overflow: hidden;
+}
+
+.run-list {
+  min-height: 0;
+  /* A scroll container genuinely paints nothing outside its box, but without
+     this the clipped-away runs still count towards the document's scrollable
+     area — vertically when stacked, and horizontally once the mobile strip
+     makes the list 50 chips wide. */
+  contain: paint;
+}
+
+.run-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 8px 0 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.run-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.run-item:hover {
+  background: var(--bg-subtle);
+  color: var(--text);
+}
+
+.run-active {
+  background: var(--bg-subtle);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+}
+
+.dot-pass {
+  background: var(--pass);
+}
+
+.dot-fail {
+  background: var(--fail);
+}
+
+.run-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.run-meta time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-meta .mono {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+/* Run facts */
+
+.run-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 32px;
+  margin: 0 0 20px;
+  padding: 0 0 18px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.run-facts dt {
+  color: var(--text-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.run-facts dd {
+  margin: 2px 0 0;
+}
+
+.run-facts a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Summary split: diagram beside matrix */
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(240px, 380px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: center;
+}
+
+/* Matches the .layout breakpoint: once the sidebar stacks, the detail column
+   is too narrow to also split the diagram away from the matrix. */
+@media (max-width: 900px) {
+  .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Topology diagram */
+
+.topology {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.edge {
+  stroke: var(--border-strong);
+  stroke-width: 1.5;
+}
+
+.edge-bi {
+  stroke: var(--text-faint);
+}
+
+.arrow {
+  fill: var(--text-faint);
+}
+
+.node text {
+  text-anchor: middle;
+  dominant-baseline: central;
+  font-family: var(--sans);
+  font-weight: 600;
+  fill: var(--text);
+}
+
+.node rect {
+  fill: var(--bg-subtle);
+  stroke: var(--border-strong);
+  stroke-width: 1.5;
+}
+
+.node-root rect {
+  stroke-width: 2;
+}
+
+/* Language accents stay muted so the page reads monochrome first. */
+.node-current rect {
+  fill: color-mix(in srgb, #2563eb 12%, var(--bg));
+  stroke: #2563eb;
+}
+.node-python rect {
+  fill: color-mix(in srgb, #ca8a04 12%, var(--bg));
+  stroke: #ca8a04;
+}
+.node-go rect {
+  fill: color-mix(in srgb, #0891b2 12%, var(--bg));
+  stroke: #0891b2;
+}
+.node-rust rect {
+  fill: color-mix(in srgb, #ea580c 12%, var(--bg));
+  stroke: #ea580c;
+}
+.node-java rect {
+  fill: color-mix(in srgb, #dc2626 12%, var(--bg));
+  stroke: #dc2626;
+}
+.node-dotnet rect {
+  fill: color-mix(in srgb, #9333ea 12%, var(--bg));
+  stroke: #9333ea;
+}
+.node-ts rect {
+  fill: color-mix(in srgb, #3178c6 12%, var(--bg));
+  stroke: #3178c6;
+}
+
+/* Matrix */
+
+.matrix-wrap {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.matrix {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+
+.matrix th,
+.matrix td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.matrix thead th {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  border-bottom-color: var(--border-strong);
+}
+
+.matrix tbody th {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.matrix tbody tr:last-child th,
+.matrix tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Status reads as a discrete pill on an unfilled row, so neighbouring results
+   stay separate instead of fusing into one block of colour. */
+.cell {
+  text-align: center;
+  width: 1%;
+}
+
+.chip {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.chip-pass {
+  color: var(--pass);
+  background: color-mix(in srgb, var(--pass) 16%, transparent);
+}
+
+.chip-fail {
+  color: var(--fail);
+  background: color-mix(in srgb, var(--fail) 16%, transparent);
+}
+
+.chip-mixed {
+  color: var(--mixed);
+  background: color-mix(in srgb, var(--mixed) 16%, transparent);
+}
+
+.cell-empty {
+  color: var(--text-muted);
+}
+
+/* Pairwise cards */
+
+.pair-grid {
+  display: grid;
+  /* `min()` keeps the track from exceeding the viewport under 340px. */
+  grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
+  gap: 16px;
+}
+
+/* A grid item's default `min-width: auto` is min-content, so without this the
+   nowrap matrix widens the card past its track instead of scrolling inside it. */
+.pair {
+  min-width: 0;
+}
+
+.pair h3 {
+  font-size: 13px;
+  color: var(--text-muted);
+  letter-spacing: 0;
+  margin-bottom: 4px;
+}
+
+.pair .topology {
+  max-height: 90px;
+  margin: 4px 0 8px;
+}
+
+/* Failures */
+
+.failures {
+  margin-top: 20px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+  font-size: 13px;
+}
+
+.failures summary {
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--fail);
+}
+
+.failures ul {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.failures strong {
+  font-weight: 500;
+}
+
+/* Legend */
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.legend > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.legend dt,
+.legend dd {
+  margin: 0;
+}
+
+/* Line the bare em dash up with the width of a real chip. */
+.legend .cell-empty {
+  display: inline-block;
+  min-width: 42px;
+  text-align: center;
+}
+
+/* Placed after the .history, .matrix and .chip base rules on purpose: a media
+   query adds no specificity, so an earlier block would lose to them. */
+@media (max-width: 900px) {
+  /* Stacked, the run history would put 50 rows between the tabs and the first
+     result. Turn it into a horizontal strip instead: same list, ~90px tall,
+     so the summary lands in the opening screenful. */
+  .history {
+    position: static;
+    max-height: none;
+  }
+
+  .run-list {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    padding-bottom: 6px;
+  }
+
+  .run-list > li {
+    flex: none;
+  }
+
+  .run-item {
+    width: auto;
+    border-color: var(--border);
+  }
+
+  /* Stacked, the star would otherwise scale to the full column width and eat
+     a whole screen before the first result. */
+  .split .topology {
+    max-height: 280px;
+  }
+
+  /* Narrow columns: let the behaviour names and protocol headers wrap so the
+     table fits instead of side-scrolling. */
+  .matrix th,
+  .matrix td {
+    padding: 8px 6px;
+  }
+
+  .matrix tbody th {
+    white-space: normal;
+    min-width: 6.5rem;
+  }
+
+  .matrix thead th {
+    white-space: normal;
+  }
+
+  .chip {
+    padding: 2px 8px;
+  }
+}
+
+/* Phone tuning: tighter gutters, and the matrix fits without side-scrolling. */
+@media (max-width: 640px) {
+  .page {
+    padding: 28px 16px 48px;
+  }
+
+  .card {
+    padding: 16px;
+  }
+
+  .intro {
+    margin-bottom: 24px;
+  }
+
+  /* The tab strip scrolls; fade its trailing edge so that reads as scrollable
+     rather than as a list that simply ends at Java. */
+  .tabs {
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+
+  .run-facts {
+    gap: 8px 20px;
+  }
+}
+
+/* Not found */
+
+.not-found h2 {
+  font-size: 20px;
+}
+
+.not-found p {
+  margin: 8px 0 16px;
+}
+
+.not-found code {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.not-found-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.not-found-links a {
+  display: block;
+  font-size: 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 14px;
+}
+
+.not-found-links a:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-subtle);
+  text-decoration: none;
+}
+
+/* Footer */
+
+.footer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+
+.footer-inner {
+  max-width: var(--shell);
+  margin: 0 auto;
+  padding: 28px 24px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 24px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.footer p {
+  margin: 0;
+}
+
+.footer a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Static SEO/no-JS fallback, replaced once React mounts. */
+.no-js-fallback {
+  max-width: var(--shell);
+  margin: 0 auto;
+  padding: 48px 24px;
+}
