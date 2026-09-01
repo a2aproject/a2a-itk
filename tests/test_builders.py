@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from test_suite.current import rust_target_dir
+from test_suite.current import maven_repo_dir, rust_target_dir
 from test_suite.launcher import builders
 from test_suite.launcher.builders import Language, detect_language
 from test_suite.launcher.errors import InfraFailure, Stage
@@ -139,6 +139,7 @@ class TestJavaBuilder:
         assert rec.calls[0][0] == [
             'mvn', '-Pitk', '-pl', 'itk', '-am', 'install',
             '-DskipTests', '-Dmaven.javadoc.skip=true',
+            f'-Dmaven.repo.local={maven_repo_dir(tmp_path)}',
         ]
         # Maven must run from the *parent* — itk is a submodule of the SDK repo.
         assert rec.calls[0][1] == tmp_path.parent

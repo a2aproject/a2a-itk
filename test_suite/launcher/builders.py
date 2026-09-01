@@ -20,7 +20,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from test_suite.current import rust_target_dir
+from test_suite.current import maven_repo_dir, rust_target_dir
 from test_suite.launcher import codegen, config
 from test_suite.launcher.errors import InfraFailure, Stage
 
@@ -198,6 +198,7 @@ def _build_java(agent_dir: Path, timeout: int) -> None:
         [
             'mvn', '-Pitk', '-pl', 'itk', '-am', 'install',
             '-DskipTests', '-Dmaven.javadoc.skip=true',
+            f'-Dmaven.repo.local={maven_repo_dir(agent_dir)}',
         ],  # noqa: S607
         cwd=str(parent),
         check=True,

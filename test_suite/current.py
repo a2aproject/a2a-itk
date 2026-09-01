@@ -164,9 +164,11 @@ def _spawn_java(
     # The java itk agent is a Maven submodule; the parent pom needs -Pitk to
     # include it. Synchronously install SDK sibling deps into the local repo,
     # then exec the mock main class from inside the module directory.
+    local_repo = maven_repo_dir(agent_dir)
     compile_args = [  # noqa: S607
         'mvn', '-Pitk', '-pl', 'itk', '-am', 'install',
         '-DskipTests', '-Dmaven.javadoc.skip=true',
+        f'-Dmaven.repo.local={local_repo}',
     ]
     subprocess.run(  # noqa: S603
         compile_args,
@@ -179,8 +181,30 @@ def _spawn_java(
         'mvn', 'exec:java',
         '-Dexec.mainClass=org.a2aproject.sdk.itk.Main',
         f'-Dexec.args=--httpPort {http_port} --grpcPort {grpc_port}',
+        f'-Dmaven.repo.local={local_repo}',
     ]
     return popen(args, agent_dir)
+
+
+def maven_repo_dir(agent_dir: Path) -> Path:
+    """Writable Maven local repo isolated per resolved ``agent_dir``.
+
+    ``current`` and ``java_v10`` both install the same
+    ``1.3.1.Final-SNAPSHOT`` coordinates. Sharing ``~/.m2`` lets the last
+    ``mvn install`` win, so one JVM can exec the other's jars.
+    """
+    root = Path(
+        os.environ.get(
+            'ITK_MAVEN_CURRENT_REPO_DIR',
+            str(Path(gettempdir()) / 'itk-maven-repos'),
+        )
+    )
+    digest = hashlib.sha1(  # noqa: S324
+        str(agent_dir.resolve()).encode('utf-8')
+    ).hexdigest()
+    repo = root / digest
+    repo.mkdir(parents=True, exist_ok=True)
+    return repo
 
 
 def rust_target_dir(agent_dir: Path) -> Path:
