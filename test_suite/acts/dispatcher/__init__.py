@@ -22,6 +22,7 @@ from typing import Any, Final
 from test_suite.acts.dispatcher.base import (
     DispatchError,
     Dispatcher,
+    MalformedResponse,
     StreamEvent,
     UnsupportedByBinding,
     WireError,
@@ -79,6 +80,7 @@ def for_binding(
 __all__ = [
     'DispatchError',
     'Dispatcher',
+    'MalformedResponse',
     'GrpcDispatcher',
     'HttpDispatcher',
     'JsonRpcDispatcher',

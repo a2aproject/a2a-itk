@@ -202,6 +202,32 @@ def _compare(op: Callable[[Any, Any], bool]) -> Callable[[Any, Any], bool]:
     return holds
 
 
+def _one_of(argument: Any, actual: Any) -> bool:
+    """Membership, widened so that a *mapping* member is an assertion.
+
+    §5.1 writes `one_of: [+ any]` and files it under enums, so strictly it is
+    exact-value membership — and for scalars that is exactly what it does.
+
+    A mapping member is treated as an assertion instead, because exact-matching
+    a whole response object against a literal is never what an author means and
+    can only ever fail. Two independent sources use it that way: the corpus's
+    `STREAM-SSE-004` (`one_of: [{task: ...}, {status_update: ...}]`, asking
+    which oneof arm arrived) and the spec's **own §7 example**, which writes
+    `final_event: {one_of: [{task: ...}, {status_update: ...}]}`. Reading those
+    strictly would make both unsatisfiable by any implementation.
+
+    Same discipline as `items`: the grammar is under-specified, the intent is
+    unambiguous, and it is recorded upstream rather than guessed at again here.
+    """
+    for option in argument:
+        if isinstance(option, Mapping):
+            if evaluate(option, actual).ok:
+                return True
+        elif _same(actual, option):
+            return True
+    return False
+
+
 def _matches(argument: Any, actual: Any) -> bool:
     # §5.1 says ECMA-262. Python's `re` is close but not identical (named
     # groups, lookbehind width, `\d` under Unicode); the corpus stays well
@@ -268,7 +294,7 @@ LEAF_OPERATORS: Final[Mapping[str, _Leaf]] = {
     ),
     'one_of': _Leaf(
         accepts=_is_array,
-        holds=lambda a, v: any(_same(v, option) for option in a),
+        holds=lambda a, v: _one_of(a, v),
         describe='be one of',
     ),
 }

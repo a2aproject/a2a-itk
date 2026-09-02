@@ -7,7 +7,8 @@ is the ITK-side implementation: `schema.py` models the format, `compat.py`
 reconciles the shipped corpus with it, `loader.py` turns a manifest into a
 flat, ordered run plan, `wire_map.py` and `dispatcher/` bind an abstract
 operation to a transport, `variables.py` and `assertions.py` decide what a
-response means, and `runner.py` sequences the whole thing into results.
+response means, `streaming.py` does the same for a sequence of events, and
+`runner.py` sequences the whole thing into results.
 
 It sits *beside* `test_suite.scenarios`, not inside it, because the two suites
 answer different questions and share nothing at run time: a traversal walks an
@@ -54,6 +55,7 @@ from test_suite.acts.loader import (
     render_validation_error,
 )
 from test_suite.acts.runner import (
+    EXECUTABLE_KINDS,
     FailureDetail,
     Outcome,
     RunError,
@@ -62,6 +64,12 @@ from test_suite.acts.runner import (
     TestResult,
     is_conformant,
     summarize,
+)
+from test_suite.acts.streaming import (
+    StreamedEvent,
+    check_ordering,
+    evaluate_stream,
+    normalize,
 )
 from test_suite.acts.schema import (
     ACTS_VERSION,
@@ -124,6 +132,7 @@ __all__ = [
     'Backoff',
     'binding_for_error',
     'binding_for_operation',
+    'check_ordering',
     'ClientResponseBlock',
     'CollectionMatch',
     'error_for_jsonrpc_code',
@@ -138,9 +147,11 @@ __all__ = [
     'evaluate_error',
     'evaluate_named',
     'evaluate_status',
+    'evaluate_stream',
     'evaluate_until',
     'EventAssertion',
     'EventMatch',
+    'EXECUTABLE_KINDS',
     'ExpectBlock',
     'EXPECTED_SITES',
     'ExpectError',
@@ -161,6 +172,7 @@ __all__ = [
     'Metadata',
     'MISSING',
     'NamedAssertion',
+    'normalize',
     'normalize_document',
     'Operation',
     'OperationBinding',
@@ -187,6 +199,7 @@ __all__ = [
     'Step',
     'StepKind',
     'StepResult',
+    'StreamedEvent',
     'Suite',
     'summarize',
     'Test',
