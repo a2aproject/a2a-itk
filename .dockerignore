@@ -36,4 +36,6 @@ Dockerfile
 #   protos/    — codegen.py symlinks the repo root into fetched rust and java
 #                agent dirs so build.rs / protobuf-maven-plugin can read
 #                protos/instruction.proto.
-#   scenarios/ — the default set for `uv run run_tests.py` inside the image.
+#   scenarios/ — the default set for `uv run run_tests.py` inside the image,
+#                and scenarios/acts/, the conformance corpus the ACTS runner
+#                loads.
