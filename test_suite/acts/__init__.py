@@ -1,11 +1,13 @@
-"""ACTS conformance suite: schema, compat rules and loader.
+"""ACTS conformance suite: schema, loader, wire mapping and assertions.
 
 ACTS ([A2A#1882](https://github.com/a2aproject/A2A/pull/1882)) declares
 protocol-conformance tests as YAML: a sequence of abstract, transport-agnostic
 operations against one SUT, plus assertions on what comes back. This package
 is the ITK-side implementation: `schema.py` models the format, `compat.py`
-reconciles the shipped corpus with it, and `loader.py` turns a manifest into a
-flat, ordered run plan.
+reconciles the shipped corpus with it, `loader.py` turns a manifest into a
+flat, ordered run plan, `wire_map.py` and `dispatcher/` bind an abstract
+operation to a transport, and `variables.py` and `assertions.py` decide what a
+response means.
 
 It sits *beside* `test_suite.scenarios`, not inside it, because the two suites
 answer different questions and share nothing at run time: a traversal walks an
@@ -21,6 +23,19 @@ editing the YAML, so the mirror stays refreshable. `compat=False` on any loader
 entry point shows the corpus exactly as shipped.
 """
 
+from test_suite.acts.assertions import (
+    OPERATORS,
+    AssertionResult,
+    Failure,
+    UntilError,
+    evaluate,
+    evaluate_body,
+    evaluate_collection,
+    evaluate_error,
+    evaluate_named,
+    evaluate_status,
+    evaluate_until,
+)
 from test_suite.acts.compat import (
     EXPECTED_SITES,
     PUSH_CONFIG_OPERATIONS,
@@ -69,6 +84,15 @@ from test_suite.acts.schema import (
     TransportBinding,
     is_acts_document,
 )
+from test_suite.acts.variables import (
+    MISSING,
+    PathError,
+    Scope,
+    UnresolvedVariable,
+    read_path,
+    read_path_all,
+    references,
+)
 from test_suite.acts.wire_map import (
     ERRORS,
     OPERATIONS,
@@ -86,52 +110,70 @@ __all__ = [
     'ACTS_VERSION',
     'ActsDocument',
     'ActsFileError',
+    'AssertionResult',
     'Backoff',
+    'binding_for_error',
+    'binding_for_operation',
     'ClientResponseBlock',
     'CollectionMatch',
-    'ERRORS',
+    'error_for_jsonrpc_code',
+    'error_for_reason',
     'ERROR_TYPE_NAMES',
-    'EXPECTED_SITES',
     'ErrorBinding',
+    'ERRORS',
     'ErrorType',
+    'evaluate',
+    'evaluate_body',
+    'evaluate_collection',
+    'evaluate_error',
+    'evaluate_named',
+    'evaluate_status',
+    'evaluate_until',
     'EventAssertion',
     'EventMatch',
     'ExpectBlock',
+    'EXPECTED_SITES',
     'ExpectError',
     'ExpectStream',
+    'Failure',
+    'http_status_for_grpc',
     'HttpMethod',
     'InlineAssertion',
+    'is_acts_document',
     'Level',
-    'LoadError',
+    'load_document',
+    'load_suite',
     'LoadedSuite',
     'LoadedTest',
+    'LoadError',
     'Metadata',
+    'MISSING',
     'NamedAssertion',
-    'OPERATIONS',
+    'normalize_document',
     'Operation',
     'OperationBinding',
+    'OPERATIONS',
+    'OPERATORS',
     'Ordering',
-    'PUSH_CONFIG_OPERATIONS',
+    'parse_document',
+    'PathError',
     'Preconditions',
+    'PUSH_CONFIG_OPERATIONS',
     'RawBlock',
+    'read_path',
+    'read_path_all',
+    'references',
+    'render_validation_error',
     'Repeat',
     'Rewrite',
     'RunnerRequirement',
+    'Scope',
+    'site_counts',
     'Step',
     'StepKind',
     'Suite',
     'Test',
     'TransportBinding',
-    'binding_for_error',
-    'binding_for_operation',
-    'error_for_jsonrpc_code',
-    'error_for_reason',
-    'http_status_for_grpc',
-    'is_acts_document',
-    'load_document',
-    'load_suite',
-    'normalize_document',
-    'parse_document',
-    'render_validation_error',
-    'site_counts',
+    'UnresolvedVariable',
+    'UntilError',
 ]
