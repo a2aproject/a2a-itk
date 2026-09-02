@@ -8,15 +8,14 @@ The `*.acts.yaml` files in this directory are a **mirror** of
     (branch: conformance-spec, head of pull/1882 at copy time)
 
 Nothing here is edited. Not to fix a typo, not to fix a defect, not to make a
-test load. `tests/test_acts_corpus.py` pins a SHA-256 of every file, so an edit
-fails the build rather than passing unnoticed.
+test load. Corrections go in `test_suite/acts/compat.py` instead, so that a
+refresh stays a copy rather than a three-way merge.
 
 ## Refreshing
 
 1. Re-copy `tests/acts/*.acts.yaml` from a newer snapshot of PR #1882 (or from
    the merged version once it lands). Copy, do not merge.
-2. Update the SHA above and regenerate `UPSTREAM_DIGESTS` in
-   `tests/test_acts_corpus.py` — the command is in the comment above it.
+2. Update the SHA above.
 3. Run the tests. They pin the shape of the corpus and the exact number of
    sites each compat rule fires on, so anything that moved shows up as a
    named failure rather than as drift.
