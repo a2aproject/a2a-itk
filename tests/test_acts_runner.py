@@ -24,7 +24,9 @@ from test_suite.acts import load_suite
 from test_suite.acts.dispatcher.base import (
     DispatchError,
     Dispatcher,
+    MalformedResponse,
     StreamEvent,
+    UnsupportedByBinding,
     WireError,
     WireResponse,
 )
@@ -75,13 +77,21 @@ class FakeDispatcher(Dispatcher):
         *,
         binding: TransportBinding = TransportBinding.JSONRPC,
         raises: Exception | None = None,
+        events: list[Any] | None = None,
+        event_status: int | None = 200,
+        stall: float | None = None,
     ) -> None:
         self.binding = binding
         if replies is None:
             replies = WireResponse(status=200, payload={})
         self._replies = replies if isinstance(replies, list) else [replies]
         self._raises = raises
+        self._events = events or []
+        self._event_status = event_status
+        self._stall = stall
         self.calls: list[tuple[Operation, Mapping[str, Any], Mapping[str, str]]] = []
+        self.raw_calls: list[tuple[RawBlock, Mapping[str, str]]] = []
+        self.streamed: list[str] = []
 
     async def dispatch(self, operation, params=None, headers=None) -> WireResponse:
         self.calls.append((operation, dict(params or {}), dict(headers or {})))
@@ -90,11 +100,33 @@ class FakeDispatcher(Dispatcher):
         index = min(len(self.calls) - 1, len(self._replies) - 1)
         return self._replies[index]
 
-    async def dispatch_raw(self, raw, headers=None) -> WireResponse:  # pragma: no cover
-        raise AssertionError('the non-raw path must not dispatch raw requests')
+    async def dispatch_raw(self, raw, headers=None) -> WireResponse:
+        self.raw_calls.append((raw, dict(headers or {})))
+        if self._raises is not None:
+            raise self._raises
+        index = min(len(self.raw_calls) - 1, len(self._replies) - 1)
+        return self._replies[index]
 
-    def stream(self, operation, params=None, headers=None) -> AsyncIterator[StreamEvent]:
-        raise AssertionError('the non-streaming path must not stream')
+    async def stream(self, operation, params=None, headers=None):
+        self.calls.append((operation, dict(params or {}), dict(headers or {})))
+        self.streamed.append('operation')
+        async for event in self._emit():
+            yield event
+
+    async def stream_raw(self, raw, headers=None):
+        self.raw_calls.append((raw, dict(headers or {})))
+        self.streamed.append('raw')
+        async for event in self._emit():
+            yield event
+
+    async def _emit(self) -> AsyncIterator[StreamEvent]:
+        if self._raises is not None:
+            raise self._raises
+        for index, data in enumerate(self._events):
+            yield StreamEvent(index=index, data=data, status=self._event_status)
+        if self._stall is not None:
+            # A stream the SUT never closes, for the timeout_ms path.
+            await asyncio.sleep(self._stall)
 
 
 def ok(payload: Any = None, status: int = 200) -> WireResponse:
@@ -112,6 +144,11 @@ def failed(
         status=status,
         error=WireError(message=message, error_type=error_type, **kwargs),
     )
+
+
+def status_update(state: str, **extra: Any) -> dict:
+    """A `StreamResponse` carrying a status update, as the wire spells it."""
+    return {'statusUpdate': {'taskId': 'T1', 'status': {'state': state}, **extra}}
 
 
 def a_test(*steps: Step, **kwargs: Any) -> Test:
@@ -483,27 +520,19 @@ class TestSkipping:
         )
         assert run(runner, test).result is Outcome.PASS
 
-    def test_a_raw_step_is_deferred(self):
+    def test_a_client_response_step_is_deferred(self):
+        """§10 needs a client-side entry point on the agent; no story owns it."""
         dispatcher = FakeDispatcher(ok())
         test = a_test(
-            Step(id='r', raw=RawBlock(method='GET', path='/tasks/x')),
-            transport=[TransportBinding.JSONRPC],
+            Step(
+                id='c',
+                client_response={'operation': 'get_task', 'wire_payload': {}},
+                expect_parsed={'id': {'type': 'string'}},
+            )
         )
         result = run(runner_for(dispatcher), test)
         assert result.result is Outcome.SKIP
-        assert 'raw' in result.skip_reason
-
-    def test_a_streaming_step_is_deferred(self):
-        dispatcher = FakeDispatcher(ok())
-        step = Step(
-            id='s',
-            operation=Operation.SEND_STREAMING_MESSAGE,
-            params={'message': {'role': 'ROLE_USER'}},
-            expect_stream={'min_count': 1},
-        )
-        result = run(runner_for(dispatcher), a_test(step))
-        assert result.result is Outcome.SKIP
-        assert 'stream' in result.skip_reason
+        assert 'client' in result.skip_reason
 
     def test_a_skipped_test_dispatches_nothing(self):
         dispatcher = FakeDispatcher(ok(), binding=TransportBinding.GRPC)
@@ -680,6 +709,213 @@ class TestResultModel:
         )
         assert is_conformant([skipped])
 
+class TestRawSteps:
+    """§4.4 — a hand-built request, sent exactly as written."""
+
+    def a_raw_test(self, *steps, binding=TransportBinding.JSONRPC):
+        """A test of only raw steps MUST declare its binding (§4.4), and the
+        schema enforces it — a raw request hard-codes one wire format."""
+        return a_test(*steps, transport=[binding])
+
+    def raw_step(self, step_id='r', **kwargs):
+        block = kwargs.pop('raw', None) or RawBlock(
+            method='POST', path='/', headers={'Content-Type': 'application/json'},
+            body={'jsonrpc': '2.0', 'id': 1, 'method': 'GetTask'},
+        )
+        return Step(id=step_id, raw=block, **kwargs)
+
+    def test_it_goes_to_dispatch_raw_not_dispatch(self):
+        dispatcher = FakeDispatcher(ok({'jsonrpc': '2.0', 'result': {}}))
+        run(runner_for(dispatcher), self.a_raw_test(self.raw_step()))
+        assert len(dispatcher.raw_calls) == 1
+        assert dispatcher.calls == []
+
+    def test_the_runner_adds_no_headers_of_its_own(self):
+        """`VER-NEG-002` omits `A2A-Version` deliberately; §12.4 excepts it,
+        and a runner that helpfully added one would repair the test away."""
+        dispatcher = FakeDispatcher(ok({}))
+        run(runner_for(dispatcher), self.a_raw_test(self.raw_step()))
+        assert dispatcher.raw_calls[0][1] == {}
+
+    def test_variables_in_raw_headers_are_substituted(self):
+        """`SEC-AUTH-002`'s `Authorization: Bearer {{insufficientAuthToken}}`."""
+        dispatcher = FakeDispatcher(ok({}))
+        runner = runner_for(dispatcher, variables={'tok': 'shh'})
+        block = RawBlock(
+            method='POST', path='/', headers={'Authorization': 'Bearer {{tok}}'}
+        )
+        run(runner, self.a_raw_test(self.raw_step(raw=block)))
+        assert dispatcher.raw_calls[0][0].headers['Authorization'] == 'Bearer shh'
+
+    def test_variables_in_the_raw_path_are_substituted(self):
+        dispatcher = FakeDispatcher(ok({}))
+        runner = runner_for(dispatcher, variables={'id': 'T9'})
+        block = RawBlock(method='GET', path='/tasks/{{id}}')
+        run(runner, self.a_raw_test(self.raw_step(raw=block)))
+        assert dispatcher.raw_calls[0][0].path == '/tasks/T9'
+
+    def test_expect_body_asserts_on_the_whole_envelope(self):
+        """`JSONRPC-ERR-001` asserts `body.error.code`, not an unwrapped result."""
+        envelope = {'jsonrpc': '2.0', 'id': 1, 'error': {'code': -32601, 'message': 'no'}}
+        dispatcher = FakeDispatcher(ok(envelope))
+        step = self.raw_step(expect={'status': 200, 'body': {'error': {'code': -32601}}})
+        assert run(runner_for(dispatcher), self.a_raw_test(step)).result is Outcome.PASS
+
+    def test_a_wrong_envelope_fails(self):
+        envelope = {'jsonrpc': '2.0', 'id': 1, 'error': {'code': -32000}}
+        dispatcher = FakeDispatcher(ok(envelope))
+        step = self.raw_step(expect={'body': {'error': {'code': -32601}}})
+        result = run(runner_for(dispatcher), self.a_raw_test(step))
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'body.error.code'
+
+    def test_capture_works_from_a_raw_response(self):
+        dispatcher = FakeDispatcher(ok({'result': {'task': {'id': 'T5'}}}))
+        step = self.raw_step(capture={'taskId': 'result.task.id'})
+        assert run(runner_for(dispatcher), self.a_raw_test(step)).result is Outcome.PASS
+
+    def test_a_raw_step_on_grpc_errors_rather_than_failing(self):
+        """It means the test should have declared a transport, not that the
+        agent is wrong."""
+        dispatcher = FakeDispatcher(
+            ok(), binding=TransportBinding.GRPC,
+            raises=UnsupportedByBinding('gRPC has no raw-request form'),
+        )
+        test = self.a_raw_test(self.raw_step(), binding=TransportBinding.GRPC)
+        assert run(runner_for(dispatcher), test).result is Outcome.ERROR
+
+
+class TestStreamingSteps:
+    """§7 wiring — the evaluator itself is covered in test_acts_streaming."""
+
+    def stream_step(self, step_id='s', **kwargs):
+        return Step(
+            id=step_id,
+            operation=Operation.SEND_STREAMING_MESSAGE,
+            params={'message': {'role': 'ROLE_USER'}},
+            **kwargs,
+        )
+
+    def test_a_satisfied_stream_passes(self):
+        dispatcher = FakeDispatcher(events=[
+            status_update('TASK_STATE_WORKING'),
+            status_update('TASK_STATE_COMPLETED'),
+        ])
+        step = self.stream_step(expect_stream={
+            'min_count': 2,
+            'final_event': {'status': {'state': 'TASK_STATE_COMPLETED'}},
+        })
+        assert run(runner_for(dispatcher), a_test(step)).result is Outcome.PASS
+
+    def test_an_unsatisfied_stream_fails(self):
+        dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_WORKING')])
+        step = self.stream_step(expect_stream={'min_count': 3})
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.FAIL
+        assert 'at least 3' in result.failure.message
+
+    def test_it_streams_rather_than_dispatching(self):
+        dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_COMPLETED')])
+        run(runner_for(dispatcher), a_test(self.stream_step(expect_stream={'min_count': 1})))
+        assert dispatcher.streamed == ['operation']
+
+    def test_the_version_header_still_goes_on_a_streaming_operation(self):
+        dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_COMPLETED')])
+        run(runner_for(dispatcher), a_test(self.stream_step(expect_stream={'min_count': 1})))
+        assert dispatcher.calls[0][2][VERSION_HEADER] == '1.0'
+
+    def test_a_raw_streaming_step_uses_stream_raw(self):
+        """`JSONRPC-SSE-001` — raw plus `expect_stream`."""
+        dispatcher = FakeDispatcher(events=[{'jsonrpc': '2.0'}, {'jsonrpc': '2.0'}])
+        step = Step(
+            id='stream-raw',
+            raw=RawBlock(method='POST', path='/', body={'jsonrpc': '2.0'}),
+            expect_stream={'min_count': 2, 'each_event': {'jsonrpc': '2.0'}},
+        )
+        test = a_test(step, transport=[TransportBinding.JSONRPC])
+        result = run(runner_for(dispatcher), test)
+        assert result.result is Outcome.PASS
+        assert dispatcher.streamed == ['raw']
+
+    def test_expect_status_uses_the_observed_stream_status(self):
+        dispatcher = FakeDispatcher(
+            events=[status_update('TASK_STATE_COMPLETED')], event_status=200
+        )
+        step = self.stream_step(
+            expect={'status': 200}, expect_stream={'min_count': 1}
+        )
+        assert run(runner_for(dispatcher), a_test(step)).result is Outcome.PASS
+
+    def test_a_wrong_stream_status_fails(self):
+        dispatcher = FakeDispatcher(
+            events=[status_update('TASK_STATE_COMPLETED')], event_status=500
+        )
+        step = self.stream_step(expect={'status': 200}, expect_stream={'min_count': 1})
+        assert run(runner_for(dispatcher), a_test(step)).result is Outcome.FAIL
+
+    def test_an_unobservable_status_is_reported_not_invented(self):
+        """gRPC has none, and a stream with no events observed nothing."""
+        dispatcher = FakeDispatcher(events=[], event_status=None)
+        step = self.stream_step(expect={'status': 200}, expect_stream={})
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.FAIL
+        assert 'no observable one' in result.failure.message
+
+    def test_max_count_stops_collection_one_event_past_the_limit(self):
+        """Enough to prove the violation, without reading a runaway stream."""
+        dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_WORKING')] * 50)
+        step = self.stream_step(expect_stream={'max_count': 2})
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.FAIL
+        assert 'got 3' in result.failure.message
+
+    def test_timeout_ms_cuts_a_stream_that_never_closes(self):
+        dispatcher = FakeDispatcher(
+            events=[status_update('TASK_STATE_WORKING')], stall=30.0
+        )
+        step = self.stream_step(expect_stream={'min_count': 1, 'timeout_ms': 20})
+        result = asyncio.run(
+            Runner(dispatcher, clock=lambda: 0.0).run_test(a_test(step))
+        )
+        assert result.result is Outcome.FAIL
+        assert 'did not complete within 20ms' in result.failure.message
+
+    def test_the_events_are_the_steps_response(self):
+        dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_COMPLETED')])
+        step = self.stream_step(
+            expect_stream={'min_count': 1},
+            assertions=[{
+                'source': '{{s.response}}',
+                'any': {'path': '[*]', 'match': {'status': {'exists': True}}},
+            }],
+        )
+        assert run(runner_for(dispatcher), a_test(step)).result is Outcome.PASS
+
+    def test_repeat_on_a_streaming_step_is_an_error(self):
+        dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_COMPLETED')])
+        step = self.stream_step(
+            expect_stream={'min_count': 1}, repeat={'until': 'a == b'}
+        )
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.ERROR
+        assert 'repeat' in result.failure.message
+
+    def test_a_stream_that_dies_partway_is_an_error(self):
+        dispatcher = FakeDispatcher(raises=DispatchError('stream failed after 2'))
+        step = self.stream_step(expect_stream={'min_count': 1})
+        assert run(runner_for(dispatcher), a_test(step)).result is Outcome.ERROR
+
+    def test_a_wrongly_shaped_reply_is_a_failure_not_an_error(self):
+        """A streaming call answered with `application/json` is a finding about
+        the SUT; filing it as a broken run would hide it behind our name."""
+        dispatcher = FakeDispatcher(
+            raises=MalformedResponse("Expected 'text/event-stream', got 'application/json'")
+        )
+        step = self.stream_step(expect_stream={'min_count': 1})
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.FAIL
+        assert 'text/event-stream' in result.failure.message
+
 
 class TestImportWeight:
     def test_importing_the_package_does_not_load_grpc(self):
@@ -712,7 +948,11 @@ class TestAgainstTheCorpus:
     """
 
     def _run_all(self, suite, binding):
-        dispatcher = FakeDispatcher(ok({}), binding=binding)
+        dispatcher = FakeDispatcher(
+            ok({}),
+            binding=binding,
+            events=[status_update('TASK_STATE_COMPLETED')],
+        )
         runner = runner_for(
             dispatcher,
             variables={'insufficientAuthToken': 'x', 'otherUserTaskId': 'y'},
@@ -732,27 +972,32 @@ class TestAgainstTheCorpus:
         assert len(results) == len(suite.tests)
         assert all(r.result in tuple(Outcome) for r in results)
 
-    @pytest.mark.parametrize(
-        ('binding', 'deferred'),
-        [
-            (TransportBinding.JSONRPC, 33),
-            (TransportBinding.GRPC, 19),
-            (TransportBinding.REST, 24),
-        ],
-    )
-    def test_how_much_is_deferred_to_story_4_4(self, suite, binding, deferred):
-        """Raw, client and streaming steps are the remaining gap.
+    @pytest.mark.parametrize('binding', list(TransportBinding))
+    def test_only_client_tests_remain_deferred(self, suite, binding):
+        """Raw and streaming steps now execute; §10 client tests do not.
 
-        Fewer than the 40 tests that contain one, because a test restricted to
-        another binding is skipped for that reason first — which is why this
-        is a per-binding table rather than one number.
+        Eight on every binding, because `client_response` steps talk to no
+        transport and so are never filtered out by one first.
         """
         results = self._run_all(suite, binding)
         skipped = [
             r for r in results
             if r.result is Outcome.SKIP and 'not yet supported' in (r.skip_reason or '')
         ]
-        assert len(skipped) == deferred
+        assert len(skipped) == 8
+        assert all('client' in r.skip_reason for r in skipped)
+
+    @pytest.mark.parametrize('binding', list(TransportBinding))
+    def test_raw_steps_reach_the_dispatcher(self, suite, binding):
+        """Every raw test in the corpus is jsonrpc- or rest-restricted.
+
+        Which is why none of them errors on gRPC with `UnsupportedByBinding` —
+        they are filtered by transport before they get there.
+        """
+        results = self._run_all(suite, binding)
+        assert not any(
+            r.result is Outcome.ERROR for r in results
+        ), [r.id for r in results if r.result is Outcome.ERROR]
 
     @pytest.mark.parametrize('binding', list(TransportBinding))
     def test_the_rest_of_the_corpus_is_executed(self, suite, binding):

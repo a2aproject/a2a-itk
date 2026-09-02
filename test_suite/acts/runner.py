@@ -32,9 +32,9 @@ import asyncio
 import enum
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Final, TypeVar
 
 from pydantic import BaseModel
 
@@ -51,6 +51,8 @@ from test_suite.acts.assertions import (
 from test_suite.acts.dispatcher.base import (
     DispatchError,
     Dispatcher,
+    MalformedResponse,
+    StreamEvent,
     WireError,
     WireResponse,
 )
@@ -60,12 +62,14 @@ from test_suite.acts.schema import (
     Backoff,
     Level,
     Operation,
+    RawBlock,
     RunnerRequirement,
     Step,
     StepKind,
     Test,
     TransportBinding,
 )
+from test_suite.acts.streaming import StreamedEvent, evaluate_stream, normalize
 from test_suite.acts.variables import PathError, Scope, UnresolvedVariable
 
 
@@ -78,6 +82,14 @@ DEFAULT_DELAY_MS = 1000
 #: §12.4 requires this on every request, carrying the document's
 #: `spec_version`. On gRPC the dispatcher turns it into call metadata.
 VERSION_HEADER = 'A2A-Version'
+
+#: Step kinds the runner can execute. `client_response` (spec §10) is not one:
+#: it feeds a canned payload to the SUT's own *client* and asserts on what that
+#: client parsed, which needs a client-side entry point on the agent rather
+#: than anything the runner can drive over a transport. No story owns it yet.
+EXECUTABLE_KINDS: Final[frozenset[StepKind]] = frozenset(
+    {StepKind.OPERATION, StepKind.RAW}
+)
 
 
 class Outcome(str, enum.Enum):
@@ -305,13 +317,11 @@ class Runner:
             return f'targets {targets}; this runner speaks {self.binding.value}'
 
         deferred = {
-            step.kind() for step in test.steps if step.kind() is not StepKind.OPERATION
+            step.kind() for step in test.steps if step.kind() not in EXECUTABLE_KINDS
         }
         if deferred:
             kinds = ', '.join(sorted(k.value for k in deferred))
             return f'contains {kinds} step(s); not yet supported'
-        if any(step.expect_stream is not None for step in test.steps):
-            return 'asserts on a stream; not yet supported'
 
         missing = set(test.runner_requirements or ()) - self.capabilities
         if missing:
@@ -396,43 +406,171 @@ class Runner:
             await self._sleep(step.delay_ms / 1000)
 
         try:
-            params = self._prepare_params(step, scope)
-        except (UnresolvedVariable, PathError) as exc:
-            # The test names something nothing defines: a problem with the
-            # inputs, not with the SUT.
-            return self._step(step, Outcome.ERROR, started, message=str(exc))
-
-        try:
-            until = (
-                None if step.repeat is None else scope.substitute(step.repeat.until)
-            )
-            response, attempts, converged = await self._dispatch(step, params, until)
+            if step.expect_stream is not None:
+                return await self._run_streaming_step(step, scope, started)
+            return await self._run_unary_step(step, scope, started)
+        except MalformedResponse as exc:
+            # The SUT answered in a shape the binding does not permit. That is
+            # a finding about the SUT, so it must not be filed as a broken run.
+            return self._step(step, Outcome.FAIL, started, message=str(exc))
         except DispatchError as exc:
-            return self._step(step, Outcome.ERROR, started, message=str(exc))
-        except UntilError as exc:
+            # The exchange did not complete, so the SUT has not been shown
+            # non-conformant. `UnsupportedByBinding` arrives here too, which is
+            # right: a raw step on gRPC is a test that should have declared a
+            # transport, not a defect in the agent.
             return self._step(step, Outcome.ERROR, started, message=str(exc))
 
-        if not converged:
-            return self._step(
-                step, Outcome.FAIL, started, attempts=attempts,
-                message=(
-                    f'polled {attempts} time(s) and `{step.repeat.until}` '
-                    f'never became true'
-                ),
-            )
+    async def _run_unary_step(
+        self, step: Step, scope: Scope, started: float
+    ) -> StepResult:
+        """One request, one reply — an operation step or a raw one."""
+        attempts = 1
 
-        scope.record_response(step.id, response.payload)
-        if step.capture:
+        if step.kind() is StepKind.RAW:
             try:
-                scope.capture(step.id, step.capture, response.payload)
-            except UnresolvedVariable as exc:
-                # The path is fine but the response did not carry it, so the
-                # SUT answered with a shape the test did not expect.
+                raw = _resolved(step.raw, scope)
+            except (UnresolvedVariable, PathError) as exc:
+                return self._step(step, Outcome.ERROR, started, message=str(exc))
+            response = await self.dispatcher.dispatch_raw(raw, self._raw_headers())
+        else:
+            try:
+                params = self._prepare_params(step, scope)
+                until = (
+                    None if step.repeat is None
+                    else scope.substitute(step.repeat.until)
+                )
+            except (UnresolvedVariable, PathError) as exc:
+                # The test names something nothing defines: a problem with the
+                # inputs, not with the SUT.
+                return self._step(step, Outcome.ERROR, started, message=str(exc))
+
+            try:
+                response, attempts, converged = await self._dispatch(step, params, until)
+            except UntilError as exc:
+                return self._step(step, Outcome.ERROR, started, message=str(exc))
+
+            if not converged:
                 return self._step(
-                    step, Outcome.FAIL, started, attempts=attempts, message=str(exc)
+                    step, Outcome.FAIL, started, attempts=attempts,
+                    message=(
+                        f'polled {attempts} time(s) and `{step.repeat.until}` '
+                        f'never became true'
+                    ),
                 )
 
+        scope.record_response(step.id, response.payload)
+        captured = self._capture(step, scope, response.payload)
+        if captured is not None:
+            return self._step(
+                step, Outcome.FAIL, started, attempts=attempts, message=captured
+            )
+
         result = self._evaluate_outcome(step, response, scope)
+        return self._finish(step, scope, result, started, attempts)
+
+    async def _run_streaming_step(
+        self, step: Step, scope: Scope, started: float
+    ) -> StepResult:
+        """A streaming operation, or a raw request answered with a stream."""
+        if step.repeat is not None:
+            return self._step(
+                step, Outcome.ERROR, started,
+                message='`repeat` cannot re-dispatch a streaming step',
+            )
+
+        try:
+            source = self._stream_source(step, scope)
+        except (UnresolvedVariable, PathError) as exc:
+            return self._step(step, Outcome.ERROR, started, message=str(exc))
+
+        events, status, timed_out = await self._collect(source, step.expect_stream)
+
+        scope.record_response(step.id, [event.payload for event in events])
+        captured = self._capture(step, scope, [event.payload for event in events])
+        if captured is not None:
+            return self._step(step, Outcome.FAIL, started, message=captured)
+
+        result = evaluate_stream(step.expect_stream, events, timed_out=timed_out)
+        result += self._evaluate_stream_status(step, scope, status, len(events))
+        return self._finish(step, scope, result, started, attempts=1)
+
+    def _stream_source(self, step: Step, scope: Scope) -> AsyncIterator[StreamEvent]:
+        if step.kind() is StepKind.RAW:
+            raw: RawBlock = _resolved(step.raw, scope)
+            return self.dispatcher.stream_raw(raw, self._raw_headers())
+        return self.dispatcher.stream(
+            step.operation, self._prepare_params(step, scope), self._headers()
+        )
+
+    async def _collect(
+        self, source: AsyncIterator[StreamEvent], expect: Any
+    ) -> tuple[list[StreamedEvent], int | None, bool]:
+        """Read a stream into a list, bounded by `timeout_ms` and `max_count`.
+
+        One event past `max_count` is enough to prove the limit was broken, and
+        stopping there keeps a SUT that never closes the stream from hanging a
+        run that has no `timeout_ms` to fall back on.
+        """
+        events: list[StreamedEvent] = []
+        status: int | None = None
+        limit = None if expect.max_count is None else expect.max_count + 1
+
+        async def pump() -> None:
+            nonlocal status
+            async for event in source:
+                if status is None:
+                    status = event.status
+                events.append(normalize(event.data, event.index))
+                if limit is not None and len(events) >= limit:
+                    break
+
+        if not expect.timeout_ms:
+            await pump()
+            return events, status, False
+
+        try:
+            await asyncio.wait_for(pump(), expect.timeout_ms / 1000)
+        except (asyncio.TimeoutError, TimeoutError):
+            return events, status, True
+        return events, status, False
+
+    def _evaluate_stream_status(
+        self, step: Step, scope: Scope, status: int | None, count: int
+    ) -> AssertionResult:
+        """`expect.status` beside `expect_stream` — the stream's own status."""
+        if step.expect is None or step.expect.status is None:
+            return AssertionResult()
+        if status is None:
+            return _failed(
+                f'expected a status, but the stream produced no observable one '
+                f'({count} event(s); gRPC has no HTTP status)',
+                scope.substitute(step.expect.status), None,
+            )
+        return evaluate_status(scope.substitute(step.expect.status), status)
+
+    def _capture(self, step: Step, scope: Scope, response: Any) -> str | None:
+        """Apply a step's `capture`; returns a failure message, or ``None``.
+
+        A miss is a failure rather than an error: the path is well-formed and
+        the SUT simply answered with a shape the test did not expect.
+        """
+        if not step.capture:
+            return None
+        try:
+            scope.capture(step.id, step.capture, response)
+        except UnresolvedVariable as exc:
+            return str(exc)
+        return None
+
+    def _finish(
+        self,
+        step: Step,
+        scope: Scope,
+        result: AssertionResult,
+        started: float,
+        attempts: int,
+    ) -> StepResult:
+        """Turn an evaluated step into its result, running `assertions` last."""
         if not result.ok:
             return self._step(
                 step, Outcome.FAIL, started, attempts=attempts,
@@ -450,6 +588,20 @@ class Runner:
         return self._step(
             step, Outcome.PASS, started, attempts=attempts, checks=result.checks
         )
+
+    def _headers(self) -> dict[str, str]:
+        """§12.4: the version header goes on every abstract operation."""
+        return {VERSION_HEADER: self.spec_version}
+
+    def _raw_headers(self) -> dict[str, str]:
+        """Nothing. A raw request goes exactly as the test wrote it.
+
+        §12.4 requires `A2A-Version` on requests the runner builds, and
+        explicitly excepts tests that alter or omit it deliberately — which is
+        the whole of `VER-NEG-002`, whose raw block carries no version header
+        and would be silently repaired if the runner added one.
+        """
+        return {}
 
     def _prepare_params(self, step: Step, scope: Scope) -> dict[str, Any]:
         """Resolve `{{...}}`, reshape for the request message, add a messageId.
@@ -478,7 +630,7 @@ class Runner:
         condition ever held. §9.1 makes an exhausted poll a *failure*, so that
         last flag is a result rather than an exception.
         """
-        headers = {VERSION_HEADER: self.spec_version}
+        headers = self._headers()
         operation: Operation = step.operation
         repeat = step.repeat
 

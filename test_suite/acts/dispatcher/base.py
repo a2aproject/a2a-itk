@@ -43,6 +43,17 @@ class DispatchError(RuntimeError):
     """
 
 
+class MalformedResponse(DispatchError):
+    """The SUT answered, but not in a shape this binding permits.
+
+    Distinct from its parent for the same reason :class:`WireError` is
+    distinct from :class:`DispatchError`: the exchange *happened*. A streaming
+    call answered with ``Content-Type: application/json`` instead of
+    ``text/event-stream`` is a conformance finding, and reporting it as a
+    broken run would file our tooling's name against the SUT's defect.
+    """
+
+
 class UnsupportedByBinding(DispatchError):
     """This binding cannot express the requested call.
 
@@ -114,6 +125,12 @@ class StreamEvent:
     raw: str | None = None
     #: SSE ``event:`` field when the server set one.
     event: str | None = None
+    #: HTTP status of the response carrying the stream. Repeated on every
+    #: event because one stream has one status, and a step asserting
+    #: ``expect.status`` alongside ``expect_stream`` needs an *observed* value
+    #: rather than one inferred from the stream having worked. ``None`` on
+    #: gRPC, which has no HTTP status of its own.
+    status: int | None = None
 
 
 class Dispatcher(abc.ABC):
@@ -166,6 +183,19 @@ class Dispatcher(abc.ABC):
         Returns an async iterator rather than awaiting a list so that
         time-bounded assertions (``timeout_ms``) can act on events as they
         arrive instead of after the stream closes.
+        """
+
+    @abc.abstractmethod
+    def stream_raw(
+        self,
+        raw: RawBlock,
+        headers: Mapping[str, str] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream the response to a hand-built request.
+
+        Events arrive **unwrapped**, matching :meth:`dispatch_raw`: a raw
+        streaming test asserts on the envelope each event comes in. Raises
+        :class:`UnsupportedByBinding` on gRPC.
         """
 
     async def aclose(self) -> None:
