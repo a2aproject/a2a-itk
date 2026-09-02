@@ -16,7 +16,8 @@ paths, status codes and error codes all come from
 
 from __future__ import annotations
 
-from typing import Any
+import importlib
+from typing import Any, Final
 
 from test_suite.acts.dispatcher.base import (
     DispatchError,
@@ -26,19 +27,40 @@ from test_suite.acts.dispatcher.base import (
     WireError,
     WireResponse,
 )
-from test_suite.acts.dispatcher.grpc import GrpcDispatcher
-from test_suite.acts.dispatcher.http_base import HttpDispatcher
-from test_suite.acts.dispatcher.jsonrpc import JsonRpcDispatcher
 from test_suite.acts.dispatcher.params import adapt
-from test_suite.acts.dispatcher.rest import RestDispatcher
 from test_suite.acts.schema import TransportBinding
 
 
-_BY_BINDING: dict[TransportBinding, type[Dispatcher]] = {
-    TransportBinding.JSONRPC: JsonRpcDispatcher,
-    TransportBinding.REST: RestDispatcher,
-    TransportBinding.GRPC: GrpcDispatcher,
+#: Concrete dispatcher -> the module it lives in. Loaded on first use rather
+#: than up front: `grpc` is a C extension that costs a noticeable slice of the
+#: package's import time, and most callers — anything reading or validating the
+#: corpus — never open a connection at all.
+_IMPLEMENTATIONS: Final[dict[str, str]] = {
+    'JsonRpcDispatcher': 'jsonrpc',
+    'RestDispatcher': 'rest',
+    'GrpcDispatcher': 'grpc',
+    'HttpDispatcher': 'http_base',
 }
+
+_FOR_BINDING: Final[dict[TransportBinding, str]] = {
+    TransportBinding.JSONRPC: 'JsonRpcDispatcher',
+    TransportBinding.REST: 'RestDispatcher',
+    TransportBinding.GRPC: 'GrpcDispatcher',
+}
+
+
+def _load(name: str) -> type[Dispatcher]:
+    module = importlib.import_module(f'{__name__}.{_IMPLEMENTATIONS[name]}')
+    loaded = getattr(module, name)
+    globals()[name] = loaded  # so the next lookup skips this entirely
+    return loaded
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve a dispatcher class on first reference (PEP 562)."""
+    if name in _IMPLEMENTATIONS:
+        return _load(name)
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 
 def for_binding(
@@ -51,7 +73,7 @@ def for_binding(
     ``target`` is a base URL for the HTTP bindings and a ``host:port`` for
     gRPC. Remaining keyword arguments go to the concrete dispatcher.
     """
-    return _BY_BINDING[binding](target, **kwargs)
+    return _load(_FOR_BINDING[binding])(target, **kwargs)
 
 
 __all__ = [
