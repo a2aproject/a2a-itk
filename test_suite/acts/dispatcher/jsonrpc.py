@@ -42,12 +42,14 @@ class JsonRpcDispatcher(HttpDispatcher):
         client: httpx.AsyncClient | None = None,
         timeout: float = 30.0,
         default_headers: Mapping[str, str] | None = None,
+        agent_card_url: str | None = None,
     ) -> None:
         super().__init__(
             base_url,
             client=client,
             timeout=timeout,
             default_headers=default_headers,
+            agent_card_url=agent_card_url,
         )
         self.rpc_path = rpc_path
         # Monotonic per dispatcher. JSON-RPC only requires that a response can

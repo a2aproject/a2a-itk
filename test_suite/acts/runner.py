@@ -70,6 +70,7 @@ from test_suite.acts.schema import (
     TransportBinding,
 )
 from test_suite.acts.streaming import StreamedEvent, evaluate_stream, normalize
+from test_suite.acts.wire_map import binding_for_operation
 from test_suite.acts.variables import PathError, Scope, UnresolvedVariable
 
 
@@ -406,7 +407,7 @@ class Runner:
             await self._sleep(step.delay_ms / 1000)
 
         try:
-            if step.expect_stream is not None:
+            if _is_streaming(step):
                 return await self._run_streaming_step(step, scope, started)
             return await self._run_unary_step(step, scope, started)
         except MalformedResponse as exc:
@@ -483,14 +484,37 @@ class Runner:
         except (UnresolvedVariable, PathError) as exc:
             return self._step(step, Outcome.ERROR, started, message=str(exc))
 
-        events, status, timed_out = await self._collect(source, step.expect_stream)
+        try:
+            events, status, timed_out = await self._collect(source, step.expect_stream)
+        except DispatchError as exc:
+            if step.expect_error is None:
+                raise
+            # A stream the SUT refuses to open *is* the expected outcome:
+            # `STREAM-SUB-003` subscribes to a terminal task and requires an
+            # error. The transport reports that as a failed call rather than
+            # as a WireError, so there is no code to name — an `expect_error`
+            # that asserts a specific `error_type` will still fail, honestly,
+            # because nothing here can identify one.
+            result = evaluate_error(
+                _resolved(step.expect_error, scope), {'message': str(exc)}
+            )
+            return self._finish(step, scope, result, started, attempts=1)
 
         scope.record_response(step.id, [event.payload for event in events])
         captured = self._capture(step, scope, [event.payload for event in events])
         if captured is not None:
             return self._step(step, Outcome.FAIL, started, message=captured)
 
-        result = evaluate_stream(step.expect_stream, events, timed_out=timed_out)
+        result = AssertionResult()
+        if step.expect_stream is not None:
+            result += evaluate_stream(step.expect_stream, events, timed_out=timed_out)
+        elif step.expect_error is not None:
+            # The stream opened, so the error the step required did not happen.
+            result += _failed(
+                f'expected an error, but the stream opened and produced '
+                f'{len(events)} event(s)',
+                'an error', f'{len(events)} event(s)',
+            )
         result += self._evaluate_stream_status(step, scope, status, len(events))
         return self._finish(step, scope, result, started, attempts=1)
 
@@ -503,7 +527,7 @@ class Runner:
         )
 
     async def _collect(
-        self, source: AsyncIterator[StreamEvent], expect: Any
+        self, source: AsyncIterator[StreamEvent], expect: Any | None
     ) -> tuple[list[StreamedEvent], int | None, bool]:
         """Read a stream into a list, bounded by `timeout_ms` and `max_count`.
 
@@ -513,7 +537,9 @@ class Runner:
         """
         events: list[StreamedEvent] = []
         status: int | None = None
-        limit = None if expect.max_count is None else expect.max_count + 1
+        # `expect` is absent when a streaming operation asserts only that the
+        # call fails — `STREAM-SUB-003` subscribes to a terminal task.
+        limit = None if expect is None or expect.max_count is None else expect.max_count + 1
 
         async def pump() -> None:
             nonlocal status
@@ -524,7 +550,7 @@ class Runner:
                 if limit is not None and len(events) >= limit:
                     break
 
-        if not expect.timeout_ms:
+        if expect is None or not expect.timeout_ms:
             await pump()
             return events, status, False
 
@@ -680,9 +706,16 @@ class Runner:
                     scope.substitute(step.expect.status), response.status
                 )
             if step.expect.body is not None:
-                if response.error is not None:
-                    # Asserting a body against an error response reports every
-                    # field as missing and buries the actual cause.
+                if response.error is not None and step.kind() is not StepKind.RAW:
+                    # On an operation step `payload` is the unwrapped result,
+                    # so asserting a body against an error would report every
+                    # expected field as missing and bury the real cause.
+                    #
+                    # A raw step is the opposite case: `dispatch_raw` returns
+                    # the *whole* body, so an error envelope is precisely what
+                    # `expect.body` describes — `JSONRPC-ERR-001` asserts
+                    # `body.error.code: -32601`. Refusing here would fail every
+                    # such test for a reason of our own making.
                     return _failed(
                         f'expected a response body, got error '
                         f'{_name_of(response.error)}: {response.error.message}',
@@ -760,6 +793,22 @@ class Runner:
 
 class RunError(RuntimeError):
     """The run cannot proceed — missing inputs, not a SUT defect."""
+
+
+def _is_streaming(step: Step) -> bool:
+    """Should this step be driven as a stream?
+
+    Decided by the *operation*, not by the presence of `expect_stream`. Two
+    corpus steps subscribe or send-streaming while asserting only that the
+    call fails (`STREAM-SUB-003`, `CORE-CAP-002`), and routing those to the
+    unary path makes the dispatcher refuse them — an error about our own
+    dispatch, reported against the SUT.
+    """
+    if step.expect_stream is not None:
+        return True
+    if step.kind() is not StepKind.OPERATION:
+        return False
+    return binding_for_operation(step.operation).streaming
 
 
 def _resolved(model: _M, scope: Scope, *, keep: tuple[str, ...] = ()) -> _M:

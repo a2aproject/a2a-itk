@@ -33,6 +33,73 @@ sources the script as its last statement.
 | `ITK_CONTAINER_RT` | autodetect | Force `docker` or `podman` |
 | `ITK_SCENARIO_SET` | `local` | `local` = the SDK's own `scenarios*.json`; `shared` = the role-based sets in a2a-itk |
 | `SCENARIO_FILE` | see below | An explicit file, overriding both |
+| `ITK_ACTS_RUN` | `0` | Run the ACTS conformance suite **instead of** the traversal suite |
+| `ITK_ACTS_TRANSPORTS` | `jsonrpc` | Comma-separated bindings to run ACTS over, e.g. `jsonrpc,grpc,rest` |
+| `ITK_ACTS_LANGUAGE` | `$ITK_SDK_NAME` | Language string for the report's `sdk-info` (spec §13.1) |
+| `ACTS_HISTORY_LIMIT` | `7` | Runs kept in the rolling ACTS history. Lower than ITK's 50 — an ACTS entry is far larger |
+
+### ACTS conformance runs
+
+`ITK_ACTS_RUN=1` swaps the traversal suite for the ACTS conformance corpus.
+Orthogonal to `ITK_NIGHTLY_RUN`, which still decides whether results are
+*recorded* — so the four combinations all mean something:
+
+| | `ITK_NIGHTLY_RUN` unset | `ITK_NIGHTLY_RUN=true` |
+| --- | --- | --- |
+| `ITK_ACTS_RUN=0` | traversal, gate on `all_passed` | traversal, append to `itk_<sdk>.json` |
+| `ITK_ACTS_RUN=1` | ACTS, gate on `must` conformance | ACTS, append to `acts_<sdk>.json` |
+
+Each transport produces two files in the itk directory:
+
+- `acts-report-<sdk>-<transport>-<timestamp>.json` — the full spec §13 report,
+  with per-test failures, expected/actual and assertion paths. **This is the
+  file to upload as a workflow artifact**; it is what someone reads to find
+  out *why* a test failed.
+- `acts_results_<transport>.json` — the same document under a stable name, so
+  the following steps needn't glob for a timestamp.
+
+On the nightly path **one** entry is appended to `acts_<metrics-name>.json`,
+which the workflow re-uploads to the `nightly-metrics` release exactly as it
+already does for `itk_<metrics-name>.json`. One commit tested over three
+bindings is one run of the SDK, so the bindings nest under `results` rather
+than becoming three entries — otherwise the 50-run window would cover ~17
+nights, and every consumer would have to re-group by `commit_sha` to answer
+"how did last night go".
+
+`conformant` at the top is the conjunction over bindings: passing on JSON-RPC
+and failing on gRPC is not conformant. `summary` is the sum, for a single
+trend line; per-binding detail sits under `results.<transport>`.
+
+Each test contributes `{id, level, result}`, plus the `failure` detail
+(message, expected, actual, assertion path, failing step) when it did not pass
+and the `skip_reason` when it was skipped. A history that only recorded
+`"result": "fail"` could not answer the question anyone brings to it — is this
+the same failure as last night, or a new one.
+
+Left out on purpose: `name` (static per test id, so duplicated across every
+run in the window), `duration_ms` (noise at this resolution) and `steps` (the
+bulkiest field by far, and already in the per-run report the workflow keeps as
+an artifact). Including `steps` would more than double the asset.
+
+Measured against the real corpus, three bindings per run:
+
+| what the entry carries | per run | 7-run window |
+| --- | --- | --- |
+| verdicts only | 32 KB | 224 KB |
+| **+ failure detail and skip reasons (current)** | **62 KB** | **434 KB** |
+| + name and duration | 80 KB | 560 KB |
+| + full per-step breakdown | 145 KB | 1.0 MB |
+
+The window is **7 runs**, not ITK's 50. An ACTS entry covers every binding and
+carries each test's failure detail, so it is an order of magnitude larger than
+a traversal entry — and a week is the window anyone reads, since "did last
+night regress" needs yesterday, not last quarter. Raise `ACTS_HISTORY_LIMIT`
+with the table above in mind: the asset is fetched by a browser on every
+dashboard load.
+
+```bash
+ITK_ACTS_RUN=1 ITK_ACTS_TRANSPORTS=jsonrpc,grpc,rest ./itk/run_itk.sh
+```
 
 ### Choosing scenarios
 
