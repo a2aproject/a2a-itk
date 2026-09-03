@@ -31,6 +31,7 @@ from test_suite.acts.dispatcher.base import (
     WireResponse,
 )
 from test_suite.acts.runner import (
+    CLIENT_PARSE_BEHAVIOR,
     DEFAULT_DELAY_MS,
     DEFAULT_MAX_ATTEMPTS,
     VERSION_HEADER,
@@ -520,20 +521,6 @@ class TestSkipping:
         )
         assert run(runner, test).result is Outcome.PASS
 
-    def test_a_client_response_step_is_deferred(self):
-        """§10 needs a client-side entry point on the agent; no story owns it."""
-        dispatcher = FakeDispatcher(ok())
-        test = a_test(
-            Step(
-                id='c',
-                client_response={'operation': 'get_task', 'wire_payload': {}},
-                expect_parsed={'id': {'type': 'string'}},
-            )
-        )
-        result = run(runner_for(dispatcher), test)
-        assert result.result is Outcome.SKIP
-        assert 'client' in result.skip_reason
-
     def test_a_skipped_test_dispatches_nothing(self):
         dispatcher = FakeDispatcher(ok(), binding=TransportBinding.GRPC)
         run(runner_for(dispatcher), a_test(get_task(), transport=[TransportBinding.REST]))
@@ -917,6 +904,78 @@ class TestStreamingSteps:
         assert 'text/event-stream' in result.failure.message
 
 
+class TestClientSteps:
+    """ACTS §10, delivered through the `tck-client-parse` behaviour."""
+
+    def a_client_test(self, expect_parsed, operation='send_message'):
+        return a_test(
+            Step(
+                id='parse',
+                client_response={
+                    'operation': operation,
+                    'wire_payload': {'jsonrpc': '2.0', 'id': '1', 'result': {}},
+                },
+                expect_parsed=expect_parsed,
+            )
+        )
+
+    def replying_with(self, parsed):
+        """A SUT that implements the behaviour and returns ``parsed``."""
+        return FakeDispatcher(ok({
+            'task': {
+                'id': 'T1',
+                'status': {'state': 'TASK_STATE_COMPLETED'},
+                'artifacts': [{'artifactId': 'a1', 'parts': [{'data': parsed}]}],
+            }
+        }))
+
+    def test_the_parsed_payload_is_asserted(self):
+        dispatcher = self.replying_with({'task': {'id': 'task-abc-123'}})
+        test = self.a_client_test({'task': {'id': 'task-abc-123'}})
+        assert run(runner_for(dispatcher), test).result is Outcome.PASS
+
+    def test_a_wrong_parse_fails_and_locates_itself(self):
+        dispatcher = self.replying_with({'task': {'id': 'WRONG'}})
+        result = run(runner_for(dispatcher), self.a_client_test({'task': {'id': 'T'}}))
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'parsed.task.id'
+
+    def test_it_goes_out_as_a_send_message_naming_the_behaviour(self):
+        """§10 gives no mechanism, so the payload rides a normal operation."""
+        dispatcher = self.replying_with({'task': {}})
+        run(runner_for(dispatcher), self.a_client_test({'task': {'exists': True}}))
+        operation, params, _ = dispatcher.calls[0]
+        assert operation is Operation.SEND_MESSAGE
+        parts = params['message']['parts']
+        assert parts[0]['text'] == CLIENT_PARSE_BEHAVIOR
+        assert parts[1]['data']['operation'] == 'send_message'
+        assert parts[1]['data']['wire_payload']['jsonrpc'] == '2.0'
+
+    def test_a_sut_that_ignores_the_behaviour_fails(self):
+        """Not a silent pass: it demonstrated no parsing at all."""
+        dispatcher = FakeDispatcher(ok({'task': {'id': 'T1', 'artifacts': []}}))
+        result = run(runner_for(dispatcher), self.a_client_test({'task': {}}))
+        assert result.result is Outcome.FAIL
+        assert CLIENT_PARSE_BEHAVIOR in result.failure.message
+
+    def test_an_error_from_the_sut_fails_the_step(self):
+        dispatcher = FakeDispatcher(failed(ErrorType.INVALID_PARAMS))
+        result = run(runner_for(dispatcher), self.a_client_test({'task': {}}))
+        assert result.result is Outcome.FAIL
+        assert 'could not parse' in result.failure.message
+
+    def test_a_parsed_error_envelope_is_assertable(self):
+        """`CLIENT-PARSE-004` asserts the client surfaced the JSON-RPC error."""
+        dispatcher = self.replying_with(
+            {'error': {'code': -32001, 'message': 'Task not found'}}
+        )
+        test = self.a_client_test(
+            {'error': {'code': -32001, 'message': {'contains': 'not found'}}},
+            operation='get_task',
+        )
+        assert run(runner_for(dispatcher), test).result is Outcome.PASS
+
+
 class TestImportWeight:
     def test_importing_the_package_does_not_load_grpc(self):
         """The runner needs a dispatcher; reading the corpus does not.
@@ -973,19 +1032,14 @@ class TestAgainstTheCorpus:
         assert all(r.result in tuple(Outcome) for r in results)
 
     @pytest.mark.parametrize('binding', list(TransportBinding))
-    def test_only_client_tests_remain_deferred(self, suite, binding):
-        """Raw and streaming steps now execute; §10 client tests do not.
-
-        Eight on every binding, because `client_response` steps talk to no
-        transport and so are never filtered out by one first.
-        """
+    def test_nothing_is_deferred_any_more(self, suite, binding):
+        """Every step kind executes: operation, raw, streaming and client."""
         results = self._run_all(suite, binding)
-        skipped = [
+        deferred = [
             r for r in results
             if r.result is Outcome.SKIP and 'not yet supported' in (r.skip_reason or '')
         ]
-        assert len(skipped) == 8
-        assert all('client' in r.skip_reason for r in skipped)
+        assert deferred == []
 
     @pytest.mark.parametrize('binding', list(TransportBinding))
     def test_raw_steps_reach_the_dispatcher(self, suite, binding):

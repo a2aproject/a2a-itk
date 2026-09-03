@@ -84,13 +84,21 @@ DEFAULT_DELAY_MS = 1000
 #: `spec_version`. On gRPC the dispatcher turns it into call metadata.
 VERSION_HEADER = 'A2A-Version'
 
-#: Step kinds the runner can execute. `client_response` (spec §10) is not one:
-#: it feeds a canned payload to the SUT's own *client* and asserts on what that
-#: client parsed, which needs a client-side entry point on the agent rather
-#: than anything the runner can drive over a transport. No story owns it yet.
+#: Step kinds the runner can execute.
 EXECUTABLE_KINDS: Final[frozenset[StepKind]] = frozenset(
-    {StepKind.OPERATION, StepKind.RAW}
+    {StepKind.OPERATION, StepKind.RAW, StepKind.CLIENT}
 )
+
+#: The behaviour a `client_response` step is delivered through (ACTS §10).
+#:
+#: §10 defines the step format but not how a runner reaches the SUT's
+#: *client* — no A2A operation asks a server "what would your client have
+#: parsed from these bytes". So the payload rides an ordinary `send_message`
+#: naming this prefix, and the agent runs it through its own client and
+#: returns the result. That is a §11 behaviour like any other, which is why it
+#: needs no new endpoint; it is nonetheless a contract §10 does not define, so
+#: a SUT that has not implemented it fails these tests rather than skipping.
+CLIENT_PARSE_BEHAVIOR: Final = 'tck-client-parse'
 
 
 class Outcome(str, enum.Enum):
@@ -407,6 +415,8 @@ class Runner:
             await self._sleep(step.delay_ms / 1000)
 
         try:
+            if step.kind() is StepKind.CLIENT:
+                return await self._run_client_step(step, scope, started)
             if _is_streaming(step):
                 return await self._run_streaming_step(step, scope, started)
             return await self._run_unary_step(step, scope, started)
@@ -420,6 +430,61 @@ class Runner:
             # right: a raw step on gRPC is a test that should have declared a
             # transport, not a defect in the agent.
             return self._step(step, Outcome.ERROR, started, message=str(exc))
+
+    async def _run_client_step(
+        self, step: Step, scope: Scope, started: float
+    ) -> StepResult:
+        """ACTS §10: have the SUT's own client parse a canonical payload.
+
+        Delivered as a `send_message` carrying `{operation, wire_payload}` in
+        a data part; the agent replies with whatever its client produced, in
+        the same shape a dispatcher's `payload` would take, so `expect_parsed`
+        is evaluated exactly like `expect.body`.
+        """
+        block = step.client_response
+        params = {
+            'message': {
+                'role': 'ROLE_USER',
+                'messageId': self._new_uuid(),
+                'parts': [
+                    {'text': CLIENT_PARSE_BEHAVIOR},
+                    {
+                        'data': {
+                            'operation': block.operation.value,
+                            'wire_payload': scope.substitute(block.wire_payload),
+                        }
+                    },
+                ],
+            }
+        }
+
+        response = await self.dispatcher.dispatch(
+            Operation.SEND_MESSAGE, params, self._headers()
+        )
+        if response.error is not None:
+            return self._step(
+                step, Outcome.FAIL, started,
+                message=(
+                    f'the SUT could not parse the payload: '
+                    f'{_name_of(response.error)}: {response.error.message}'
+                ),
+            )
+
+        parsed = _parsed_from(response.payload)
+        if parsed is None:
+            return self._step(
+                step, Outcome.FAIL, started,
+                message=(
+                    f'the SUT returned no parsed payload; it may not implement '
+                    f'{CLIENT_PARSE_BEHAVIOR}'
+                ),
+            )
+
+        scope.record_response(step.id, parsed)
+        result = evaluate_body(
+            scope.substitute(step.expect_parsed), parsed, path='parsed'
+        )
+        return self._finish(step, scope, result, started, attempts=1)
 
     async def _run_unary_step(
         self, step: Step, scope: Scope, started: float
@@ -793,6 +858,25 @@ class Runner:
 
 class RunError(RuntimeError):
     """The run cannot proceed — missing inputs, not a SUT defect."""
+
+
+def _parsed_from(payload: Any) -> Any | None:
+    """Dig the client's parse result out of the task the agent returned.
+
+    The agent puts it in a data part on an artifact. Returns ``None`` when
+    there is none — which is what a SUT that ignores the behaviour looks like,
+    and must read as a failure rather than an empty pass.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    task = payload.get('task') if 'task' in payload else payload
+    if not isinstance(task, Mapping):
+        return None
+    for artifact in task.get('artifacts') or ():
+        for part in (artifact or {}).get('parts') or ():
+            if isinstance(part, Mapping) and isinstance(part.get('data'), Mapping):
+                return part['data']
+    return None
 
 
 def _is_streaming(step: Step) -> bool:
