@@ -19,8 +19,11 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+import acts_runner
 import itk_runner
+from acts_runner import ActsRunError
 from itk_runner import ClusterStartupError
+from test_suite.acts.schema import RunnerRequirement, TransportBinding
 from test_suite.launcher import InfraFailure, PermanentError
 from test_suite.launcher.matrix import MatrixError
 from test_suite.scenarios.loader import ScenarioFileError
@@ -89,6 +92,34 @@ class RunTestsResponse(BaseModel):
     # ``null`` on a clean run; an object when a peer failed to start. Additive
     # and optional — the three fields every SDK already reads are untouched.
     startup: StartupReport | None = None
+
+
+class RunActsRequest(BaseModel):
+    """Ask for one ACTS conformance run against the mounted SUT.
+
+    Separate from ``RunTestsRequest`` because the two suites answer different
+    questions: a traversal names agents and edges, a conformance run names one
+    binding and a corpus.
+    """
+
+    transport: TransportBinding
+    #: SDK identity for the report's `sdk-info` (spec §13.1).
+    sdk: str
+    sdk_version: str = 'unknown'
+    language: str = 'unknown'
+    repository: str | None = None
+    #: Restrict the run to these test ids. For iterating on one failure
+    #: without paying for the whole corpus.
+    tests: list[str] | None = None
+    #: Variables the corpus references but no document defines —
+    #: `insufficientAuthToken` and `otherUserTaskId`.
+    variables: dict[str, Any] = {}
+    #: What this runner can do beyond speaking the protocol (spec §12.1).
+    #: Anything not listed makes the tests needing it skip honestly.
+    capabilities: list[RunnerRequirement] = []
+    #: Fail tests whose `tck-*` behaviours the SUT does not declare. Off means
+    #: run them anyway, which is only useful before a repo adopts §11.
+    gate_on_behaviors: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +216,41 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
         results=typed,
         all_passed=all(r.passed for r in typed.values()),
         startup=_startup_report(report),
+    )
+
+
+@app.post('/run-acts')
+async def run_acts(request: RunActsRequest) -> dict[str, Any]:
+    """Run the ACTS conformance corpus against the mounted SUT.
+
+    Returns a spec §13 report document as-is. Unlike ``/run`` there is no
+    ITK-shaped envelope around it: the report format is standardized so that
+    dashboards can read a run from any ACTS runner, and wrapping it would
+    defeat that.
+    """
+    try:
+        result = await acts_runner.run(
+            transport=request.transport,
+            test_ids=request.tests,
+            variables=request.variables,
+            capabilities=request.capabilities,
+            gate_on_behaviors=request.gate_on_behaviors,
+            log_dir=_agent_log_dir(),
+        )
+    except ActsRunError as e:
+        # The SUT would not start, its card is unreadable, or the request
+        # names tests that do not exist. None of it is retryable.
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.exception('ACTS run failed')
+        raise HTTPException(status_code=500, detail=f'ACTS error: {e!s}') from e
+
+    return acts_runner.to_report(
+        result,
+        sdk_name=request.sdk,
+        sdk_version=request.sdk_version,
+        language=request.language,
+        repository=request.repository,
     )
 
 
