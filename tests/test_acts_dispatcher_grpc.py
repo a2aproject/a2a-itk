@@ -376,3 +376,16 @@ class TestRawIsUnsupported:
 
     def test_it_is_a_dispatch_error_subclass(self):
         assert issubclass(UnsupportedByBinding, DispatchError)
+
+
+class TestStreamRawIsRefused:
+    """gRPC has no raw-request form, streaming or otherwise (ACTS §4.4)."""
+
+    def test_stream_raw_raises_unsupported_by_binding(self):
+        async def run():
+            dispatcher = GrpcDispatcher('localhost:1')
+            raw = RawBlock(method=HttpMethod.POST, path='/')
+            return [event async for event in dispatcher.stream_raw(raw)]
+
+        with pytest.raises(UnsupportedByBinding, match='raw-request form'):
+            asyncio.run(run())

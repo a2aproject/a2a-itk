@@ -207,6 +207,16 @@ class GrpcDispatcher(Dispatcher):
             'declare `transport: [jsonrpc]` or `[rest]` (ACTS §4.4)'
         )
 
+    async def stream_raw(
+        self,
+        raw: RawBlock,
+        headers: Mapping[str, str] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        raise UnsupportedByBinding(
+            'gRPC has no raw-request form, streaming or otherwise (ACTS §4.4)'
+        )
+        yield  # pragma: no cover - unreachable, but makes this a generator
+
     async def stream(
         self,
         operation: Operation,

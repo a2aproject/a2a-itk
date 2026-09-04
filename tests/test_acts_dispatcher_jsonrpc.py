@@ -349,6 +349,75 @@ class TestStreaming:
         with pytest.raises(DispatchError, match='not a streaming operation'):
             self._collect(make(handler), Operation.GET_TASK, {'id': 't1'})
 
+    def test_the_observed_http_status_rides_every_event(self):
+        """A step may assert `expect.status` beside `expect_stream`; the value
+        has to be observed rather than inferred from the stream working."""
+        def handler(request):
+            return httpx.Response(
+                200, text=sse(result({}), result({})),
+                headers={'Content-Type': 'text/event-stream'},
+            )
+
+        events = self._collect(
+            make(handler), Operation.SEND_STREAMING_MESSAGE, {'message': {}}
+        )
+        assert [e.status for e in events] == [200, 200]
+
+
+class TestStreamRaw:
+    """§4.4 plus §7 — `JSONRPC-SSE-001` needs both at once."""
+
+    @staticmethod
+    def _collect(dispatcher, raw, headers=None):
+        async def run():
+            return [e async for e in dispatcher.stream_raw(raw, headers)]
+
+        return asyncio.run(run())
+
+    def _handler(self, seen):
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(
+                200,
+                text=sse(result({'task': {'id': 't1'}}), result({'task': {'id': 't1'}})),
+                headers={'Content-Type': 'text/event-stream'},
+            )
+
+        return handler
+
+    def test_events_are_not_unwrapped(self):
+        """A raw streaming test asserts on the envelope — `each_event:
+        {jsonrpc: "2.0"}` — so unwrapping would delete the thing under test."""
+        seen = []
+        raw = RawBlock(method=HttpMethod.POST, path='/', body={'jsonrpc': '2.0'})
+        events = self._collect(make(self._handler(seen)), raw)
+        assert events[0].data['jsonrpc'] == '2.0'
+        assert 'result' in events[0].data
+
+    def test_the_request_goes_as_written(self):
+        seen = []
+        raw = RawBlock(
+            method=HttpMethod.POST,
+            path='/',
+            headers={'A2A-Version': '99.0'},
+            body={'jsonrpc': '2.0', 'method': 'SendStreamingMessage'},
+        )
+        self._collect(make(self._handler(seen)), raw)
+        assert seen[0].headers['a2a-version'] == '99.0'
+        assert json.loads(seen[0].content)['method'] == 'SendStreamingMessage'
+
+    def test_body_raw_is_sent_unparsed(self):
+        seen = []
+        raw = RawBlock(method=HttpMethod.POST, path='/', body_raw='{not json')
+        self._collect(make(self._handler(seen)), raw)
+        assert seen[0].content == b'{not json'
+
+    def test_the_status_is_observed(self):
+        seen = []
+        raw = RawBlock(method=HttpMethod.POST, path='/', body={'jsonrpc': '2.0'})
+        events = self._collect(make(self._handler(seen)), raw)
+        assert events[0].status == 200
+
 
 class TestTransportFailure:
     def test_connection_failure_raises_rather_than_returning_an_error(self):

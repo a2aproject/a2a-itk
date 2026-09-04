@@ -13,10 +13,11 @@ import json
 from typing import Any, AsyncIterator, Mapping
 
 import httpx
-from httpx_sse import aconnect_sse
+from httpx_sse import SSEError, aconnect_sse
 
 from test_suite.acts.dispatcher.base import (
     DispatchError,
+    MalformedResponse,
     Dispatcher,
     StreamEvent,
     WireError,
@@ -187,6 +188,35 @@ class HttpDispatcher(Dispatcher):
             raw_body=text,
         )
 
+    async def stream_raw(
+        self,
+        raw: RawBlock,
+        headers: Mapping[str, str] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream the response to a hand-built request.
+
+        Events are **not** unwrapped, for the same reason `dispatch_raw` does
+        not unwrap a reply: a raw streaming test asserts on the transport
+        envelope each event arrives in, and removing it would delete the thing
+        under test.
+        """
+        merged = dict(raw.headers or {})
+        content: str | None = None
+        if raw.body_raw is not None:
+            content = raw.body_raw
+        elif raw.body is not None:
+            content = json.dumps(raw.body)
+
+        async for event in self._stream_sse(
+            raw.method.value,
+            raw.path,
+            payload=None,
+            headers=merged,
+            content=content,
+            unwrap=False,
+        ):
+            yield event
+
     async def _stream_sse(
         self,
         method: str,
@@ -194,18 +224,22 @@ class HttpDispatcher(Dispatcher):
         *,
         payload: Any,
         headers: Mapping[str, str] | None,
+        content: str | None = None,
+        unwrap: bool = True,
     ) -> AsyncIterator[StreamEvent]:
         """Yield parsed SSE events from a streaming endpoint."""
         merged = self._headers(
             headers, content_type=self.content_type, accept=SSE_CONTENT_TYPE
         )
+        if content is None and payload is not None:
+            content = json.dumps(payload)
         try:
             async with aconnect_sse(
                 self._client,
                 method,
                 self._url(path),
                 headers=merged,
-                content=json.dumps(payload) if payload is not None else None,
+                content=content,
             ) as source:
                 index = 0
                 async for sse in source.aiter_sse():
@@ -215,11 +249,17 @@ class HttpDispatcher(Dispatcher):
                         data = None
                     yield StreamEvent(
                         index=index,
-                        data=self._unwrap_stream_event(data),
+                        data=self._unwrap_stream_event(data) if unwrap else data,
                         raw=sse.data,
                         event=sse.event or None,
+                        status=source.response.status_code,
                     )
                     index += 1
+        except SSEError as exc:
+            # httpx-sse files this under TransportError, but it means the SUT
+            # replied with the wrong Content-Type — an answer, not a failure
+            # to get one.
+            raise MalformedResponse(str(exc)) from exc
         except httpx.HTTPError as exc:
             raise DispatchError(f'{type(exc).__name__}: {exc}') from exc
 
