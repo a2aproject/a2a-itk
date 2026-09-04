@@ -70,6 +70,7 @@ from test_suite.acts.schema import (
     TransportBinding,
 )
 from test_suite.acts.streaming import StreamedEvent, evaluate_stream, normalize
+from test_suite.acts.wire_map import binding_for_operation
 from test_suite.acts.variables import PathError, Scope, UnresolvedVariable
 
 
@@ -83,13 +84,21 @@ DEFAULT_DELAY_MS = 1000
 #: `spec_version`. On gRPC the dispatcher turns it into call metadata.
 VERSION_HEADER = 'A2A-Version'
 
-#: Step kinds the runner can execute. `client_response` (spec §10) is not one:
-#: it feeds a canned payload to the SUT's own *client* and asserts on what that
-#: client parsed, which needs a client-side entry point on the agent rather
-#: than anything the runner can drive over a transport. No story owns it yet.
+#: Step kinds the runner can execute.
 EXECUTABLE_KINDS: Final[frozenset[StepKind]] = frozenset(
-    {StepKind.OPERATION, StepKind.RAW}
+    {StepKind.OPERATION, StepKind.RAW, StepKind.CLIENT}
 )
+
+#: The behaviour a `client_response` step is delivered through (ACTS §10).
+#:
+#: §10 defines the step format but not how a runner reaches the SUT's
+#: *client* — no A2A operation asks a server "what would your client have
+#: parsed from these bytes". So the payload rides an ordinary `send_message`
+#: naming this prefix, and the agent runs it through its own client and
+#: returns the result. That is a §11 behaviour like any other, which is why it
+#: needs no new endpoint; it is nonetheless a contract §10 does not define, so
+#: a SUT that has not implemented it fails these tests rather than skipping.
+CLIENT_PARSE_BEHAVIOR: Final = 'tck-client-parse'
 
 
 class Outcome(str, enum.Enum):
@@ -406,7 +415,9 @@ class Runner:
             await self._sleep(step.delay_ms / 1000)
 
         try:
-            if step.expect_stream is not None:
+            if step.kind() is StepKind.CLIENT:
+                return await self._run_client_step(step, scope, started)
+            if _is_streaming(step):
                 return await self._run_streaming_step(step, scope, started)
             return await self._run_unary_step(step, scope, started)
         except MalformedResponse as exc:
@@ -419,6 +430,61 @@ class Runner:
             # right: a raw step on gRPC is a test that should have declared a
             # transport, not a defect in the agent.
             return self._step(step, Outcome.ERROR, started, message=str(exc))
+
+    async def _run_client_step(
+        self, step: Step, scope: Scope, started: float
+    ) -> StepResult:
+        """ACTS §10: have the SUT's own client parse a canonical payload.
+
+        Delivered as a `send_message` carrying `{operation, wire_payload}` in
+        a data part; the agent replies with whatever its client produced, in
+        the same shape a dispatcher's `payload` would take, so `expect_parsed`
+        is evaluated exactly like `expect.body`.
+        """
+        block = step.client_response
+        params = {
+            'message': {
+                'role': 'ROLE_USER',
+                'messageId': self._new_uuid(),
+                'parts': [
+                    {'text': CLIENT_PARSE_BEHAVIOR},
+                    {
+                        'data': {
+                            'operation': block.operation.value,
+                            'wire_payload': scope.substitute(block.wire_payload),
+                        }
+                    },
+                ],
+            }
+        }
+
+        response = await self.dispatcher.dispatch(
+            Operation.SEND_MESSAGE, params, self._headers()
+        )
+        if response.error is not None:
+            return self._step(
+                step, Outcome.FAIL, started,
+                message=(
+                    f'the SUT could not parse the payload: '
+                    f'{_name_of(response.error)}: {response.error.message}'
+                ),
+            )
+
+        parsed = _parsed_from(response.payload)
+        if parsed is None:
+            return self._step(
+                step, Outcome.FAIL, started,
+                message=(
+                    f'the SUT returned no parsed payload; it may not implement '
+                    f'{CLIENT_PARSE_BEHAVIOR}'
+                ),
+            )
+
+        scope.record_response(step.id, parsed)
+        result = evaluate_body(
+            scope.substitute(step.expect_parsed), parsed, path='parsed'
+        )
+        return self._finish(step, scope, result, started, attempts=1)
 
     async def _run_unary_step(
         self, step: Step, scope: Scope, started: float
@@ -483,14 +549,37 @@ class Runner:
         except (UnresolvedVariable, PathError) as exc:
             return self._step(step, Outcome.ERROR, started, message=str(exc))
 
-        events, status, timed_out = await self._collect(source, step.expect_stream)
+        try:
+            events, status, timed_out = await self._collect(source, step.expect_stream)
+        except DispatchError as exc:
+            if step.expect_error is None:
+                raise
+            # A stream the SUT refuses to open *is* the expected outcome:
+            # `STREAM-SUB-003` subscribes to a terminal task and requires an
+            # error. The transport reports that as a failed call rather than
+            # as a WireError, so there is no code to name — an `expect_error`
+            # that asserts a specific `error_type` will still fail, honestly,
+            # because nothing here can identify one.
+            result = evaluate_error(
+                _resolved(step.expect_error, scope), {'message': str(exc)}
+            )
+            return self._finish(step, scope, result, started, attempts=1)
 
         scope.record_response(step.id, [event.payload for event in events])
         captured = self._capture(step, scope, [event.payload for event in events])
         if captured is not None:
             return self._step(step, Outcome.FAIL, started, message=captured)
 
-        result = evaluate_stream(step.expect_stream, events, timed_out=timed_out)
+        result = AssertionResult()
+        if step.expect_stream is not None:
+            result += evaluate_stream(step.expect_stream, events, timed_out=timed_out)
+        elif step.expect_error is not None:
+            # The stream opened, so the error the step required did not happen.
+            result += _failed(
+                f'expected an error, but the stream opened and produced '
+                f'{len(events)} event(s)',
+                'an error', f'{len(events)} event(s)',
+            )
         result += self._evaluate_stream_status(step, scope, status, len(events))
         return self._finish(step, scope, result, started, attempts=1)
 
@@ -503,7 +592,7 @@ class Runner:
         )
 
     async def _collect(
-        self, source: AsyncIterator[StreamEvent], expect: Any
+        self, source: AsyncIterator[StreamEvent], expect: Any | None
     ) -> tuple[list[StreamedEvent], int | None, bool]:
         """Read a stream into a list, bounded by `timeout_ms` and `max_count`.
 
@@ -513,7 +602,9 @@ class Runner:
         """
         events: list[StreamedEvent] = []
         status: int | None = None
-        limit = None if expect.max_count is None else expect.max_count + 1
+        # `expect` is absent when a streaming operation asserts only that the
+        # call fails — `STREAM-SUB-003` subscribes to a terminal task.
+        limit = None if expect is None or expect.max_count is None else expect.max_count + 1
 
         async def pump() -> None:
             nonlocal status
@@ -524,7 +615,7 @@ class Runner:
                 if limit is not None and len(events) >= limit:
                     break
 
-        if not expect.timeout_ms:
+        if expect is None or not expect.timeout_ms:
             await pump()
             return events, status, False
 
@@ -680,9 +771,16 @@ class Runner:
                     scope.substitute(step.expect.status), response.status
                 )
             if step.expect.body is not None:
-                if response.error is not None:
-                    # Asserting a body against an error response reports every
-                    # field as missing and buries the actual cause.
+                if response.error is not None and step.kind() is not StepKind.RAW:
+                    # On an operation step `payload` is the unwrapped result,
+                    # so asserting a body against an error would report every
+                    # expected field as missing and bury the real cause.
+                    #
+                    # A raw step is the opposite case: `dispatch_raw` returns
+                    # the *whole* body, so an error envelope is precisely what
+                    # `expect.body` describes — `JSONRPC-ERR-001` asserts
+                    # `body.error.code: -32601`. Refusing here would fail every
+                    # such test for a reason of our own making.
                     return _failed(
                         f'expected a response body, got error '
                         f'{_name_of(response.error)}: {response.error.message}',
@@ -760,6 +858,41 @@ class Runner:
 
 class RunError(RuntimeError):
     """The run cannot proceed — missing inputs, not a SUT defect."""
+
+
+def _parsed_from(payload: Any) -> Any | None:
+    """Dig the client's parse result out of the task the agent returned.
+
+    The agent puts it in a data part on an artifact. Returns ``None`` when
+    there is none — which is what a SUT that ignores the behaviour looks like,
+    and must read as a failure rather than an empty pass.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    task = payload.get('task') if 'task' in payload else payload
+    if not isinstance(task, Mapping):
+        return None
+    for artifact in task.get('artifacts') or ():
+        for part in (artifact or {}).get('parts') or ():
+            if isinstance(part, Mapping) and isinstance(part.get('data'), Mapping):
+                return part['data']
+    return None
+
+
+def _is_streaming(step: Step) -> bool:
+    """Should this step be driven as a stream?
+
+    Decided by the *operation*, not by the presence of `expect_stream`. Two
+    corpus steps subscribe or send-streaming while asserting only that the
+    call fails (`STREAM-SUB-003`, `CORE-CAP-002`), and routing those to the
+    unary path makes the dispatcher refuse them — an error about our own
+    dispatch, reported against the SUT.
+    """
+    if step.expect_stream is not None:
+        return True
+    if step.kind() is not StepKind.OPERATION:
+        return False
+    return binding_for_operation(step.operation).streaming
 
 
 def _resolved(model: _M, scope: Scope, *, keep: tuple[str, ...] = ()) -> _M:

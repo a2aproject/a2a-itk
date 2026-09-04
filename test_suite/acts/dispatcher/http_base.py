@@ -55,8 +55,20 @@ class HttpDispatcher(Dispatcher):
         client: httpx.AsyncClient | None = None,
         timeout: float = 30.0,
         default_headers: Mapping[str, str] | None = None,
+        agent_card_url: str | None = None,
     ) -> None:
+        """
+        Args:
+          base_url: Where this binding's operations hang off.
+          agent_card_url: Base URL for the well-known agent card. Defaults to
+            ``base_url``, which is right when the binding is mounted at the
+            root and wrong when it is not — an agent serving REST under
+            ``/rest`` still publishes its card at the host root, because the
+            card is what tells a client which bindings exist and so cannot
+            live behind one of them.
+        """
         self.base_url = base_url.rstrip('/')
+        self.agent_card_url = (agent_card_url or base_url).rstrip('/')
         self._default_headers = dict(default_headers or {})
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
@@ -141,7 +153,7 @@ class HttpDispatcher(Dispatcher):
         """
         response = await self._request(
             'GET',
-            self._url(WELL_KNOWN_AGENT_CARD_PATH),
+            f'{self.agent_card_url}{WELL_KNOWN_AGENT_CARD_PATH}',
             headers=self._headers(headers),
         )
         parsed, text = self._parse(response)
