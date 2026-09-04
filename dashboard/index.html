@@ -54,7 +54,12 @@
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      media="print"
+      onload="this.media='all'"
     />
+    <noscript>
+      <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" />
+    </noscript>
 
     <script type="application/ld+json">
       {
@@ -80,8 +85,23 @@
       }
     </script>
 
+    <style>
+      #boot-no-js {
+        display: none;
+      }
+    </style>
+    <noscript>
+      <style>
+        #boot-no-js {
+          display: block;
+        }
+        #boot-loading {
+          display: none;
+        }
+      </style>
+    </noscript>
+
     <script>
-      // Apply the stored theme before first paint so the page never flashes.
       try {
         document.documentElement.dataset.theme =
           localStorage.getItem("itk-theme") || "auto";
@@ -91,35 +111,67 @@
     </script>
   </head>
   <body>
-    <!-- Replaced by the React app on mount; serves crawlers and no-JS visitors. -->
     <div id="root">
-      <div class="no-js-fallback">
-        <h1>A2A SDK compatibility dashboard</h1>
-        <p>
-          Nightly interoperability results for the
-          <a href="https://goo.gle/a2a">Agent2Agent (A2A) protocol</a> SDKs. Every run
-          exercises each SDK against its peers across the JSON-RPC, gRPC and HTTP+JSON
-          transports, for both streaming and non-streaming behaviours, covering send
-          message, send message (streaming), push notification and resubscribe.
+      <header class="topbar">
+        <div class="topbar-inner">
+          <span class="brand">
+            <img class="brand-mark" src="./a2a-icon.svg" alt="" width="22" height="22" />
+            <span>A2A <strong>Integration Test Kit</strong></span>
+          </span>
+          <nav class="topbar-links" aria-label="Resources">
+            <a href="https://github.com/a2aproject/a2a-itk#readme">Documentation</a>
+            <a href="https://goo.gle/a2a">Specification</a>
+            <a href="https://github.com/a2aproject/a2a-itk">GitHub</a>
+            <span class="theme-toggle" id="boot-theme">Auto</span>
+          </nav>
+        </div>
+      </header>
+
+      <main class="page">
+        <div class="intro">
+          <h1>A2A SDK compatibility dashboard</h1>
+          <p>
+            Nightly interoperability results for the
+            <a href="https://goo.gle/a2a">Agent2Agent (A2A) protocol</a> SDKs. Every run
+            exercises each SDK against its peers across the JSON-RPC, gRPC and HTTP+JSON
+            transports, for both streaming and non-streaming behaviours.
+          </p>
+        </div>
+
+        <p class="notice" id="boot-loading" role="status">
+          <span class="spinner" aria-hidden="true"></span> Loading the interoperability
+          matrix…
         </p>
-        <h2>SDKs covered</h2>
-        <ul>
-          <li>Python — a2a-python</li>
-          <li>Go — a2a-go</li>
-          <li>Rust — a2a-rs</li>
-          <li>.NET — a2a-dotnet</li>
-          <li>TypeScript — a2a-js</li>
-          <li>Java — a2a-java</li>
-        </ul>
-        <p>
-          The live matrix needs JavaScript. See the
-          <a href="https://github.com/a2aproject/a2a-itk#readme"
-            >Integration Test Kit documentation</a
-          >
-          for the raw nightly metrics.
-        </p>
-      </div>
+
+        <div id="boot-no-js">
+          <h2>SDKs covered</h2>
+          <ul>
+            <li>Python — a2a-python</li>
+            <li>Go — a2a-go</li>
+            <li>Rust — a2a-rs</li>
+            <li>.NET — a2a-dotnet</li>
+            <li>TypeScript — a2a-js</li>
+            <li>Java — a2a-java</li>
+          </ul>
+          <p>
+            The live matrix needs JavaScript. See the
+            <a href="https://github.com/a2aproject/a2a-itk#readme"
+              >Integration Test Kit documentation</a
+            >
+            for the raw nightly metrics.
+          </p>
+        </div>
+      </main>
     </div>
+
+    <script>
+      try {
+        var t = localStorage.getItem("itk-theme") || "auto";
+        document.getElementById("boot-theme").textContent =
+          t.charAt(0).toUpperCase() + t.slice(1);
+      } catch (e) {}
+    </script>
+
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
