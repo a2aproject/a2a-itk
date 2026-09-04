@@ -6,8 +6,8 @@ operations against one SUT, plus assertions on what comes back. This package
 is the ITK-side implementation: `schema.py` models the format, `compat.py`
 reconciles the shipped corpus with it, `loader.py` turns a manifest into a
 flat, ordered run plan, `wire_map.py` and `dispatcher/` bind an abstract
-operation to a transport, and `variables.py` and `assertions.py` decide what a
-response means.
+operation to a transport, `variables.py` and `assertions.py` decide what a
+response means, and `runner.py` sequences the whole thing into results.
 
 It sits *beside* `test_suite.scenarios`, not inside it, because the two suites
 answer different questions and share nothing at run time: a traversal walks an
@@ -52,6 +52,16 @@ from test_suite.acts.loader import (
     load_suite,
     parse_document,
     render_validation_error,
+)
+from test_suite.acts.runner import (
+    FailureDetail,
+    Outcome,
+    RunError,
+    Runner,
+    StepResult,
+    TestResult,
+    is_conformant,
+    summarize,
 )
 from test_suite.acts.schema import (
     ACTS_VERSION,
@@ -136,10 +146,12 @@ __all__ = [
     'ExpectError',
     'ExpectStream',
     'Failure',
+    'FailureDetail',
     'http_status_for_grpc',
     'HttpMethod',
     'InlineAssertion',
     'is_acts_document',
+    'is_conformant',
     'Level',
     'load_document',
     'load_suite',
@@ -155,6 +167,7 @@ __all__ = [
     'OPERATIONS',
     'OPERATORS',
     'Ordering',
+    'Outcome',
     'parse_document',
     'PathError',
     'Preconditions',
@@ -166,13 +179,18 @@ __all__ = [
     'render_validation_error',
     'Repeat',
     'Rewrite',
+    'RunError',
+    'Runner',
     'RunnerRequirement',
     'Scope',
     'site_counts',
     'Step',
     'StepKind',
+    'StepResult',
     'Suite',
+    'summarize',
     'Test',
+    'TestResult',
     'TransportBinding',
     'UnresolvedVariable',
     'UntilError',
