@@ -20,6 +20,7 @@ from test_suite.acts.wire_map import (
     JSONRPC_CONTENT_TYPE,
     binding_for_operation,
     error_for_jsonrpc_code,
+    resolve_operation,
 )
 
 
@@ -75,6 +76,7 @@ class JsonRpcDispatcher(HttpDispatcher):
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> WireResponse:
+        operation = resolve_operation(operation, params)
         binding = binding_for_operation(operation)
         if binding.http_only:
             return await self._get_agent_card(headers)

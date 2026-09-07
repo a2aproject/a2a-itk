@@ -61,6 +61,34 @@ def _render_combined(reports: list, report_writer) -> None:
         )
     conformant = all(report_writer.is_conformant(r) for r in reports)
     print(f"  => {'CONFORMANT' if conformant else 'NOT CONFORMANT'} overall")
+    _render_unsatisfiable(reports)
+
+
+def _render_unsatisfiable(reports: list) -> None:
+    """Name the tests no agent could ever have run.
+
+    These are skips, so they cost nothing in the verdict and are invisible in
+    a count that lumps them with "wrong binding". Printing them is the whole
+    point of marking them: a corpus that gates a test on something the
+    protocol does not define has silently removed it from every run, and
+    nothing else in the output says so.
+    """
+    from test_suite.acts.runner import UNSATISFIABLE
+
+    blocked: dict[str, str] = {}
+    for report in reports:
+        for suite in report.get('suites', ()):
+            for test in suite.get('tests', ()):
+                reason = test.get('skip_reason') or ''
+                if reason.startswith(UNSATISFIABLE):
+                    blocked[test['id']] = reason[len(UNSATISFIABLE):]
+    if not blocked:
+        return
+
+    print()
+    print(f'  {len(blocked)} test(s) COULD NOT RUN ON ANY BINDING:')
+    for test_id, reason in sorted(blocked.items()):
+        print(f'    {test_id}: {reason}')
 
 
 def _generate_protos(mount: Path) -> None:
@@ -163,12 +191,8 @@ def main() -> int:
                     transport=TransportBinding(binding),
                     suite_path=args.suite,
                     test_ids=args.tests,
-                    # The corpus names these and no document defines them;
-                    # locally they only need to be values the SUT will reject.
-                    variables={
-                        'insufficientAuthToken': 'itk-insufficient-token',
-                        'otherUserTaskId': '00000000-0000-0000-0000-0000000000ff',
-                    },
+                    # The corpus names these and no document defines them.
+                    variables=acts_runner.RUNNER_VARIABLES,
                     gate_on_behaviors=not args.no_gate,
                 )
             )

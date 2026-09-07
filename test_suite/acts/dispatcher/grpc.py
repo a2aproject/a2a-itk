@@ -24,6 +24,7 @@ from typing import Any, AsyncIterator, Mapping
 
 import grpc
 import httpx
+from google.api import field_behavior_pb2
 from google.protobuf import empty_pb2
 from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
 from google.rpc import error_details_pb2, status_pb2
@@ -52,6 +53,7 @@ from test_suite.acts.wire_map import (
     binding_for_operation,
     error_for_reason,
     http_status_for_grpc,
+    resolve_operation,
 )
 
 
@@ -71,16 +73,77 @@ def _message_type(name: str) -> type:
         raise DispatchError(f'unknown protobuf message {name!r}') from exc
 
 
+def _is_required(field: Any) -> bool:
+    """Whether the proto marks this field ``google.api.field_behavior=REQUIRED``."""
+    behaviors = field.GetOptions().Extensions[field_behavior_pb2.field_behavior]
+    return field_behavior_pb2.REQUIRED in behaviors
+
+
+def _restore_required(descriptor: Any, lean: Any, full: Any) -> Any:
+    """Put back the REQUIRED fields that dropping defaults threw away.
+
+    Walks ``lean`` and ``full`` in parallel under ``descriptor``, copying a key
+    across only where the proto marks that field required. Recursion follows
+    message fields that are *present*, so a nested required scalar comes back
+    too.
+
+    Only unset scalars and empty repeated fields can be missing from ``lean``
+    while present in ``full`` — singular message fields carry presence, so
+    ``always_print_fields_with_no_presence`` never invents one. That is why
+    copying a value across cannot drag an over-printed subtree with it.
+    """
+    if not isinstance(lean, dict) or not isinstance(full, dict):
+        return lean
+
+    for field in descriptor.fields:
+        key = field.json_name
+        if _is_required(field) and key not in lean and key in full:
+            lean[key] = full[key]
+            continue
+        if key not in lean or field.type != field.TYPE_MESSAGE:
+            continue
+        nested = field.message_type
+        # Maps and well-known types have JSON shapes of their own that the
+        # descriptor does not describe — walking in would match a field list
+        # against a rendering that has no fields.
+        if nested.GetOptions().map_entry:
+            continue
+        if nested.full_name.startswith('google.protobuf.'):
+            continue
+        if field.is_repeated:
+            for lean_item, full_item in zip(lean[key], full.get(key) or ()):
+                _restore_required(nested, lean_item, full_item)
+        else:
+            _restore_required(nested, lean[key], full.get(key))
+    return lean
+
+
 def _to_dict(message: Any) -> Any:
     """ProtoJSON-encode a response message.
 
     ``preserving_proto_field_name=False`` gives camelCase and
     ``use_integers_for_enums=False`` gives enum *names*, which is what the
     corpus asserts (``state: TASK_STATE_COMPLETED``) and what the two HTTP
-    bindings put on the wire. Defaults are dropped, matching the HTTP
-    bindings' habit of omitting empty fields.
+    bindings put on the wire.
+
+    Defaults are dropped, matching the HTTP bindings' habit of omitting empty
+    fields — **except** where the proto marks a field ``REQUIRED``. A field the
+    spec says must always be present is exactly what an assertion is entitled
+    to look for, and proto3 gives an empty scalar no presence of its own to
+    lose. A2A §3.1.4 says it outright for ``nextPageToken``: always present,
+    empty string on the last page.
+
+    Printing *every* no-presence default instead is the obvious move and is
+    wrong: it materializes `history: []` and `taskId: ""` on responses that
+    never carried them, which breaks the `absent` assertions the corpus writes
+    against exactly those fields. Measured on the corpus, it trades one fixed
+    test for two broken ones.
     """
-    return MessageToDict(message)
+    return _restore_required(
+        message.DESCRIPTOR,
+        MessageToDict(message),
+        MessageToDict(message, always_print_fields_with_no_presence=True),
+    )
 
 
 class GrpcDispatcher(Dispatcher):
@@ -175,6 +238,7 @@ class GrpcDispatcher(Dispatcher):
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> WireResponse:
+        operation = resolve_operation(operation, params)
         binding = binding_for_operation(operation)
         if binding.http_only:
             return await self._get_agent_card(headers)

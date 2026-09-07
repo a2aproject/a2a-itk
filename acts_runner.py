@@ -48,6 +48,33 @@ DEFAULT_SUITE = Path(__file__).resolve().parent / 'scenarios' / 'acts' / 'suite.
 #: The identifier the SUT goes by, matching `itk_runner.SUT_ID`.
 SUT_ID = 'current'
 
+#: Bearer token the runner presents on every abstract operation, so an
+#: operation the spec puts behind authentication can still be exercised. A2A
+#: §13.3 requires `Get Extended Agent Card` to be authenticated, and
+#: `CARD-EXT-001` fetches it expecting success — which only a runner holding a
+#: credential can ask for.
+#:
+#: Raw steps never carry it: `dispatch_raw` drops the dispatcher's defaults, so
+#: `SEC-EXTCARD-001` still sends nothing and `SEC-EXTCARD-002` still sends the
+#: insufficient token. That is the whole reason those two mean anything, and
+#: why the abstract and raw step kinds must not share a header set.
+#:
+#: Not a secret — a SUT's `itk/` fixture has to recognise it to answer 200
+#: rather than 401. ACTS declares the *capability* a runner needs
+#: (`runner_requirements: [auth_credentials]`) but never says what the
+#: credential is, so this pairing is ours and is documented in `acts/`.
+ACTS_AUTH_TOKEN = 'itk-valid-token'
+
+#: Offered by `SEC-EXTCARD-002` as a token that authenticates but does not
+#: authorize; a fixture should answer 403 rather than 401.
+ACTS_INSUFFICIENT_TOKEN = 'itk-insufficient-token'
+
+#: Variables the corpus names that no document defines (spec §12.2).
+RUNNER_VARIABLES: dict[str, Any] = {
+    'insufficientAuthToken': ACTS_INSUFFICIENT_TOKEN,
+    'otherUserTaskId': '00000000-0000-0000-0000-0000000000ff',
+}
+
 #: Protocol bindings as the agent card spells them, mapped to ACTS's names.
 #: The card says `JSONRPC` / `GRPC` / `HTTP_JSON`; ACTS says `rest` for the
 #: last one. The two vocabularies are separate on purpose, so the translation
@@ -140,11 +167,16 @@ def build_dispatcher(
     not necessarily where the binding is mounted.
     """
     url, _ = interface_for(card, binding)
+    # Presented on abstract operations only; `dispatch_raw` drops it, which is
+    # what keeps the unauthenticated `SEC-EXTCARD-*` probes honest.
+    auth = {'Authorization': f'Bearer {ACTS_AUTH_TOKEN}'}
 
     if binding is TransportBinding.GRPC:
         # The card gives `host:port` for gRPC, sometimes with a scheme.
         target = url.removeprefix('http://').removeprefix('https://').rstrip('/')
-        return for_binding(binding, target, agent_card_url=base_url)
+        return for_binding(
+            binding, target, agent_card_url=base_url, default_headers=auth
+        )
 
     # For both HTTP bindings the *mount point* is the base, not the host root.
     # A raw step writes an absolute path — `POST /` for JSON-RPC,
@@ -156,9 +188,17 @@ def build_dispatcher(
 
     if binding is TransportBinding.JSONRPC:
         # With the mount as the base, the endpoint itself is just `/`.
-        return for_binding(binding, mount, rpc_path='/', agent_card_url=base_url)
+        return for_binding(
+            binding,
+            mount,
+            rpc_path='/',
+            agent_card_url=base_url,
+            default_headers=auth,
+        )
 
-    return for_binding(binding, mount, agent_card_url=base_url)
+    return for_binding(
+        binding, mount, agent_card_url=base_url, default_headers=auth
+    )
 
 
 def sut_repo_root() -> Path:

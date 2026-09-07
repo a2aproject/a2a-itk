@@ -34,8 +34,10 @@ import enum
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final, TypeVar
+
+from pyproto import a2a_pb2
 
 from pydantic import BaseModel
 
@@ -208,6 +210,33 @@ def _declared_timeout_ms(expect: Any | None) -> int | None:
     return None if expect is None else expect.timeout_ms
 
 
+#: Capability names an agent card can carry, taken from the specification's own
+#: `AgentCapabilities` message rather than written out here, so the set tracks
+#: the proto instead of drifting from it. JSON names, because that is how a
+#: card spells them: `pushNotifications`, not `push_notifications`.
+KNOWN_CAPABILITIES: Final[frozenset[str]] = frozenset(
+    field.json_name for field in a2a_pb2.AgentCapabilities.DESCRIPTOR.fields
+)
+
+#: Marks a skip nobody can clear by configuring the SUT differently. A test
+#: gated on a capability that does not exist never runs against any agent, and
+#: an ordinary "capability=False" skip reads as "not applicable here" — which
+#: is how four MUST-level auth tests stayed invisible across every binding.
+#:
+#: It stays a *skip* rather than becoming an error on purpose. The SUT did
+#: nothing wrong, and `report.is_conformant` counts errors against the verdict,
+#: so erroring would publish a corpus defect as the SDK's non-conformance.
+UNSATISFIABLE: Final = 'PRECONDITION CANNOT BE SATISFIED: '
+
+
+def unsatisfiable_skips(results: Iterable[TestResult]) -> list[TestResult]:
+    """The results skipped for a precondition no agent could ever meet."""
+    return [
+        r for r in results
+        if r.result is Outcome.SKIP and (r.skip_reason or '').startswith(UNSATISFIABLE)
+    ]
+
+
 def _error_info(error: WireError) -> Mapping[str, Any] | None:
     """The `google.rpc.ErrorInfo` among an error's details, if it carried one."""
     for detail in error.details:
@@ -239,6 +268,51 @@ def _observed_error(error: WireError) -> dict[str, Any]:
     if info is not None:
         observed['details'] = info
     return observed
+
+
+def _unnamed_error_hint(error: WireError) -> str | None:
+    """How the SUT spelled an error this suite declines to name, if at all.
+
+    `None` when the error *was* named, or when the SUT gave nothing to quote.
+    """
+    if error.error_type is not None:
+        return None
+    if error.reason:
+        return f'ErrorInfo.reason {error.reason!r}'
+    if error.jsonrpc_code is not None:
+        return f'JSON-RPC code {error.jsonrpc_code}'
+    if error.status:
+        return f'gRPC status {error.status}'
+    return None
+
+
+def _explain_unnamed(result: AssertionResult, error: WireError) -> AssertionResult:
+    """Say what the SUT actually returned when `error_type` came out missing.
+
+    A2A §11.6 makes status non-injective, so an error whose `ErrorInfo.reason`
+    is not an A2A name is left unnamed rather than guessed at — but bare
+    "error.error_type is missing" then sends the reader off to re-run on
+    JSON-RPC just to learn what the SUT said. Quoting it costs nothing and is
+    the difference between a report you can act on and one you cannot.
+    """
+    hint = _unnamed_error_hint(error)
+    if hint is None or result.ok:
+        return result
+    return AssertionResult(
+        tuple(
+            replace(
+                failure,
+                message=(
+                    f'{failure.message} — the SUT returned {hint}, '
+                    f'which is not an A2A error name'
+                ),
+            )
+            if failure.path.endswith('error_type')
+            else failure
+            for failure in result.failures
+        ),
+        result.checks,
+    )
 
 
 class Runner:
@@ -387,6 +461,12 @@ class Runner:
 
         advertised = card.get('capabilities') or {}
         for name, expected in (preconditions.capabilities or {}).items():
+            if name not in KNOWN_CAPABILITIES:
+                return (
+                    f'{UNSATISFIABLE}{name!r} is not a capability A2A defines '
+                    f'({", ".join(sorted(KNOWN_CAPABILITIES))}), so no agent '
+                    f'card can advertise it'
+                )
             actual = advertised.get(name, False)
             if isinstance(expected, bool):
                 # A card that omits a capability has not advertised it, which
@@ -812,8 +892,12 @@ class Runner:
                     'expected an error, but the call succeeded',
                     'an error', f'HTTP {response.status}',
                 )
-            result += evaluate_error(
-                _resolved(step.expect_error, scope), _observed_error(response.error)
+            result += _explain_unnamed(
+                evaluate_error(
+                    _resolved(step.expect_error, scope),
+                    _observed_error(response.error),
+                ),
+                response.error,
             )
 
         if step.expect is not None:

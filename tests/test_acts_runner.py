@@ -34,12 +34,15 @@ from test_suite.acts.runner import (
     CLIENT_PARSE_BEHAVIOR,
     DEFAULT_DELAY_MS,
     DEFAULT_MAX_ATTEMPTS,
+    KNOWN_CAPABILITIES,
+    UNSATISFIABLE,
     VERSION_HEADER,
     FailureDetail,
     Outcome,
     Runner,
     is_conformant,
     summarize,
+    unsatisfiable_skips,
 )
 from test_suite.acts.schema import (
     ErrorType,
@@ -330,6 +333,37 @@ class TestExpectError:
         step = get_task(expect_error={'error_type': 'TaskNotFoundError'})
         assert run(runner_for(dispatcher), a_test(step)).result is Outcome.FAIL
 
+    def test_an_unnamed_error_reports_what_the_sut_did_say(self):
+        """Otherwise the reader re-runs on JSON-RPC just to learn the reason."""
+        dispatcher = FakeDispatcher(failed(None, reason='INVALID_PARAMS'))
+        step = get_task(expect_error={'error_type': 'TaskNotFoundError'})
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.FAIL
+        assert "ErrorInfo.reason 'INVALID_PARAMS'" in result.failure.message
+        assert 'not an A2A error name' in result.failure.message
+
+    def test_an_unnamed_error_falls_back_to_the_jsonrpc_code(self):
+        dispatcher = FakeDispatcher(failed(None, jsonrpc_code=-31999))
+        step = get_task(expect_error={'error_type': 'TaskNotFoundError'})
+        result = run(runner_for(dispatcher), a_test(step))
+        assert 'JSON-RPC code -31999' in result.failure.message
+
+    def test_a_named_error_is_not_annotated(self):
+        """The name is right there; a hint would only be noise."""
+        dispatcher = FakeDispatcher(
+            failed(ErrorType.INTERNAL, reason='INTERNAL_ERROR')
+        )
+        step = get_task(expect_error={'error_type': 'TaskNotFoundError'})
+        result = run(runner_for(dispatcher), a_test(step))
+        assert 'not an A2A error name' not in result.failure.message
+
+    def test_a_silent_error_is_left_alone(self):
+        """Nothing to quote — the SUT identified its error in no way at all."""
+        dispatcher = FakeDispatcher(failed(None))
+        step = get_task(expect_error={'error_type': 'TaskNotFoundError'})
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.failure.message == 'error.error_type is missing'
+
     def test_success_where_an_error_was_expected_fails(self):
         dispatcher = FakeDispatcher(ok({'id': 'T1'}))
         step = get_task(expect_error={'error_type': 'TaskNotFoundError'})
@@ -558,6 +592,55 @@ class TestPreconditions:
         result = run(runner, test)
         assert result.result is Outcome.SKIP
         assert 'pushNotifications' in result.skip_reason
+
+    def test_a_capability_the_spec_does_not_define_is_marked_unsatisfiable(self):
+        """`SEC-AUTH-001..004` gate on `authentication`, which A2A 1.0 has not got.
+
+        An ordinary "capability=False" skip reads as "not applicable to this
+        agent", so four MUST tests sat invisible on every binding. The marker
+        says nobody can clear it by configuring the SUT differently.
+        """
+        runner = runner_for(FakeDispatcher(ok()), agent_card=self.CARD)
+        test = a_test(
+            get_task(), preconditions={'capabilities': {'authentication': True}}
+        )
+        result = run(runner, test)
+        assert result.result is Outcome.SKIP
+        assert result.skip_reason.startswith(UNSATISFIABLE)
+        assert "'authentication' is not a capability" in result.skip_reason
+
+    def test_the_known_set_comes_from_the_specs_own_proto(self):
+        """Written out by hand it would drift; derived, it cannot."""
+        assert KNOWN_CAPABILITIES == {
+            'streaming', 'pushNotifications', 'extensions', 'extendedAgentCard',
+        }
+
+    def test_an_unsatisfiable_skip_is_not_an_error(self):
+        """It is the corpus that is wrong, and the SUT must not wear it.
+
+        `is_conformant` counts errors against the verdict, so erroring here
+        would publish a corpus defect as this SDK's non-conformance.
+        """
+        runner = runner_for(FakeDispatcher(ok()), agent_card=self.CARD)
+        test = a_test(
+            get_task(), preconditions={'capabilities': {'authentication': True}}
+        )
+        assert run(runner, test).result is not Outcome.ERROR
+
+    def test_unsatisfiable_skips_are_collectable(self):
+        """What the CLI reads to print them; an ordinary skip stays out."""
+        runner = runner_for(FakeDispatcher(ok()), agent_card=self.CARD)
+        blocked = run(
+            runner,
+            a_test(get_task(), preconditions={'capabilities': {'authentication': True}}),
+        )
+        ordinary = run(
+            runner,
+            a_test(
+                get_task(), preconditions={'capabilities': {'pushNotifications': True}}
+            ),
+        )
+        assert [r.id for r in unsatisfiable_skips([blocked, ordinary])] == [blocked.id]
 
     def test_an_absent_capability_satisfies_a_false_precondition(self):
         """"Must not advertise X" is satisfied by a card that omits X."""

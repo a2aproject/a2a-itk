@@ -25,7 +25,7 @@ from test_suite.acts.dispatcher import (
     GrpcDispatcher,
     UnsupportedByBinding,
 )
-from test_suite.acts.dispatcher.grpc import STATUS_DETAILS_KEY
+from test_suite.acts.dispatcher.grpc import STATUS_DETAILS_KEY, _to_dict
 from test_suite.acts.schema import (
     ErrorType,
     HttpMethod,
@@ -190,6 +190,74 @@ def call(agent: FakeAgent, coro_factory):
                 await dispatcher.aclose()
 
         return loop.run_until_complete(run())
+
+
+class TestProtoJsonProjection:
+    """What survives the ProtoJSON projection, and what must not.
+
+    proto3 gives an empty scalar no presence, so the encoder's choice about
+    defaults decides whether an assertion can see the field at all. The corpus
+    asserts in both directions — `nextPageToken` must be *there* and empty
+    (A2A §3.1.4), `history` and `taskId` must be *absent* — so neither
+    "drop every default" nor "print every default" satisfies it.
+    """
+
+    def test_a_required_empty_scalar_is_present(self):
+        """§3.1.4: `nextPageToken` is always present, empty on the last page."""
+        out = _to_dict(a2a_pb2.ListTasksResponse(tasks=[], next_page_token=''))
+        assert out['nextPageToken'] == ''
+
+    def test_the_other_required_scalars_come_back_too(self):
+        out = _to_dict(a2a_pb2.ListTasksResponse())
+        assert out['pageSize'] == 0
+        assert out['totalSize'] == 0
+        assert out['tasks'] == []
+
+    def test_an_optional_empty_repeated_field_stays_absent(self):
+        """`Task.history` is not required, and `CORE-HIST-003` asserts absence."""
+        out = _to_dict(a2a_pb2.Task(id='t1', status=a2a_pb2.TaskStatus()))
+        assert 'history' not in out
+        assert 'artifacts' not in out
+
+    def test_an_optional_empty_scalar_stays_absent(self):
+        """`Message.taskId`/`contextId` are not required; `DM-FMT-003` wants them gone."""
+        out = _to_dict(
+            a2a_pb2.Message(message_id='m1', role=a2a_pb2.ROLE_AGENT, parts=[])
+        )
+        assert 'taskId' not in out
+        assert 'contextId' not in out
+
+    def test_required_fields_are_restored_inside_nested_messages(self):
+        """The walk descends: a Task nested in a response gets the same treatment."""
+        out = _to_dict(
+            a2a_pb2.ListTasksResponse(
+                tasks=[a2a_pb2.Task(id='', status=a2a_pb2.TaskStatus())]
+            )
+        )
+        assert out['tasks'][0]['id'] == ''
+        assert 'history' not in out['tasks'][0]
+
+    def test_a_set_value_is_untouched(self):
+        out = _to_dict(a2a_pb2.ListTasksResponse(next_page_token='cursor-2'))
+        assert out['nextPageToken'] == 'cursor-2'
+
+    def test_well_known_types_keep_their_own_json_shape(self):
+        """`Part.data` is a `google.protobuf.Value` — the walk must not enter it."""
+        part = a2a_pb2.Part()
+        part.data.struct_value['k'] = 'v'
+        out = _to_dict(a2a_pb2.Message(message_id='m1', parts=[part]))
+        assert out['parts'][0]['data'] == {'k': 'v'}
+
+    def test_enums_are_names_and_fields_are_camel_case(self):
+        out = _to_dict(
+            a2a_pb2.Task(
+                id='t1',
+                context_id='c1',
+                status=a2a_pb2.TaskStatus(state=a2a_pb2.TASK_STATE_COMPLETED),
+            )
+        )
+        assert out['status']['state'] == 'TASK_STATE_COMPLETED'
+        assert out['contextId'] == 'c1'
 
 
 class TestDispatch:

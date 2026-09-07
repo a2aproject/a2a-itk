@@ -37,6 +37,14 @@ MESSAGE_SCOPED_PARAMS = ('taskId', 'contextId')
 #: ``expect.body: {id: ..., url: ...}`` unnested.
 NESTED_PUSH_CONFIG_PARAM = 'pushNotificationConfig'
 
+#: ``get_agent_card`` takes ``extended: true`` to mean "the extended card",
+#: which :func:`~test_suite.acts.wire_map.resolve_operation` turns into
+#: ``get_extended_agent_card``. Having selected the operation the flag has said
+#: everything it has to say, and ``GetExtendedAgentCardRequest`` carries only
+#: ``tenant`` — leaving it in makes a strict ProtoJSON parser reject the whole
+#: request for an unknown field.
+OPERATION_SELECTING_PARAM = 'extended'
+
 
 def adapt(operation: Operation, params: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return ``params`` shaped as the operation's A2A request message.
@@ -50,6 +58,8 @@ def adapt(operation: Operation, params: Mapping[str, Any] | None) -> dict[str, A
         return _fold_into_message(out)
     if operation is Operation.CREATE_PUSH_CONFIG:
         return _flatten_push_config(out)
+    if operation is Operation.GET_EXTENDED_AGENT_CARD:
+        out.pop(OPERATION_SELECTING_PARAM, None)
     return out
 
 

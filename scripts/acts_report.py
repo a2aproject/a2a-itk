@@ -23,6 +23,13 @@ _RULE = '-' * 56
 
 LEVELS = ('must', 'should', 'may')
 
+#: Prefix the runner puts on a skip no agent could ever clear — a precondition
+#: naming a capability the protocol does not define. Duplicated from
+#: ``test_suite.acts.runner.UNSATISFIABLE`` rather than imported, to keep this
+#: script stdlib-only on the CI path; ``tests/test_acts_pipeline.py`` pins the
+#: two equal so the copy cannot drift.
+UNSATISFIABLE_PREFIX = 'PRECONDITION CANNOT BE SATISFIED: '
+
 
 class InvalidReport(ValueError):
     """The payload is not a well-formed ACTS report document."""
@@ -69,6 +76,21 @@ def failures(report: dict[str, Any]):
                 yield test['id'], detail.get('message', '(no detail)')
 
 
+def unsatisfiable(report: dict[str, Any]):
+    """Every test skipped for a precondition no agent could meet.
+
+    Distinct from an ordinary skip, which says "not applicable to this SUT".
+    These say "not applicable to any SUT", and a nightly that prints only a
+    skip *count* cannot tell the two apart — which is how four MUST-level auth
+    tests stayed invisible on every binding for as long as they did.
+    """
+    for suite in report.get('suites', []):
+        for test in suite.get('tests', []):
+            reason = test.get('skip_reason') or ''
+            if reason.startswith(UNSATISFIABLE_PREFIX):
+                yield test['id'], reason[len(UNSATISFIABLE_PREFIX):]
+
+
 def format_report(report: dict[str, Any], title: str) -> tuple[str, bool]:
     """Render the §12.7 summary. Returns the text and whether it conformed."""
     summary = report['summary']
@@ -98,6 +120,14 @@ def format_report(report: dict[str, Any], title: str) -> tuple[str, bool]:
         lines.append('')
         lines.append(f'{len(listed)} failing test(s):')
         lines.extend(f'  {test_id}: {message}' for test_id, message in listed)
+
+    blocked = list(unsatisfiable(report))
+    if blocked:
+        # Never gates: the corpus is at fault, not the SUT, so this must not
+        # turn the PR path red the way a `must` failure does.
+        lines.append('')
+        lines.append(f'{len(blocked)} test(s) COULD NOT RUN:')
+        lines.extend(f'  {test_id}: {reason}' for test_id, reason in blocked)
 
     conformant = is_conformant(report)
     lines.append(_RULE)

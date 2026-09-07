@@ -261,6 +261,39 @@ class TestDispatchRaw:
         assert response.payload['error']['code'] == -32601
         assert response.payload['jsonrpc'] == '2.0'
 
+    def test_dispatcher_defaults_do_not_reach_a_raw_request(self):
+        """A raw block is literal, and the runner's credential is not part of it.
+
+        `SEC-EXTCARD-001` proves an *unauthenticated* fetch is refused. If the
+        dispatcher's default `Authorization` were merged in behind its back the
+        test would authenticate, get a 200 and fail — or worse, pass somewhere
+        that accepts anything, having proved nothing.
+        """
+        handler = replying({})
+        dispatcher = make(handler, default_headers={'Authorization': 'Bearer x'})
+        raw = RawBlock(method=HttpMethod.GET, path='/extendedAgentCard')
+        asyncio.run(dispatcher.dispatch_raw(raw))
+        assert 'authorization' not in handler.seen[0].headers
+
+    def test_a_raw_block_may_still_set_its_own_authorization(self):
+        """`SEC-EXTCARD-002` sends a deliberately insufficient token."""
+        handler = replying({})
+        dispatcher = make(handler, default_headers={'Authorization': 'Bearer x'})
+        raw = RawBlock(
+            method=HttpMethod.GET,
+            path='/extendedAgentCard',
+            headers={'Authorization': 'Bearer insufficient'},
+        )
+        asyncio.run(dispatcher.dispatch_raw(raw))
+        assert handler.seen[0].headers['authorization'] == 'Bearer insufficient'
+
+    def test_defaults_do_reach_an_abstract_operation(self):
+        """The other half: `CARD-EXT-001` needs the credential to be sent."""
+        handler = replying(result({}))
+        dispatcher = make(handler, default_headers={'Authorization': 'Bearer x'})
+        asyncio.run(dispatcher.dispatch(Operation.LIST_TASKS))
+        assert handler.seen[0].headers['authorization'] == 'Bearer x'
+
     def test_error_is_also_surfaced(self):
         """§4.4 permits `expect_error` on a raw step."""
         handler = replying(error(-32601))

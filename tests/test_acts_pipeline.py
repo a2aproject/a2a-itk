@@ -15,6 +15,7 @@ import urllib.error
 import pytest
 
 from scripts.acts_report import (
+    UNSATISFIABLE_PREFIX,
     InvalidReport,
     failures,
     format_report,
@@ -131,6 +132,52 @@ class TestFormatting:
         text, ok = format_report(report, 'ACTS')
         assert 'A: bad body' in text
         assert not ok
+
+
+class TestUnsatisfiablePreconditions:
+    """A skip no agent could clear is named, not buried in the skip count.
+
+    `SEC-AUTH-001..004` gate on an `authentication` capability A2A 1.0 does not
+    define, so they never ran on any binding — and a nightly reporting only
+    "n skipped" had no way to say so.
+    """
+
+    def blocked(self, reason='nope'):
+        report = a_report([{'id': 'SEC-AUTH-001', 'level': 'must', 'result': 'skip'}])
+        report['suites'][0]['tests'][0]['skip_reason'] = UNSATISFIABLE_PREFIX + reason
+        return report
+
+    def test_it_is_named_with_its_reason(self):
+        text, _ = format_report(self.blocked("'authentication' is not real"), 'ACTS')
+        assert '1 test(s) COULD NOT RUN:' in text
+        assert "SEC-AUTH-001: 'authentication' is not real" in text
+
+    def test_the_marker_itself_is_not_echoed(self):
+        """The prefix is a machine marker; the heading already carries it."""
+        text, _ = format_report(self.blocked(), 'ACTS')
+        assert UNSATISFIABLE_PREFIX not in text
+
+    def test_it_does_not_affect_conformance(self):
+        """The corpus is at fault, not the SUT — this must not gate the PR."""
+        _, ok = format_report(self.blocked(), 'ACTS')
+        assert ok
+
+    def test_an_ordinary_skip_is_not_listed(self):
+        report = a_report([{'id': 'A', 'level': 'must', 'result': 'skip'}])
+        report['suites'][0]['tests'][0]['skip_reason'] = 'no webhook endpoint'
+        text, _ = format_report(report, 'ACTS')
+        assert 'COULD NOT RUN' not in text
+
+    def test_the_marker_matches_the_runner(self):
+        """Duplicated to keep this script stdlib-only; pinned so it cannot drift."""
+        from test_suite.acts.runner import UNSATISFIABLE
+
+        assert UNSATISFIABLE_PREFIX == UNSATISFIABLE
+
+    def test_the_reason_survives_into_the_published_history(self):
+        """`process_acts_results` copies `skip_reason` through untouched."""
+        report = self.blocked("'authentication' is not real")
+        assert compile_tests(report)[0]['skip_reason'].startswith(UNSATISFIABLE_PREFIX)
 
 
 class TestReportExitCodes:

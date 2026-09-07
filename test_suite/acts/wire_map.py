@@ -381,6 +381,29 @@ def binding_for_operation(operation: Operation) -> OperationBinding:
     return OPERATIONS[operation]
 
 
+def resolve_operation(
+    operation: Operation, params: Mapping[str, object] | None
+) -> Operation:
+    """Apply the one param that selects a *different* operation.
+
+    The corpus asks for the extended card as ``get_agent_card`` with
+    ``extended: true`` (``CARD-EXT-001``, ``SEC-EXTCARD-003``) rather than
+    naming ``get_extended_agent_card``, which A2A §5.3 defines as its own RPC
+    on a path of its own. Read literally, both tests would fetch the public
+    card from the well-known path and assert against the wrong document —
+    quietly, since a public card has the ``skills`` and ``description`` that
+    ``CARD-EXT-001`` looks for, and cannot produce the error
+    ``SEC-EXTCARD-003`` expects.
+
+    Only this one param does this. Every other operation is decided by its
+    name alone, which is why this is a function here and not a general
+    mechanism.
+    """
+    if operation is Operation.GET_AGENT_CARD and params and params.get('extended'):
+        return Operation.GET_EXTENDED_AGENT_CARD
+    return operation
+
+
 def binding_for_error(error: ErrorType) -> ErrorBinding:
     """The wire binding for ``error``. Total over the enum."""
     return ERRORS[error]

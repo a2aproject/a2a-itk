@@ -163,14 +163,24 @@ class HttpDispatcher(Dispatcher):
         *,
         content_type: str | None = None,
         accept: str | None = None,
+        defaults: bool = True,
     ) -> dict[str, str]:
         """Merge defaults, per-binding media types, and the step's headers.
 
         The step wins: several tests set a deliberately wrong ``Content-Type``
         and assert the SUT rejects it, so a default must never override one
         that was passed in.
+
+        ``defaults=False`` drops the dispatcher's own headers, for a raw step.
+        A raw block is a literal request — the runner already declines to add
+        ``A2A-Version`` to one (§12.4), because `VER-NEG-002` omits it on
+        purpose and a helpful runner would repair the test away. A dispatcher
+        default is the same hazard one layer down, and a sharper one once it
+        carries credentials: `SEC-EXTCARD-001` proves an *unauthenticated*
+        fetch is refused, so a default ``Authorization`` merged in behind its
+        back would make it prove nothing and pass.
         """
-        merged = dict(self._default_headers)
+        merged = dict(self._default_headers) if defaults else {}
         if content_type:
             merged['Content-Type'] = content_type
         if accept:
@@ -225,7 +235,7 @@ class HttpDispatcher(Dispatcher):
         a raw test asserts on the envelope it expected to get back, down to
         ``error.code``.
         """
-        merged = self._headers(headers)
+        merged = self._headers(headers, defaults=False)
         merged.update(raw.headers or {})
 
         content: str | None = None
@@ -275,6 +285,7 @@ class HttpDispatcher(Dispatcher):
             headers=merged,
             content=content,
             unwrap=False,
+            defaults=False,
         ):
             yield event
 
@@ -287,10 +298,14 @@ class HttpDispatcher(Dispatcher):
         headers: Mapping[str, str] | None,
         content: str | None = None,
         unwrap: bool = True,
+        defaults: bool = True,
     ) -> AsyncIterator[StreamEvent]:
         """Yield parsed SSE events from a streaming endpoint."""
         merged = self._headers(
-            headers, content_type=self.content_type, accept=SSE_CONTENT_TYPE
+            headers,
+            content_type=self.content_type,
+            accept=SSE_CONTENT_TYPE,
+            defaults=defaults,
         )
         if content is None and payload is not None:
             content = json.dumps(payload)

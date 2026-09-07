@@ -21,6 +21,7 @@ from test_suite.acts.wire_map import (
     REST_CONTENT_TYPE,
     binding_for_operation,
     error_for_reason,
+    resolve_operation,
 )
 
 
@@ -55,6 +56,7 @@ class RestDispatcher(HttpDispatcher):
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> WireResponse:
+        operation = resolve_operation(operation, params)
         binding = binding_for_operation(operation)
         if binding.http_only:
             return await self._get_agent_card(headers)
