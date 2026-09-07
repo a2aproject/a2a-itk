@@ -30,9 +30,11 @@ import httpx
 from test_suite.acts import behaviors as sut_behaviors
 from test_suite.acts import report as report_writer
 from test_suite.acts.dispatcher import Dispatcher, for_binding
+from test_suite.acts.dispatcher.http_base import FOLLOW_REDIRECTS
 from test_suite.acts.loader import LoadedSuite, load_suite
 from test_suite.acts.runner import Runner, TestResult
 from test_suite.acts.schema import RunnerRequirement, TransportBinding
+from test_suite.acts.wire_map import WELL_KNOWN_AGENT_CARD_PATH
 from test_suite.launcher import Cluster, TargetSpec
 from test_suite.launcher.config import mount_dir
 from test_suite.launcher.spec import Kind
@@ -76,9 +78,16 @@ class ActsRun:
 
 
 async def fetch_agent_card(base_url: str, *, timeout: float = 30.0) -> dict[str, Any]:
-    """Read the well-known agent card off a running agent."""
-    url = f'{base_url.rstrip("/")}/.well-known/agent-card.json'
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    """Read the well-known agent card off a running agent.
+
+    Redirects are not followed here either: the card decides what the whole
+    run tests, so an agent that does not serve it where §8.6 says should fail
+    the run loudly rather than have the harness go looking elsewhere.
+    """
+    url = f'{base_url.rstrip("/")}{WELL_KNOWN_AGENT_CARD_PATH}'
+    async with httpx.AsyncClient(
+        timeout=timeout, follow_redirects=FOLLOW_REDIRECTS
+    ) as client:
         try:
             response = await client.get(url)
             response.raise_for_status()
