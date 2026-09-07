@@ -164,7 +164,7 @@ class TestErrorReading:
         response = asyncio.run(make(handler).dispatch(Operation.GET_TASK, {'id': 'x'}))
         assert not response.ok
         assert response.error.error_type is ErrorType.TASK_NOT_FOUND
-        assert response.error.code == -32001
+        assert response.error.jsonrpc_code == -32001
         assert response.error.message == 'Task not found'
 
     def test_a_jsonrpc_error_rides_http_200(self):
@@ -179,7 +179,7 @@ class TestErrorReading:
         onto the nearest plausible error."""
         handler = replying(error(-31999))
         response = asyncio.run(make(handler).dispatch(Operation.LIST_TASKS))
-        assert response.error.code == -31999
+        assert response.error.jsonrpc_code == -31999
         assert response.error.error_type is None
 
     def test_error_info_reason_is_extracted_from_data(self):
@@ -359,3 +359,26 @@ class TestTransportFailure:
 
         with pytest.raises(DispatchError, match='ConnectError'):
             asyncio.run(make(handler).dispatch(Operation.LIST_TASKS))
+
+
+class TestRedirectsAreNotFollowed:
+    """A 3xx is a conformance result, not something to chase.
+
+    Chasing one swaps the response under assertion for the response to a
+    different request — httpx rewrites POST to GET and drops the body on a
+    301/302/303 — so a SUT that redirected every call would pass the suite on
+    the strength of replies it never made.
+    """
+
+    def test_the_client_the_dispatcher_owns_leaves_them_alone(self):
+        dispatcher = JsonRpcDispatcher('http://sut.test')
+        try:
+            assert dispatcher._client.follow_redirects is False
+        finally:
+            asyncio.run(dispatcher.aclose())
+
+    def test_a_redirect_comes_back_as_the_response(self):
+        handler = replying('', status=302, headers={'Location': '/elsewhere'})
+        response = asyncio.run(make(handler).dispatch(Operation.LIST_TASKS))
+        assert response.status == 302
+        assert len(handler.seen) == 1

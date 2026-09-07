@@ -13,7 +13,7 @@ from typing import Any, AsyncIterator, Mapping
 import httpx
 
 from test_suite.acts.dispatcher.base import StreamEvent, WireError, WireResponse
-from test_suite.acts.dispatcher.http_base import HttpDispatcher
+from test_suite.acts.dispatcher.http_base import HttpDispatcher, parse_json_body
 from test_suite.acts.dispatcher.params import adapt
 from test_suite.acts.schema import Operation, TransportBinding
 from test_suite.acts.wire_map import (
@@ -83,7 +83,7 @@ class JsonRpcDispatcher(HttpDispatcher):
             headers=self._headers(headers, content_type=self.content_type),
             json=self._envelope(operation, params),
         )
-        parsed, text = self._parse(response)
+        parsed, text = parse_json_body(response)
         error = self._error_from(response, parsed)
         return WireResponse(
             status=response.status_code,
@@ -113,7 +113,7 @@ class JsonRpcDispatcher(HttpDispatcher):
                 error_type=(
                     error_for_jsonrpc_code(code) if isinstance(code, int) else None
                 ),
-                code=code if isinstance(code, int) else None,
+                jsonrpc_code=code if isinstance(code, int) else None,
                 reason=reason,
                 details=details,
                 raw=err,

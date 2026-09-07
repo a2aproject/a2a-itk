@@ -55,9 +55,6 @@ GRPC_SERVICE = 'lf.a2a.v1.A2AService'
 #: Where an agent card is served, unauthenticated (A2A §8.6, IANA §3335).
 WELL_KNOWN_AGENT_CARD_PATH = '/.well-known/agent-card.json'
 
-#: ``google.rpc.ErrorInfo.domain`` on every A2A error (A2A §11.6).
-ERROR_DOMAIN = 'a2a-protocol.org'
-
 #: ProtoJSON ``@type`` marking the ``ErrorInfo`` detail (A2A §11.6).
 ERROR_INFO_TYPE = 'type.googleapis.com/google.rpc.ErrorInfo'
 

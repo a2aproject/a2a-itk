@@ -39,6 +39,11 @@ from test_suite.acts.dispatcher.base import (
     WireError,
     WireResponse,
 )
+from test_suite.acts.dispatcher.http_base import (
+    FOLLOW_REDIRECTS,
+    fetch_agent_card,
+    http_status_error,
+)
 from test_suite.acts.dispatcher.params import adapt
 from test_suite.acts.schema import Operation, RawBlock, TransportBinding
 from test_suite.acts.wire_map import (
@@ -112,7 +117,7 @@ class GrpcDispatcher(Dispatcher):
         self._agent_card_url = (agent_card_url or f'http://{target}').rstrip('/')
         self._owns_http = http_client is None
         self._http = http_client or httpx.AsyncClient(
-            timeout=timeout, follow_redirects=True
+            timeout=timeout, follow_redirects=FOLLOW_REDIRECTS
         )
 
     async def aclose(self) -> None:
@@ -243,28 +248,16 @@ class GrpcDispatcher(Dispatcher):
     async def _get_agent_card(
         self, headers: Mapping[str, str] | None
     ) -> WireResponse:
-        url = f'{self._agent_card_url}{WELL_KNOWN_AGENT_CARD_PATH}'
-        try:
-            response = await self._http.get(
-                url, headers={**self._default_headers, **(headers or {})}
-            )
-        except httpx.HTTPError as exc:
-            raise DispatchError(f'{type(exc).__name__}: {exc}') from exc
+        """Shared with the HTTP adapters — the card is HTTP on every binding.
 
-        text = response.text
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = None
-        return WireResponse(
-            status=response.status_code,
-            payload=payload,
-            error=(
-                None if response.status_code < 400
-                else WireError(message=f'HTTP {response.status_code}', raw=payload)
-            ),
-            headers=dict(response.headers),
-            raw_body=text,
+        The error reader is the plain-status one rather than a binding's:
+        there is no gRPC envelope to look for in the body of an HTTP reply.
+        """
+        return await fetch_agent_card(
+            self._http,
+            f'{self._agent_card_url}{WELL_KNOWN_AGENT_CARD_PATH}',
+            {**self._default_headers, **(headers or {})},
+            error_from=http_status_error,
         )
 
 

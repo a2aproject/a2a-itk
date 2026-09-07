@@ -14,7 +14,7 @@ from typing import Any, AsyncIterator, Mapping
 import httpx
 
 from test_suite.acts.dispatcher.base import StreamEvent, WireError, WireResponse
-from test_suite.acts.dispatcher.http_base import HttpDispatcher
+from test_suite.acts.dispatcher.http_base import HttpDispatcher, parse_json_body
 from test_suite.acts.dispatcher.params import adapt
 from test_suite.acts.schema import HttpMethod, Operation, TransportBinding
 from test_suite.acts.wire_map import (
@@ -70,7 +70,7 @@ class RestDispatcher(HttpDispatcher):
             params=_stringify(query) if query else None,
             json=body if body else None,
         )
-        parsed, text = self._parse(response)
+        parsed, text = parse_json_body(response)
         return WireResponse(
             status=response.status_code,
             # The body *is* the response message on this binding — there is no
@@ -102,6 +102,10 @@ class RestDispatcher(HttpDispatcher):
 
         reason, details = self._error_info(body.get('details'))
         status = body.get('status')
+        # `body['code']` is left alone on purpose: §11.6 defines it as the HTTP
+        # status, which `WireResponse.status` already carries, and
+        # `WireError.jsonrpc_code` means something else entirely. It stays
+        # reachable through `raw` for an assertion that wants it.
         return WireError(
             message=str(body.get('message', '')),
             error_type=error_for_reason(reason) if reason else None,

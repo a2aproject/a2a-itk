@@ -63,8 +63,15 @@ class WireError:
 
     message: str
     error_type: ErrorType | None = None
-    #: JSON-RPC ``error.code``; ``None`` on the other bindings.
-    code: int | None = None
+    #: JSON-RPC ``error.code``, and only that — hence the name. It is ``None``
+    #: on the other two bindings by design, not by omission: neither has an
+    #: integer that means what this one does. A REST ``google.rpc.Status``
+    #: also carries a ``code``, but §11.6 defines it as the HTTP status, which
+    #: is already :attr:`WireResponse.status`; its canonical name lands in
+    #: ``status`` below, and the abstract A2A error in ``error_type``. Filling
+    #: this field from it would let a cross-binding ``expect_error`` compare
+    #: ``-32001`` against ``404``.
+    jsonrpc_code: int | None = None
     #: gRPC status name, or the ``status`` field of a REST ``google.rpc.Status``.
     status: str | None = None
     #: ``google.rpc.ErrorInfo.reason``, when the response carried one.

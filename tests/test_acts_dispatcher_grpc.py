@@ -13,6 +13,7 @@ import contextlib
 from typing import Any, Iterator
 
 import grpc
+import httpx
 import pytest
 from google.protobuf.any_pb2 import Any as ProtoAny
 from google.rpc import error_details_pb2, status_pb2
@@ -48,6 +49,40 @@ def error_trailers(
     )
     status = status_pb2.Status(code=code, message=message, details=[detail])
     return [(STATUS_DETAILS_KEY, status.SerializeToString())]
+
+
+def replying_http(payload: Any, *, status: int = 200):
+    """An HTTP handler for the agent card, which never travels over gRPC."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if isinstance(payload, str):
+            return httpx.Response(status, text=payload)
+        return httpx.Response(status, json=payload)
+
+    handler.seen = seen  # type: ignore[attr-defined]
+    return handler
+
+
+def fetch_card(handler):
+    """Fetch the card with the HTTP side mocked and no gRPC server needed."""
+
+    async def run():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            dispatcher = GrpcDispatcher(
+                '127.0.0.1:1',
+                agent_card_url='http://sut.test',
+                http_client=client,
+            )
+            try:
+                return await dispatcher.dispatch(Operation.GET_AGENT_CARD)
+            finally:
+                await dispatcher.aclose()
+
+    return asyncio.run(run())
 
 
 class FakeAgent(a2a_pb2_grpc.A2AServiceServicer):
@@ -364,6 +399,36 @@ class TestStreaming:
     def test_non_streaming_operation_is_rejected(self):
         with pytest.raises(DispatchError, match='not a streaming operation'):
             self._collect(FakeAgent(), Operation.GET_TASK, {'id': 't1'})
+
+
+class TestAgentCardOverHttp:
+    """Fetched by the shared HTTP helper, not by a second copy of the GET."""
+
+    def test_it_goes_to_the_well_known_path(self):
+        handler = replying_http({'name': 'agent'})
+        response = fetch_card(handler)
+        assert handler.seen[0].url.path == '/.well-known/agent-card.json'
+        assert response.payload == {'name': 'agent'}
+
+    def test_a_missing_card_is_an_error_named_by_its_status(self):
+        """Unlike the HTTP adapters, there is no envelope in the body to read:
+        an HTTP reply carries no gRPC error."""
+        response = fetch_card(replying_http('', status=404))
+        assert response.status == 404
+        assert response.error is not None
+        assert response.error.message == 'HTTP 404'
+
+    def test_the_http_client_does_not_follow_redirects(self):
+        """Same reason as the HTTP adapters — a 3xx is a result to assert on."""
+
+        async def check():
+            dispatcher = GrpcDispatcher('127.0.0.1:1')
+            try:
+                return dispatcher._http.follow_redirects
+            finally:
+                await dispatcher.aclose()
+
+        assert asyncio.run(check()) is False
 
 
 class TestRawIsUnsupported:
