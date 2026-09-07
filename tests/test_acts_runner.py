@@ -314,7 +314,7 @@ class TestExpectError:
                 error=WireError(
                     message='boom',
                     error_type=ErrorType.TASK_NOT_FOUND,
-                    code=-32001,
+                    jsonrpc_code=-32001,
                     raw={'code': -32001, 'message': 'boom', 'data': {'hint': 'x'}},
                 ),
             )

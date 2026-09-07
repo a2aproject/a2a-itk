@@ -183,8 +183,10 @@ def _observed_error(error: WireError) -> dict[str, Any]:
     observed: dict[str, Any] = {'message': error.message}
     if error.error_type is not None:
         observed['error_type'] = error.error_type.value
-    if error.code is not None:
-        observed['code'] = error.code
+    # ACTS spells the assertion key `code` on every binding, but only JSON-RPC
+    # ever has an integer to put under it.
+    if error.jsonrpc_code is not None:
+        observed['code'] = error.jsonrpc_code
     if isinstance(error.raw, Mapping) and 'data' in error.raw:
         observed['data'] = error.raw['data']  # JSON-RPC `error.data`
     elif error.details:
