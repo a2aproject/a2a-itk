@@ -263,7 +263,12 @@ class Runner:
         """Run one test in its own variable scope."""
         started = self._clock()
 
-        skip = self._skip_reason(test)
+        try:
+            skip = self._skip_reason(test)
+        except RunError as exc:
+            return self._result(
+                test, Outcome.ERROR, started, failure=FailureDetail(message=str(exc))
+            )
         if skip is not None:
             return self._result(test, Outcome.SKIP, started, skip_reason=skip)
 
@@ -609,7 +614,12 @@ class Runner:
 
 
 class RunError(RuntimeError):
-    """The run cannot proceed — missing inputs, not a SUT defect."""
+    """A test cannot be evaluated — missing inputs, not a SUT defect.
+
+    `run_test` converts it into an `error` verdict on the test that raised it
+    rather than letting it escape, so a missing input costs one result instead
+    of the whole suite.
+    """
 
 
 def _resolved(model: _M, scope: Scope, *, keep: tuple[str, ...] = ()) -> _M:

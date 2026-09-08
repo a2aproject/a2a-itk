@@ -20,7 +20,7 @@ from typing import Any, AsyncIterator, Mapping
 
 import pytest
 
-from test_suite.acts import load_suite
+from test_suite.acts import LoadedSuite, LoadedTest, load_suite
 from test_suite.acts.dispatcher.base import (
     DispatchError,
     Dispatcher,
@@ -34,7 +34,6 @@ from test_suite.acts.runner import (
     VERSION_HEADER,
     FailureDetail,
     Outcome,
-    RunError,
     Runner,
     is_conformant,
     summarize,
@@ -131,6 +130,16 @@ def get_task(step_id: str = 'get', **kwargs: Any) -> Step:
 
 def run(runner: Runner, test: Test, **kwargs: Any):
     return asyncio.run(runner.run_test(test, **kwargs))
+
+
+def _suite_of(*tests: Test) -> LoadedSuite:
+    """A `LoadedSuite` around hand-built tests, for whole-run behaviour."""
+    return LoadedSuite(
+        tests=[
+            LoadedTest(test=t, suite_id='s', suite_name='s', source=Path('memory'))
+            for t in tests
+        ]
+    )
 
 
 def runner_for(dispatcher: FakeDispatcher, **kwargs: Any) -> Runner:
@@ -552,12 +561,28 @@ class TestPreconditions:
         test = a_test(get_task(), preconditions={'transport': [TransportBinding.GRPC]})
         assert run(runner, test).result is Outcome.SKIP
 
-    def test_no_card_where_one_is_needed_is_a_run_error(self):
-        """Silently passing an unevaluable precondition would be worse."""
+    def test_no_card_where_one_is_needed_errors_the_test(self):
+        """Silently passing an unevaluable precondition would be worse.
+
+        `error`, not `fail`: the inputs to the run are incomplete and the SUT
+        was never asked anything, so it must not wear this in its report.
+        """
         runner = runner_for(FakeDispatcher(ok()))
         test = a_test(get_task(), preconditions={'capabilities': {'streaming': True}})
-        with pytest.raises(RunError, match='agent card'):
-            run(runner, test)
+        result = run(runner, test)
+        assert result.result is Outcome.ERROR
+        assert 'agent card' in result.failure.message
+
+    def test_an_unevaluable_precondition_does_not_abort_the_rest(self):
+        """One missing input costs one result, not the whole suite."""
+        runner = runner_for(FakeDispatcher(ok()))
+        needs_card = a_test(
+            get_task(), preconditions={'capabilities': {'streaming': True}}
+        )
+        results = asyncio.run(
+            runner.run_suite(_suite_of(needs_card, a_test(get_task(), id='T-002')))
+        )
+        assert [r.result for r in results] == [Outcome.ERROR, Outcome.PASS]
 
     def test_no_card_is_fine_when_nothing_needs_one(self):
         runner = runner_for(FakeDispatcher(ok()))
