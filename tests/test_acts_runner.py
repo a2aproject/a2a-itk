@@ -905,6 +905,63 @@ class TestStreamingSteps:
         assert result.result is Outcome.FAIL
         assert 'did not complete within 20ms' in result.failure.message
 
+    def test_a_step_declaring_no_bound_still_stops(self):
+        """Every streaming step in the corpus is one of these.
+
+        None declares `timeout_ms` and none declares `max_count`, so without a
+        runner-side backstop a SUT that stops sending hangs the run for good
+        and no report is produced at all.
+        """
+        dispatcher = FakeDispatcher(
+            events=[status_update('TASK_STATE_WORKING')], stall=30.0
+        )
+        step = self.stream_step(expect_stream={'min_count': 1})
+        result = asyncio.run(
+            Runner(dispatcher, clock=lambda: 0.0, stream_timeout_ms=20).run_test(
+                a_test(step)
+            )
+        )
+        assert result.result is Outcome.ERROR
+        assert 'still open after 20ms' in result.failure.message
+
+    def test_a_backstopped_stream_errors_rather_than_failing(self):
+        """The deadline was ours, so the SUT must not wear it as a §7 failure.
+
+        It stays counted against `must` conformance, so a SUT that never
+        closes a stream still cannot be reported conformant.
+        """
+        dispatcher = FakeDispatcher(
+            events=[status_update('TASK_STATE_WORKING')], stall=30.0
+        )
+        step = self.stream_step(expect_stream={'min_count': 1})
+        result = asyncio.run(
+            Runner(dispatcher, clock=lambda: 0.0, stream_timeout_ms=20).run_test(
+                a_test(step)
+            )
+        )
+        assert result.result is Outcome.ERROR
+        assert not is_conformant([result])
+
+    def test_a_declared_timeout_wins_over_the_backstop(self):
+        """However long it is — the test's own bound is the assertion."""
+        dispatcher = FakeDispatcher(
+            events=[status_update('TASK_STATE_WORKING')], stall=30.0
+        )
+        step = self.stream_step(expect_stream={'min_count': 1, 'timeout_ms': 20})
+        result = asyncio.run(
+            Runner(
+                dispatcher, clock=lambda: 0.0, stream_timeout_ms=30_000
+            ).run_test(a_test(step))
+        )
+        assert result.result is Outcome.FAIL
+        assert 'did not complete within 20ms' in result.failure.message
+
+    def test_a_stream_that_closes_is_untouched_by_the_backstop(self):
+        dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_COMPLETED')])
+        step = self.stream_step(expect_stream={'min_count': 1})
+        runner = runner_for(dispatcher, stream_timeout_ms=20)
+        assert run(runner, a_test(step)).result is Outcome.PASS
+
     def test_the_events_are_the_steps_response(self):
         dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_COMPLETED')])
         step = self.stream_step(

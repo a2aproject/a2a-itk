@@ -20,10 +20,12 @@ over a binding the test does not target (§12.3). Missing `tck-*` behaviors are
 the deliberate exception: those **fail**, because a skip would let an SDK's
 lagging support disappear quietly from its own report.
 
-Scope: the non-streaming, non-raw path. A test with a `raw`, `client_response`
-or streaming step is skipped with a reason naming the gap, which is 40 of the
-corpus's 111 tests; the rest of the machinery — polling, capture, scope
-isolation, the result model — is complete and those step kinds plug into it.
+Scope: operation, raw and streaming steps all execute. The one kind still
+deferred is `client_response` (§10), which asserts on what the SUT's own
+*client* parsed from a canned payload rather than on anything the runner can
+ask of a server — 8 of the corpus's 111 tests, skipped with a reason naming
+the gap. Everything else — polling, capture, scope isolation, the result
+model — is shared by the kinds that do run.
 """
 
 from __future__ import annotations
@@ -79,6 +81,18 @@ _M = TypeVar('_M', bound=BaseModel)
 DEFAULT_MAX_ATTEMPTS = 10
 DEFAULT_DELAY_MS = 1000
 
+#: How long to read a stream whose `expect_stream` sets no `timeout_ms`.
+#:
+#: Every one of the corpus's 12 streaming steps is such a step — none declares
+#: `timeout_ms` and none declares `max_count` — so without a backstop a SUT
+#: that opens a stream and never closes it hangs the run indefinitely and
+#: produces no report at all. §7 gives no default, so this is the runner's own.
+#:
+#: 30s is the budget the corpus already asks for on the unary path
+#: (`delay_ms: 2000` × `max_attempts: 15`), which keeps a streaming step as
+#: patient as a polled one rather than inventing a second notion of "too slow".
+DEFAULT_STREAM_TIMEOUT_MS: Final = 30_000
+
 #: §12.4 requires this on every request, carrying the document's
 #: `spec_version`. On gRPC the dispatcher turns it into call metadata.
 VERSION_HEADER = 'A2A-Version'
@@ -86,7 +100,7 @@ VERSION_HEADER = 'A2A-Version'
 #: Step kinds the runner can execute. `client_response` (spec §10) is not one:
 #: it feeds a canned payload to the SUT's own *client* and asserts on what that
 #: client parsed, which needs a client-side entry point on the agent rather
-#: than anything the runner can drive over a transport. No story owns it yet.
+#: than anything the runner can drive over a transport.
 EXECUTABLE_KINDS: Final[frozenset[StepKind]] = frozenset(
     {StepKind.OPERATION, StepKind.RAW}
 )
@@ -228,6 +242,7 @@ class Runner:
         agent_card: Mapping[str, Any] | None = None,
         sut_behaviors: Iterable[str] | None = None,
         capabilities: Iterable[RunnerRequirement] = (),
+        stream_timeout_ms: int = DEFAULT_STREAM_TIMEOUT_MS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
         new_uuid: Callable[[], str] | None = None,
@@ -244,6 +259,9 @@ class Runner:
         #: behavior gating is off rather than failing every test that needs one.
         self.sut_behaviors = None if sut_behaviors is None else frozenset(sut_behaviors)
         self.capabilities = frozenset(capabilities)
+        #: Applies only where the test declares no `timeout_ms` of its own; a
+        #: declared one always wins, however long it is.
+        self.stream_timeout_ms = stream_timeout_ms
         self._sleep = sleep
         self._clock = clock
         self._new_uuid = new_uuid if new_uuid is not None else lambda: str(uuid.uuid4())
@@ -491,6 +509,20 @@ class Runner:
             return self._step(step, Outcome.ERROR, started, message=str(exc))
 
         events, status, timed_out = await self._collect(source, step.expect_stream)
+        if timed_out and not step.expect_stream.timeout_ms:
+            # The bound was ours, not the test's, so we cannot say the SUT
+            # overran anything — only that this run could not finish reading.
+            # `error` keeps an arbitrary deadline from being published as a §7
+            # violation, and still counts against `must` conformance, so a SUT
+            # that never closes a stream cannot be reported conformant either.
+            return self._step(
+                step, Outcome.ERROR, started,
+                message=(
+                    f'stream still open after {self.stream_timeout_ms}ms and the '
+                    f'step declares no `timeout_ms`; stopped reading at '
+                    f'{len(events)} event(s)'
+                ),
+            )
 
         scope.record_response(step.id, [event.payload for event in events])
         captured = self._capture(step, scope, [event.payload for event in events])
@@ -514,9 +546,14 @@ class Runner:
     ) -> tuple[list[StreamedEvent], int | None, bool]:
         """Read a stream into a list, bounded by `timeout_ms` and `max_count`.
 
-        One event past `max_count` is enough to prove the limit was broken, and
-        stopping there keeps a SUT that never closes the stream from hanging a
-        run that has no `timeout_ms` to fall back on.
+        One event past `max_count` is enough to prove the limit was broken, so
+        collection stops there rather than reading a runaway stream to its end.
+
+        Reading is always on a deadline: the step's `timeout_ms` when it
+        declares one, `stream_timeout_ms` when it does not. Neither bound is a
+        default the *other* can stand in for — `max_count` cuts a stream short
+        only if events keep arriving, and a SUT that opens a stream and then
+        goes quiet sends none.
         """
         events: list[StreamedEvent] = []
         status: int | None = None
@@ -531,12 +568,9 @@ class Runner:
                 if limit is not None and len(events) >= limit:
                     break
 
-        if not expect.timeout_ms:
-            await pump()
-            return events, status, False
-
+        deadline = expect.timeout_ms or self.stream_timeout_ms
         try:
-            await asyncio.wait_for(pump(), expect.timeout_ms / 1000)
+            await asyncio.wait_for(pump(), deadline / 1000)
         except (asyncio.TimeoutError, TimeoutError):
             return events, status, True
         return events, status, False
@@ -825,6 +859,7 @@ def is_conformant(results: Iterable[TestResult]) -> bool:
 __all__ = [
     'DEFAULT_DELAY_MS',
     'DEFAULT_MAX_ATTEMPTS',
+    'DEFAULT_STREAM_TIMEOUT_MS',
     'VERSION_HEADER',
     'FailureDetail',
     'Outcome',
