@@ -120,7 +120,7 @@ class TestPerLanguageArgv:
         current.spawn_from_dir(mount, self.HTTP, self.GRPC)
         argv, cwd, _ = _RecPopen.calls[0]
         assert argv == [
-            'go', 'run', '-mod=readonly', 'main.go',
+            'go', 'run', '-mod=readonly', '.',
             '--httpPort', str(self.HTTP),
             '--grpcPort', str(self.GRPC),
         ]

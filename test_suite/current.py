@@ -111,7 +111,7 @@ def _spawn_go(
 ) -> subprocess.Popen:
     # -mod=readonly: never mutate go.mod/go.sum; fail loudly on drift.
     args = [  # noqa: S607
-        'go', 'run', '-mod=readonly', 'main.go',
+        'go', 'run', '-mod=readonly', '.',
         '--httpPort', str(http_port),
         '--grpcPort', str(grpc_port),
     ]
