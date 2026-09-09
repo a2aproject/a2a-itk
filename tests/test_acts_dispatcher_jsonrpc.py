@@ -70,11 +70,31 @@ class TestRequestConstruction:
         )
         request = handler.seen[0]
         assert request.method == 'POST'
-        assert str(request.url) == 'http://sut.test/'
+        assert request.url.raw_path == b'/'
         body = json.loads(request.content)
         assert body['jsonrpc'] == '2.0'
         assert body['method'] == 'GetTask'
         assert body['params'] == {'id': 't1'}
+
+    def test_the_advertised_endpoint_is_posted_to_verbatim(self):
+        """A trailing slash on the card's URL is kept, and one is never added.
+
+        SDKs disagree about how they publish the endpoint and each serves only
+        its own spelling — a2a-python advertises `/jsonrpc/` and 307s the bare
+        form, a2a-rs and a2a-go advertise `/jsonrpc` and 404 the slashed one.
+        Since redirects are deliberately not followed, normalizing either way
+        makes the run unable to reach half the SDKs.
+        """
+        for advertised, expected in (
+            ('http://sut.test/jsonrpc', b'/jsonrpc'),
+            ('http://sut.test/jsonrpc/', b'/jsonrpc/'),
+        ):
+            handler = replying(result({'id': 't1'}))
+            dispatcher = JsonRpcDispatcher(
+                advertised, client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            )
+            asyncio.run(dispatcher.dispatch(Operation.GET_TASK, {'id': 't1'}))
+            assert handler.seen[0].url.raw_path == expected, advertised
 
     def test_method_names_come_from_the_wire_map(self):
         """Notably the push-config names, where ACTS §4.1 is stale."""

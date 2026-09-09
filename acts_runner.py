@@ -224,20 +224,22 @@ def build_dispatcher(
     # lives. An agent mounting JSON-RPC at `/jsonrpc/` would otherwise get
     # every raw step 404'd at the host root, which reads as a conformance
     # failure and is nothing of the kind.
-    mount = url.rstrip('/')
-
+    #
+    # Passed exactly as advertised: the SDKs disagree about the trailing slash
+    # and each serves only its own spelling, so `HttpDispatcher._url` keeps it
+    # and trims only when joining a deeper path onto it.
     if binding is TransportBinding.JSONRPC:
         # With the mount as the base, the endpoint itself is just `/`.
         return for_binding(
             binding,
-            mount,
+            url,
             rpc_path='/',
             agent_card_url=base_url,
             default_headers=auth,
         )
 
     return for_binding(
-        binding, mount, agent_card_url=base_url, default_headers=auth
+        binding, url, agent_card_url=base_url, default_headers=auth
     )
 
 

@@ -139,7 +139,9 @@ class HttpDispatcher(Dispatcher):
             card is what tells a client which bindings exist and so cannot
             live behind one of them.
         """
-        self.base_url = base_url.rstrip('/')
+        # Kept exactly as the card advertised it, trailing slash and all —
+        # see `_url`.
+        self.base_url = base_url
         self.agent_card_url = (agent_card_url or base_url).rstrip('/')
         self._default_headers = dict(default_headers or {})
         self._owns_client = client is None
@@ -155,7 +157,22 @@ class HttpDispatcher(Dispatcher):
     # -- request plumbing --------------------------------------------------
 
     def _url(self, path: str) -> str:
-        return f'{self.base_url}{path if path.startswith("/") else "/" + path}'
+        """Resolve a binding-relative path against the advertised base.
+
+        ``/`` means the binding's own endpoint, and the endpoint is the URL
+        the card gave us — **verbatim**. SDKs disagree about whether that URL
+        ends in a slash and each serves only its own spelling: a2a-python
+        publishes `/jsonrpc/` and 307s the bare form, a2a-rs and a2a-go
+        publish `/jsonrpc` and 404 the slashed one. Normalizing either way
+        therefore breaks somebody, and following the redirect is not an option
+        because a conformance run must not quietly go somewhere it was not
+        told to.
+
+        Any deeper path is joined onto the base with exactly one slash.
+        """
+        if path == '/':
+            return self.base_url
+        return f'{self.base_url.rstrip("/")}{path if path.startswith("/") else "/" + path}'
 
     def _headers(
         self,
