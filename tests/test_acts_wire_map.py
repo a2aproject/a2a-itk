@@ -236,7 +236,7 @@ class TestPathTemplates:
                     failures.append(f'{loaded.test.id}/{step.id}: {exc}')
                     continue
                 # A `{{...}}` left in the path is a *runner* variable, which
-                # story 4.3 substitutes before dispatch — not a placeholder
+                # the runner substitutes before dispatch — not a placeholder
                 # this layer failed to fill. Only the latter is a bug here.
                 for name in binding.path_params:
                     assert '{' + name + '}' not in path, (

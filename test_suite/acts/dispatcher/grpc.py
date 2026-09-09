@@ -10,7 +10,7 @@ Two structural differences from the HTTP bindings:
   protobuf there is nothing an ACTS ``raw`` block could describe, which is why
   §4.4 requires an all-raw test to name its transport.
 - **There is no HTTP status.** ``WireResponse.status`` is derived from the
-  gRPC status by the canonical transcoding, so that the 86 binding-agnostic
+  gRPC status by the canonical transcoding, so that the 59 binding-agnostic
   corpus tests asserting ``status: 200`` mean "it succeeded" here too.
 
 The agent card is still fetched over plain HTTP — the generated service has no

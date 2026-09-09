@@ -301,7 +301,7 @@ class TestCorpusReferences:
         """Nothing in the corpus needs `env.` or `$uuid`.
 
         The two that resolve to neither a capture nor a document variable are
-        the runner-injected pair; story 4.6 owns supplying them. If a corpus
+        the runner-injected pair, which the pipeline supplies. If a corpus
         refresh adds a third, this is where it surfaces.
         """
         injected = set()

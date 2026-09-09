@@ -131,7 +131,11 @@ def main() -> int:
     )
     parser.add_argument('--sdk', required=True, help='SDK name for the report.')
     parser.add_argument('--sdk-version', default='unknown')
-    parser.add_argument('--language', default='unknown')
+    parser.add_argument(
+        '--language', default='unknown',
+        help="The SUT's language, recorded in the report's `sdk` block. "
+             'Metadata only — codegen detects the language from the mount.',
+    )
     parser.add_argument('--repository', default=None)
     parser.add_argument(
         '--transport', action='append', dest='transports', metavar='BINDING',

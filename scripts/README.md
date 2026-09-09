@@ -5,6 +5,8 @@
 | `run_itk_shared.sh` | SDK repo, host | Shared driver for each SDK's `itk/run_itk.sh` |
 | `itk_report.py` | SDK repo, host | Validates and summarises a `/run` response |
 | `process_results.py` | SDK repo, host | Merges nightly results into the published history |
+| `acts_report.py` | SDK repo, host | Validates and summarises a `/run-acts` §13 report |
+| `process_acts_results.py` | SDK repo, host | Merges nightly ACTS results into the published history |
 | `scenarios_diff.py` | a2a-itk, CI | Checks the shared scenario set still covers each SDK's legacy set |
 
 ## `run_itk_shared.sh`
@@ -62,9 +64,9 @@ On the nightly path **one** entry is appended to `acts_<metrics-name>.json`,
 which the workflow re-uploads to the `nightly-metrics` release exactly as it
 already does for `itk_<metrics-name>.json`. One commit tested over three
 bindings is one run of the SDK, so the bindings nest under `results` rather
-than becoming three entries — otherwise the 50-run window would cover ~17
-nights, and every consumer would have to re-group by `commit_sha` to answer
-"how did last night go".
+than becoming three entries — otherwise the window would shrink from a week to
+about two nights, and every consumer would have to re-group by `commit_sha` to
+answer "how did last night go".
 
 `conformant` at the top is the conjunction over bindings: passing on JSON-RPC
 and failing on gRPC is not conformant. `summary` is the sum, for a single

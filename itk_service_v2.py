@@ -1,12 +1,15 @@
-"""ITK service — the HTTP ``/run`` handler.
+"""ITK service — the HTTP ``/run`` and ``/run-acts`` handlers.
 
 ``/health``, port 8000 and the legacy request/response schema are unchanged.
 ``/run`` additionally accepts ``traversal/v1`` scenarios, and a batch may mix
-both, so each SDK can migrate on its own schedule.
+both, so each SDK can migrate on its own schedule. ``/run-acts`` drives the
+ACTS conformance suite against one mounted SUT and returns the §13 report
+document unwrapped, so a dashboard need not know who produced it.
 
-Thin by design: parsing, role binding, cluster lifecycle and execution all
-live in :mod:`itk_runner`, which ``run_tests.py`` also drives. Everything
-here is HTTP concerns.
+Thin by design: parsing, role binding, cluster lifecycle and execution live in
+:mod:`itk_runner` (which ``run_tests.py`` also drives) and in
+:mod:`acts_runner` (which ``run_acts.py`` also drives). Everything here is
+HTTP concerns.
 """
 
 from __future__ import annotations

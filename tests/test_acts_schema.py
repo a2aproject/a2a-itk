@@ -322,8 +322,10 @@ class TestAssertionTreesArePreserved:
         assert s.params == {'anything': {'at': ['all', 1, None]}}
 
     def test_stray_key_directly_under_expect_is_rejected(self):
-        """The corpus does this at four sites; `compat.py` moves them under
-        `body` before validation, so the schema itself stays strict."""
+        """The corpus does this at two sites, both a `task` key, which
+        `compat.py` moves under `body` before validation — so the schema
+        itself stays strict. Two further stray keys are `error`; that is a
+        different defect, and becomes `expect_error` instead."""
         with pytest.raises(ValidationError):
             Step.model_validate(_step(expect={'task': {'id': {'type': 'string'}}}))
 

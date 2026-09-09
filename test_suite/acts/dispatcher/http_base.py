@@ -271,7 +271,9 @@ class HttpDispatcher(Dispatcher):
         envelope each event arrives in, and removing it would delete the thing
         under test.
         """
-        merged = dict(raw.headers or {})
+        merged = self._headers(headers, defaults=False)
+        merged.update(raw.headers or {})
+
         content: str | None = None
         if raw.body_raw is not None:
             content = raw.body_raw

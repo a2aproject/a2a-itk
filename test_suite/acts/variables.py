@@ -230,12 +230,14 @@ class Scope:
     A test is the isolation unit (steps within it share captures, tests never
     do), so the runner builds one of these per test and throws it away after.
 
-    Resolution follows spec §12.2, highest precedence first: step captures,
-    then the document `variables` map, then `env.`, then `$uuid`. In practice
+    Resolution follows spec §12.2, highest precedence first: `$uuid`, then
+    step captures, then the document `variables` map, then `env.`. In practice
     the four barely compete — `{{env.X}}` and `{{$uuid}}` are syntactically
     distinct, and so is `{{stepId.name}}` from `{{name}}` — so the order only
     decides a document variable literally named `foo.bar` against step `foo`'s
-    capture `bar`. The step capture wins.
+    capture `bar`. The step capture wins. `$uuid` going first does mean a
+    document variable of that name is unreachable, which is the right way
+    round: §8.1 makes it a generator, not a name anyone may rebind.
     """
 
     def __init__(

@@ -128,8 +128,7 @@ def interface_for(
 ) -> tuple[str, str | None]:
     """Where ``binding`` is served, per the card.
 
-    Returns the URL and, for JSON-RPC, the path component to use as the
-    dispatcher's ``rpc_path``.
+    Returns the interface's URL and the protocol version it advertises.
 
     Prefers protocol version 1.0 when the card advertises several: the ITK
     agents publish a 0.3 interface at the same URL for traversal compat, and

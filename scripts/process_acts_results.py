@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """ACTS conformance metrics processor.
 
-The ACTS counterpart of :mod:`scripts.process_results`: takes one §13 report,
-fetches the rolling history from the ``nightly-metrics`` release asset,
-appends a run entry and writes the updated file back for the workflow to
-re-upload. Same shape, same 50-run window, same refusal to publish an empty
-run — a dashboard reading both should not have to learn two idioms.
+The ACTS counterpart of :mod:`scripts.process_results`: takes the §13 report
+from each binding, fetches the rolling history from the ``nightly-metrics``
+release asset, appends one run entry and writes the updated file back for the
+workflow to re-upload. Same shape and the same refusal to publish an empty run
+— a dashboard reading both should not have to learn two idioms — over a
+shorter window, for the reason `DEFAULT_HISTORY_LIMIT` gives below.
 
 **A history entry is a tally, not a copy of the report.** Each test
 contributes `{id, level, result}` and nothing else. Failure messages, step
 breakdowns and assertion paths stay in the per-run report, which the workflow
 keeps as a build artifact: the rolling asset is fetched by a browser on every
-dashboard load, and 111 tests × 50 runs of failure prose would make it
-unusable for the one thing it is for — showing a trend.
+dashboard load, and 111 tests × three bindings × a week of failure prose would
+make it unusable for the one thing it is for — showing a trend.
 
 **One entry per run, not per transport.** A nightly that exercises jsonrpc,
 grpc and rest is *one* run of the SDK at one commit, so it contributes one
 entry with the three bindings nested under `results`. Appending three would
-make the 50-run window cover ~17 nights instead of 50, and would force every
+shrink the window from a week to about two nights, and would force every
 consumer to re-group by `commit_sha` to answer "how did last night go" — the
 question the asset exists to answer. It also keeps the shape parallel to
 `itk_<sdk>.json`, where one nightly is likewise one entry.

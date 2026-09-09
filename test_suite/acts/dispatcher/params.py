@@ -2,7 +2,7 @@
 
 An ACTS step's ``params`` is free-form (``{ * text => any }`` in the CDDL) and
 names things the way a test author thinks about them. The A2A request messages
-sometimes disagree about where a value lives. Two operations need bridging,
+sometimes disagree about where a value lives. Four operations need bridging,
 and the same bridge serves all three bindings — JSON-RPC, REST and gRPC all
 carry the identical request messages, so this is not transport-specific and
 must not be duplicated into the adapters.
@@ -25,9 +25,9 @@ from test_suite.acts.schema import Operation
 
 #: ``taskId`` and ``contextId`` are fields of ``Message``, not of
 #: ``SendMessageRequest`` — the request carries only ``message``,
-#: ``configuration``, ``metadata`` and ``tenant``. Twelve corpus steps pass
-#: them beside ``message`` to mean "continue this task", so they are folded
-#: into the message where the schema puts them.
+#: ``configuration``, ``metadata`` and ``tenant``. Thirteen corpus steps, in
+#: nine tests, pass them beside ``message`` to mean "continue this task", so
+#: they are folded into the message where the schema puts them.
 MESSAGE_SCOPED_PARAMS = ('taskId', 'contextId')
 
 #: ``create_push_config`` sends ``TaskPushNotificationConfig`` *as* its request

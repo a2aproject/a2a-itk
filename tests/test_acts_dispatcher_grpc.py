@@ -281,7 +281,7 @@ class TestDispatch:
         assert response.payload['status']['state'] == 'TASK_STATE_COMPLETED'
 
     def test_success_derives_http_200(self):
-        """gRPC has no HTTP status, but 86 binding-agnostic corpus tests
+        """gRPC has no HTTP status, but 59 binding-agnostic corpus tests
         assert `status: 200` to mean "it succeeded"."""
         response = call(
             FakeAgent(), lambda d: d.dispatch(Operation.GET_TASK, {'id': 't1'})

@@ -4,7 +4,7 @@ Both run outside the image, on whatever python a CI runner has, so they are
 stdlib-only and tested here rather than through the service. The behaviours
 worth pinning are the guard rails: a run that tested nothing, or a FastAPI
 error envelope, must never reach the rolling history — either would push a
-real entry off the 50-run window and read as a clean night.
+real entry off the rolling window and read as a clean night.
 """
 
 from __future__ import annotations

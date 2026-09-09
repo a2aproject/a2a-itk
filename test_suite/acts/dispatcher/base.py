@@ -57,8 +57,9 @@ class MalformedResponse(DispatchError):
 class UnsupportedByBinding(DispatchError):
     """This binding cannot express the requested call.
 
-    Raised for ``dispatch_raw`` on gRPC — a "raw request" is an HTTP notion,
-    and below protobuf there is no equivalent an ACTS test could describe.
+    Raised for ``dispatch_raw`` and ``stream_raw`` on gRPC — a "raw request"
+    is an HTTP notion, and below protobuf there is no equivalent an ACTS test
+    could describe, streaming or otherwise.
     """
 
 
@@ -99,8 +100,8 @@ class WireResponse:
 
     ``status`` is the HTTP status. gRPC has none, so the gRPC dispatcher
     derives it from the gRPC status by the canonical transcoding — see
-    :data:`test_suite.acts.wire_map.GRPC_STATUS_TO_HTTP`. Without that, the 86
-    binding-agnostic corpus tests asserting ``status: 200`` could not run on
+    :data:`test_suite.acts.wire_map.GRPC_STATUS_TO_HTTP`. Without that, the 59
+    binding-agnostic corpus tests that assert ``status: 200`` could not run on
     gRPC at all.
     """
 
@@ -200,8 +201,9 @@ class Dispatcher(abc.ABC):
     ) -> AsyncIterator[StreamEvent]:
         """Stream the response to a hand-built request.
 
-        Events arrive **unwrapped**, matching :meth:`dispatch_raw`: a raw
-        streaming test asserts on the envelope each event comes in. Raises
+        Events arrive **wrapped**, matching :meth:`dispatch_raw`: a raw
+        streaming test asserts on the envelope each event comes in, so
+        unwrapping would delete the thing under test. Raises
         :class:`UnsupportedByBinding` on gRPC.
         """
 

@@ -258,11 +258,14 @@ OPERATIONS: Mapping[Operation, OperationBinding] = MappingProxyType(_OPERATIONS)
 
 
 # --------------------------------------------------------------------------
-# Errors — A2A §5.4 for the nine A2A-specific errors, §9.5 for the standard
-# JSON-RPC ones. `reason` is the §11.6 ErrorInfo string: UPPER_SNAKE of the
-# name minus the `Error` suffix. That derivation is exact for all nine, but it
-# stays a table rather than a function because it is the wire contract, and one
-# row of drift upstream should show up as a diff here.
+# Errors — A2A §5.4 for the eight A2A-specific errors, §9.5 for the standard
+# JSON-RPC ones, plus the one ACTS invents (see StreamingNotSupported below).
+# `reason` is the §11.6 ErrorInfo string: UPPER_SNAKE of the name minus the
+# `Error` suffix. That derivation holds for seven of the nine rows carrying a
+# reason and breaks on the other two — ExtendedCardNotSupported and
+# StreamingNotSupported, each for a documented reason on its own row. Which is
+# why this is a table and not a function: it is the wire contract, and one row
+# of drift upstream should show up as a diff here.
 # --------------------------------------------------------------------------
 
 _ERRORS: dict[ErrorType, ErrorBinding] = {

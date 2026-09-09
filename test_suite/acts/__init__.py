@@ -7,8 +7,10 @@ is the ITK-side implementation: `schema.py` models the format, `compat.py`
 reconciles the shipped corpus with it, `loader.py` turns a manifest into a
 flat, ordered run plan, `wire_map.py` and `dispatcher/` bind an abstract
 operation to a transport, `variables.py` and `assertions.py` decide what a
-response means, `streaming.py` does the same for a sequence of events, and
-`runner.py` sequences the whole thing into results.
+response means, `streaming.py` does the same for a sequence of events,
+`behaviors.py` reads the SUT's `tck-*` contract, `runner.py` sequences the
+whole thing into results, and `report.py` writes them out as the §13 document
+a dashboard consumes.
 
 It sits *beside* `test_suite.scenarios`, not inside it, because the two suites
 answer different questions and share nothing at run time: a traversal walks an

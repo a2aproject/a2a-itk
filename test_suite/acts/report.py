@@ -212,7 +212,9 @@ def write(report: Mapping[str, Any], directory: Path) -> Path:
 def conformance_lines(report: Mapping[str, Any]) -> list[str]:
     """§12.7's human-readable summary, one line per level.
 
-    `MUST:   45/47 passed (2 skipped)` — the shape the spec prints.
+    `MUST   45/45 passed (2 skipped)` — the shape the spec prints. The
+    denominator counts only the tests that were graded, so a skip leaves both
+    sides of it and is reported in the parenthetical instead.
     """
     lines = []
     for level in Level:

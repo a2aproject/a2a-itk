@@ -2,10 +2,9 @@
 
 Each SDK repo declares, in `acts/sut-behaviors.yaml`, which `tck-*` prefixes
 its ITK agent implements. The runner reads it and **fails** a test needing a
-prefix the SUT does not declare — not skips it. That is deliberate and comes
-from the Phase 4 breakdown: a skip would let an SDK's missing support vanish
-from its own conformance report, which is the opposite of what the report is
-for.
+prefix the SUT does not declare — not skips it. That is deliberate: a skip
+would let an SDK's missing support vanish from its own conformance report,
+which is the opposite of what the report is for.
 
 A SUT with no contract file at all is a different case: nothing has been
 claimed, so there is nothing to check against, and gating is off. That is what

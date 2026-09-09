@@ -20,11 +20,14 @@ over a binding the test does not target (§12.3). Missing `tck-*` behaviors are
 the deliberate exception: those **fail**, because a skip would let an SDK's
 lagging support disappear quietly from its own report.
 
-Scope: every step kind executes — operation, raw, streaming, and
-`client_response` (§10), the last by having the SUT's own client parse a
-canned payload, since no A2A operation asks a server what its client would
-have read. Nothing is deferred for want of machinery any more; the skips that
-remain are transport filters and unmet preconditions.
+Scope: operation, raw and `client_response` steps all execute, the last (§10)
+by having the SUT's own client parse a canned payload, since no A2A operation
+asks a server what its client would have read; a step whose operation streams
+is read as a stream. `assertion` is the one step kind with no execution path,
+and the corpus contains none. A test can still be skipped for four reasons: it
+targets another binding, it needs a runner capability this run does not
+provide, its preconditions are unmet, or it contains a step kind that does not
+execute.
 """
 
 from __future__ import annotations
@@ -85,8 +88,8 @@ DEFAULT_DELAY_MS = 1000
 
 #: How long to read a stream whose `expect_stream` sets no `timeout_ms`.
 #:
-#: Every one of the corpus's 12 streaming steps is such a step — none declares
-#: `timeout_ms` and none declares `max_count` — so without a backstop a SUT
+#: Every streaming step in the corpus is such a step — not one declares
+#: `timeout_ms` and not one declares `max_count` — so without a backstop a SUT
 #: that opens a stream and never closes it hangs the run indefinitely and
 #: produces no report at all. §7 gives no default, so this is the runner's own.
 #:
@@ -346,8 +349,8 @@ class Runner:
         self.variables = dict(variables or {})
         self.spec_version = spec_version
         self.agent_card = agent_card
-        #: The `tck-*` prefixes the SUT declares (story 4.5's
-        #: `sut-behaviors.yaml`). ``None`` means no contract was supplied, so
+        #: The `tck-*` prefixes the SUT declares, from its own
+        #: `acts/sut-behaviors.yaml`. ``None`` means no contract was supplied, so
         #: behavior gating is off rather than failing every test that needs one.
         self.sut_behaviors = None if sut_behaviors is None else frozenset(sut_behaviors)
         self.capabilities = frozenset(capabilities)

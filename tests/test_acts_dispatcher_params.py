@@ -204,8 +204,8 @@ class TestAgainstTheRealMessages:
 def _without_templates(value):
     """Replace ``{{...}}`` placeholders with a plain string.
 
-    Variable substitution is the runner's job (story 4.3); here the point is
-    the *shape*, and an unsubstituted template is still a string.
+    Variable substitution is the runner's job, not this layer's; here the
+    point is the *shape*, and an unsubstituted template is still a string.
     """
     if isinstance(value, dict):
         return {k: _without_templates(v) for k, v in value.items()}

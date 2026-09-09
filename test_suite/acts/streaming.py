@@ -129,8 +129,8 @@ def check_ordering(events: Sequence[StreamedEvent]) -> AssertionResult:
     **MUST** cause a failure, and the two do not agree — `SUBMITTED → COMPLETED`
     is absent from the first and not named by the second. Only the explicit
     MUST list is enforced here, because rejecting a transition the spec never
-    calls illegal would fail a conforming SUT. The ambiguity is recorded
-    upstream rather than resolved by guesswork.
+    calls illegal would fail a conforming SUT. Resolving the ambiguity is a
+    question for the spec, not something to guess at in a runner.
 
     Enforced, then: nothing may transition *to* `SUBMITTED`, nothing may follow
     a terminal state, and a state may repeat.

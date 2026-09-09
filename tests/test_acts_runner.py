@@ -34,6 +34,7 @@ from test_suite.acts.runner import (
     CLIENT_PARSE_BEHAVIOR,
     DEFAULT_DELAY_MS,
     DEFAULT_MAX_ATTEMPTS,
+    EXECUTABLE_KINDS,
     KNOWN_CAPABILITIES,
     UNSATISFIABLE,
     VERSION_HEADER,
@@ -51,6 +52,7 @@ from test_suite.acts.schema import (
     RawBlock,
     RunnerRequirement,
     Step,
+    StepKind,
     Test,
     TransportBinding,
 )
@@ -704,7 +706,7 @@ class TestBehaviorContract:
         assert 'tck-long-running' in result.failure.message
 
     def test_no_contract_means_no_gating(self):
-        """Story 4.5 supplies the contract; until then nothing is checked."""
+        """A SUT that ships no contract file has claimed nothing to check."""
         runner = runner_for(FakeDispatcher(ok()))
         test = a_test(get_task(), requires_behaviors=['tck-anything'])
         assert run(runner, test).result is Outcome.PASS
@@ -1198,21 +1200,41 @@ class TestAgainstTheCorpus:
 
     @pytest.mark.parametrize('binding', list(TransportBinding))
     def test_nothing_is_deferred_any_more(self, suite, binding):
-        """Every step kind executes: operation, raw, streaming and client."""
+        """Operation, raw and client steps all execute.
+
+        `assertion` is the one kind still outside `EXECUTABLE_KINDS`, so this
+        holds because the corpus contains none of them, not because every kind
+        has an execution path — hence the second assertion.
+        """
         results = self._run_all(suite, binding)
         deferred = [
             r for r in results
             if r.result is Outcome.SKIP and 'not yet supported' in (r.skip_reason or '')
         ]
         assert deferred == []
+        assert not any(
+            step.kind() not in EXECUTABLE_KINDS
+            for loaded in suite.tests for step in loaded.test.steps
+        )
 
     @pytest.mark.parametrize('binding', list(TransportBinding))
-    def test_raw_steps_reach_the_dispatcher(self, suite, binding):
+    def test_no_raw_test_reaches_the_grpc_dispatcher(self, suite, binding):
         """Every raw test in the corpus is jsonrpc- or rest-restricted.
 
-        Which is why none of them errors on gRPC with `UnsupportedByBinding` —
-        they are filtered by transport before they get there.
+        Which is why none errors on gRPC with `UnsupportedByBinding`: they are
+        filtered out by transport before they get that far. Asserting only
+        "nothing errored" would pass for the wrong reason, so this checks the
+        filtering directly.
         """
+        raw_tests = [
+            loaded.test for loaded in suite.tests
+            if any(step.kind() is StepKind.RAW for step in loaded.test.steps)
+        ]
+        assert raw_tests
+        for test in raw_tests:
+            assert test.transport, f'{test.id} has a raw step but no transport'
+            assert TransportBinding.GRPC not in test.transport
+
         results = self._run_all(suite, binding)
         assert not any(
             r.result is Outcome.ERROR for r in results
