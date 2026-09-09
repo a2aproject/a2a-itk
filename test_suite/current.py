@@ -35,6 +35,12 @@ def spawn_from_dir(
 ) -> subprocess.Popen:
     """Detect the agent's language and spawn it.
 
+    Detection is first-match against the markers below, so a directory must
+    carry the marker for the language it is actually written in. Dropping a
+    foreign marker in to influence how the agent starts (a ``main.py`` next to
+    a ``.csproj``, say) silently reroutes it through the wrong spawner and
+    breaks the guarantee in the module docstring.
+
     Args:
         agent_dir: The directory that contains the agent's entrypoint
             (``main.py``, ``main.go``, ``Cargo.toml``, ...).
@@ -82,9 +88,9 @@ def spawn_from_dir(
     if (agent_dir.parent / 'package.json').exists():
         return _spawn_ts(agent_dir, http_port, grpc_port, popen)
 
-    csproj = list(agent_dir.glob('*.csproj'))
-    if csproj:
-        return _spawn_dotnet(agent_dir, csproj[0], http_port, grpc_port, popen)
+    csproj = dotnet_csproj(agent_dir)
+    if csproj is not None:
+        return _spawn_dotnet(agent_dir, csproj, http_port, grpc_port, popen)
 
     if (agent_dir / 'pom.xml').exists():
         return _spawn_java(agent_dir, http_port, grpc_port, popen)
@@ -143,6 +149,37 @@ def _spawn_ts(
     return popen(args, agent_dir)
 
 
+def dotnet_csproj(agent_dir: Path) -> Path | None:
+    """The project the build phase and spawn must both pick.
+
+    ``sorted`` rather than raw glob order: the two callers run at different
+    times, and on different machines for a cached tree, so filesystem order
+    is not a stable tiebreak. If they disagreed when a dir holds more than
+    one project, the build would publish one assembly and spawn would look
+    for the other — then republish inside the readiness window.
+    """
+    return next(iter(sorted(agent_dir.glob('*.csproj'))), None)
+
+
+def dotnet_publish_args(csproj: Path, publish_dir: Path) -> list[str]:
+    """The one publish recipe, shared by the build phase and spawn.
+
+    :func:`test_suite.launcher.builders._build_dotnet` runs it for a fetched
+    peer, inside the build budget and the cached tree; spawn runs it only if
+    nothing published the agent first, which is the SUT's case (a bind mount
+    never goes through the build phase).
+    """
+    return [
+        'dotnet', 'publish', str(csproj),
+        '-c', 'Release', '-o', str(publish_dir),
+    ]
+
+
+def dotnet_publish_dll(agent_dir: Path, csproj: Path) -> Path:
+    """Where the published entry assembly is expected to land."""
+    return agent_dir / 'publish' / f'{csproj.stem}.dll'
+
+
 def _spawn_dotnet(
     agent_dir: Path,
     csproj: Path,
@@ -150,8 +187,34 @@ def _spawn_dotnet(
     grpc_port: int,
     popen: _PopenFactory,
 ) -> subprocess.Popen:
+    """Exec the published DLL — never ``dotnet run``.
+
+    ``dotnet run`` restores and builds on every start, inside the readiness
+    window rather than the build one, and it defaults to Debug so it cannot
+    reuse a Release publish. Publishing first and exec'ing the result mirrors
+    what :func:`_spawn_rust` does with ``cargo build``.
+
+    Normally the build phase has already published and this is a bare exec.
+    The fallback covers the SUT, which is bind-mounted and so never built,
+    and anyone driving ``spawn_from_dir`` directly.
+    """
+    dll = dotnet_publish_dll(agent_dir, csproj)
+
+    if not dll.exists():
+        subprocess.run(  # noqa: S603
+            dotnet_publish_args(csproj, dll.parent),
+            cwd=str(agent_dir),
+            check=True,
+        )
+        if not dll.exists():
+            raise RuntimeError(
+                f'dotnet publish succeeded but {dll.name} is not in '
+                f'{dll.parent}. Expected the assembly to be named after the '
+                f'project ({csproj.name}); set <AssemblyName> to match.'
+            )
+
     args = [  # noqa: S607
-        'dotnet', 'run', '--project', str(csproj), '--',
+        'dotnet', str(dll),
         '--httpPort', str(http_port),
         '--grpcPort', str(grpc_port),
     ]

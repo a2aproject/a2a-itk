@@ -149,17 +149,78 @@ class TestPerLanguageArgv:
         ]
         assert cwd == mount
 
-    def test_dotnet(self, mount):
+    def test_dotnet_uses_a_prepublished_dll_without_building(self, mount):
+        """A repo whose SDK requirements exceed the image publishes on the
+        host; the launcher must then only run the output."""
         csproj = mount / 'Agent.csproj'
         csproj.write_text('<Project/>', encoding='utf-8')
+        dll = mount / 'publish' / 'Agent.dll'
+        dll.parent.mkdir()
+        dll.write_text('assembly', encoding='utf-8')
+
         current.spawn_from_dir(mount, self.HTTP, self.GRPC)
+
+        assert not _RecRun.calls, 'must not build when publish output exists'
         argv, cwd, _ = _RecPopen.calls[0]
         assert argv == [
-            'dotnet', 'run', '--project', str(csproj), '--',
+            'dotnet', str(dll),
             '--httpPort', str(self.HTTP),
             '--grpcPort', str(self.GRPC),
         ]
         assert cwd == mount
+
+    def test_dotnet_publishes_then_execs_when_not_prebuilt(self, mount, monkeypatch):
+        """Never `dotnet run`: it builds inside the readiness window and
+        defaults to Debug, so it cannot reuse a Release publish."""
+        csproj = mount / 'Agent.csproj'
+        csproj.write_text('<Project/>', encoding='utf-8')
+        dll = mount / 'publish' / 'Agent.dll'
+
+        # Stand in for the real publish, which the recording stub skips.
+        def fake_run(argv, cwd=None, **kw):  # noqa: ANN001, ARG001
+            _RecRun.calls.append((argv, Path(cwd) if cwd else None))
+            dll.parent.mkdir(parents=True, exist_ok=True)
+            dll.write_text('assembly', encoding='utf-8')
+            return subprocess.CompletedProcess(argv, 0)
+        monkeypatch.setattr(current.subprocess, 'run', fake_run)
+
+        current.spawn_from_dir(mount, self.HTTP, self.GRPC)
+
+        pre_argv, pre_cwd = _RecRun.calls[0]
+        assert pre_argv == [
+            'dotnet', 'publish', str(csproj),
+            '-c', 'Release', '-o', str(mount / 'publish'),
+        ]
+        assert pre_cwd == mount
+
+        argv, cwd, _ = _RecPopen.calls[0]
+        assert argv[:2] == ['dotnet', str(dll)]
+        assert 'run' not in argv
+        assert cwd == mount
+
+    def test_dotnet_reports_a_missing_assembly_clearly(self, mount, monkeypatch):
+        """A publish that produces a differently-named assembly should say so,
+        not fail later as an opaque readiness timeout."""
+        csproj = mount / 'Agent.csproj'
+        csproj.write_text('<Project/>', encoding='utf-8')
+
+        def fake_run(argv, cwd=None, **kw):  # noqa: ANN001, ARG001
+            return subprocess.CompletedProcess(argv, 0)
+        monkeypatch.setattr(current.subprocess, 'run', fake_run)
+
+        with pytest.raises(RuntimeError, match='Agent.dll is not in'):
+            current.spawn_from_dir(mount, self.HTTP, self.GRPC)
+
+    def test_a_csproj_dir_is_detected_as_dotnet(self, mount):
+        """Regression guard: a .NET agent must not need a foreign marker file
+        to control how it starts."""
+        (mount / 'Agent.csproj').write_text('<Project/>', encoding='utf-8')
+        (mount / 'publish').mkdir()
+        (mount / 'publish' / 'Agent.dll').write_text('a', encoding='utf-8')
+        current.spawn_from_dir(mount, self.HTTP, self.GRPC)
+        argv, _, _ = _RecPopen.calls[0]
+        assert argv[0] == 'dotnet'
+        assert 'uv' not in argv
 
     def test_java_prebuild_and_exec(self, mount):
         (mount / 'pom.xml').write_text('<project/>', encoding='utf-8')
@@ -330,3 +391,49 @@ class TestNewSessionIsOptIn:
         assert not hasattr(proc, '_log_file'), (
             'runs without log_dir must not leave an open log handle'
         )
+
+
+class TestDotnetBuildPhase:
+    """The seam between the build phase and spawn.
+
+    The builder's own argv, idempotence and timeout live in
+    ``test_builders.py`` alongside every other language. What matters *here*
+    is only that the two modules share one recipe: if they drift, the build
+    publishes somewhere spawn doesn't look and every start silently pays for
+    a second publish inside the readiness window.
+    """
+
+    def test_build_and_spawn_share_one_recipe(self, tmp_path):
+        from test_suite.launcher import builders
+
+        d = tmp_path / 'itk'
+        d.mkdir()
+        csproj = d / 'Agent.csproj'
+        csproj.write_text('<Project/>', encoding='utf-8')
+
+        assert builders.dotnet_csproj is current.dotnet_csproj
+        assert builders.dotnet_publish_dll is current.dotnet_publish_dll
+        assert builders.dotnet_publish_args is current.dotnet_publish_args
+        assert current.dotnet_publish_dll(d, csproj) == d / 'publish' / 'Agent.dll'
+
+    def test_project_choice_is_stable_when_a_dir_holds_two(self, tmp_path):
+        """Both sides must pick the *same* project, deterministically.
+
+        Raw ``glob`` order is filesystem order, which differs between the
+        build host and a later run over the cached tree. Picking differently
+        would publish one assembly and then exec-miss on the other.
+        """
+        d = tmp_path / 'itk'
+        d.mkdir()
+        (d / 'Zeta.csproj').write_text('<Project/>', encoding='utf-8')
+        (d / 'Agent.csproj').write_text('<Project/>', encoding='utf-8')
+
+        chosen = current.dotnet_csproj(d)
+        assert chosen is not None
+        assert chosen.name == 'Agent.csproj', 'expected a sorted, stable choice'
+        assert current.dotnet_csproj(d) == chosen
+
+    def test_no_project_is_reported_not_crashed(self, tmp_path):
+        d = tmp_path / 'itk'
+        d.mkdir()
+        assert current.dotnet_csproj(d) is None

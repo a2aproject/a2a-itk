@@ -245,11 +245,52 @@ class TestTsBuilder:
 
 
 class TestDotnetBuilder:
-    def test_dotnet_is_noop(self, tmp_path, rec):
-        (tmp_path / 'Agent.csproj').touch()
+    def test_dotnet_publishes_release(self, tmp_path, rec):
+        """Publish in the build phase, not on spawn.
+
+        ``dotnet run`` would restore+build inside the readiness window and in
+        Debug; publishing here spends the build budget instead and leaves a
+        Release tree the spawn step can exec directly.
+        """
+        csproj = tmp_path / 'Agent.csproj'
+        csproj.touch()
         lang = builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert lang is Language.DOTNET
+        assert rec.calls == [
+            (
+                [
+                    'dotnet', 'publish', str(csproj),
+                    '-c', 'Release', '-o', str(tmp_path / 'publish'),
+                ],
+                tmp_path,
+            ),
+        ]
+
+    def test_dotnet_skips_an_existing_publish(self, tmp_path, rec):
+        """A warm cached tree at the same SHA must not republish."""
+        (tmp_path / 'Agent.csproj').touch()
+        pub = tmp_path / 'publish'
+        pub.mkdir()
+        (pub / 'Agent.dll').write_text('assembly', encoding='utf-8')
+        builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert rec.calls == []
+
+    def test_dotnet_publish_honours_the_build_timeout(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The publish must be bounded by the build budget — the point of
+        doing it here is that it is *not* bounded by the readiness one.
+        """
+        (tmp_path / 'Agent.csproj').touch()
+        seen: list[dict[str, Any]] = []
+
+        def spy(args, *_a: Any, **kw: Any) -> Any:
+            seen.append(kw)
+            return subprocess.CompletedProcess(args, 0, stdout='', stderr='')
+
+        monkeypatch.setattr(builders.subprocess, 'run', spy)
+        builders._build_dotnet(tmp_path, timeout=600)
+        assert seen[0]['timeout'] == 600
 
 
 # ---------------------------------------------------------------------------
@@ -369,5 +410,6 @@ class TestCodegenOrdering:
     def test_dotnet_has_no_codegen(self, tmp_path, rec):
         (tmp_path / 'Agent.csproj').touch()
         builders.build_in_place('x/y', 'a' * 40, tmp_path)
-        assert rec.calls == []
+        # The publish is the whole build — no codegen step runs before it.
+        assert [argv[0] for argv, _cwd in rec.calls] == ['dotnet']
         assert not (tmp_path / 'a2a-itk').exists()
