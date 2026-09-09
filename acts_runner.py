@@ -19,8 +19,12 @@ bindings exist, so it cannot sit behind one of them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
+import re
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,7 +36,7 @@ from test_suite.acts import report as report_writer
 from test_suite.acts.dispatcher import Dispatcher, for_binding
 from test_suite.acts.dispatcher.http_base import FOLLOW_REDIRECTS
 from test_suite.acts.loader import LoadedSuite, load_suite
-from test_suite.acts.runner import Runner, TestResult
+from test_suite.acts.runner import VERSION_HEADER, Runner, TestResult
 from test_suite.acts.schema import RunnerRequirement, TransportBinding
 from test_suite.acts.wire_map import WELL_KNOWN_AGENT_CARD_PATH
 from test_suite.launcher import Cluster, TargetSpec
@@ -47,6 +51,10 @@ DEFAULT_SUITE = Path(__file__).resolve().parent / 'scenarios' / 'acts' / 'suite.
 
 #: The identifier the SUT goes by, matching `itk_runner.SUT_ID`.
 SUT_ID = 'current'
+
+#: The protocol version this runner speaks, sent on every request including
+#: the bootstrap card fetch. Matches `Runner`'s own default.
+SPEC_VERSION = '1.0'
 
 #: Bearer token the runner presents on every abstract operation, so an
 #: operation the spec puts behind authentication can still be exercised. A2A
@@ -68,6 +76,31 @@ ACTS_AUTH_TOKEN = 'itk-valid-token'
 #: Offered by `SEC-EXTCARD-002` as a token that authenticates but does not
 #: authorize; a fixture should answer 403 rather than 401.
 ACTS_INSUFFICIENT_TOKEN = 'itk-insufficient-token'
+
+#: Set in the SUT's environment for the second pass. An agent that honours it
+#: advertises none of the optional capabilities *and* refuses the operations
+#: they gate.
+#:
+#: Four tests — `CORE-CAP-001`, `CORE-CAP-002`, `SEC-EXTCARD-003`,
+#: `PUSH-CFG-004` — assert that an agent lacking a capability answers
+#: `UnsupportedOperationError`. Their preconditions therefore require the card
+#: *not* to advertise it, so against a fully capable SUT they skip, and the
+#: "unsupported" branch of the protocol goes untested by anybody. It cannot be
+#: fixed by relaxing the gate: an agent that advertises streaming is obliged to
+#: stream, so the assertion would simply be wrong.
+#:
+#: One agent cannot both stream and not stream, hence a second pass against a
+#: second, deliberately diminished instance. Every SDK already gates these
+#: operations on its own card, so honouring this usually means nothing more
+#: than publishing a smaller `capabilities` block.
+REDUCED_CAPABILITIES_ENV = 'ITK_ACTS_REDUCED_CAPABILITIES'
+
+#: The capabilities the reduced pass expects the SUT to drop.
+REDUCIBLE_CAPABILITIES = ('streaming', 'pushNotifications', 'extendedAgentCard')
+
+#: How `Runner._unmet_precondition` words a skip the reduced pass can clear:
+#: the card advertises something the test needs absent.
+_CAPABILITY_SKIP = re.compile(r'agent card capability (\w+)=True, needs False')
 
 #: Variables the corpus names that no document defines (spec §12.2).
 RUNNER_VARIABLES: dict[str, Any] = {
@@ -107,6 +140,14 @@ class ActsRun:
 async def fetch_agent_card(base_url: str, *, timeout: float = 30.0) -> dict[str, Any]:
     """Read the well-known agent card off a running agent.
 
+    Sent with `A2A-Version: 1.0`, like every other request the run makes.
+    §3.6.2 makes an absent header mean **0.3**, so an SDK with a compat layer
+    answers a bare GET with its v0.3 card — on which `extendedAgentCard` is not
+    a capability at all but a top-level `supportsAuthenticatedExtendedCard`.
+    Preconditions are evaluated against this card, so reading the wrong dialect
+    silently skips whole groups of tests while the operations they cover work
+    perfectly well.
+
     Redirects are not followed here either: the card decides what the whole
     run tests, so an agent that does not serve it where §8.6 says should fail
     the run loudly rather than have the harness go looking elsewhere.
@@ -116,7 +157,7 @@ async def fetch_agent_card(base_url: str, *, timeout: float = 30.0) -> dict[str,
         timeout=timeout, follow_redirects=FOLLOW_REDIRECTS
     ) as client:
         try:
-            response = await client.get(url)
+            response = await client.get(url, headers={VERSION_HEADER: SPEC_VERSION})
             response.raise_for_status()
             return response.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -247,9 +288,50 @@ async def run(
             )
 
     started = time.monotonic()
+    results, card = await _run_pass(
+        suite,
+        transport=transport,
+        variables=variables,
+        capabilities=capabilities,
+        declared=declared,
+        log_dir=log_dir,
+        log_name='acts_sut',
+    )
+
+    results = await _rerun_capability_skips(
+        results,
+        suite,
+        transport=transport,
+        variables=variables,
+        capabilities=capabilities,
+        declared=declared,
+        log_dir=log_dir,
+    )
+
+    return ActsRun(
+        results=results,
+        suite=suite,
+        transport=transport,
+        duration_ms=int((time.monotonic() - started) * 1000),
+        agent_card=card,
+        declared_behaviors=declared,
+    )
+
+
+async def _run_pass(
+    suite: LoadedSuite,
+    *,
+    transport: TransportBinding,
+    variables: dict[str, Any] | None,
+    capabilities: list[RunnerRequirement] | None,
+    declared: frozenset[str] | None,
+    log_dir: Path | None,
+    log_name: str,
+) -> tuple[list[TestResult], dict[str, Any]]:
+    """Start one SUT, run ``suite`` against it, and tear it down."""
     with Cluster(log_dir=log_dir) as cluster:
         outcomes = await asyncio.to_thread(
-            cluster.start_all, [TargetSpec(kind=Kind.MOUNT)], log_names=['acts_sut'],
+            cluster.start_all, [TargetSpec(kind=Kind.MOUNT)], log_names=[log_name],
         )
         outcome = outcomes[0]
         if not outcome.ok():
@@ -273,16 +355,96 @@ async def run(
                 sut_behaviors=declared,
                 capabilities=capabilities or (),
             )
-            results = await runner.run_suite(suite)
+            return await runner.run_suite(suite), card
 
-    return ActsRun(
-        results=results,
-        suite=suite,
-        transport=transport,
-        duration_ms=int((time.monotonic() - started) * 1000),
-        agent_card=card,
-        declared_behaviors=declared,
+
+@contextlib.contextmanager
+def _reduced_capabilities() -> Iterator[None]:
+    """Ask the next SUT this process spawns to advertise nothing optional.
+
+    The launcher gives the child no explicit environment, so it inherits this
+    one — which is why setting a variable here reaches the agent without any
+    plumbing through `Cluster`.
+    """
+    previous = os.environ.get(REDUCED_CAPABILITIES_ENV)
+    os.environ[REDUCED_CAPABILITIES_ENV] = '1'
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(REDUCED_CAPABILITIES_ENV, None)
+        else:
+            os.environ[REDUCED_CAPABILITIES_ENV] = previous
+
+
+def _capability_skips(results: list[TestResult]) -> dict[str, str]:
+    """Tests skipped only because the SUT advertises what they need absent."""
+    found = {}
+    for result in results:
+        match = _CAPABILITY_SKIP.search(result.skip_reason or '')
+        if match is not None:
+            found[result.id] = match.group(1)
+    return found
+
+
+async def _rerun_capability_skips(
+    results: list[TestResult],
+    suite: LoadedSuite,
+    *,
+    transport: TransportBinding,
+    variables: dict[str, Any] | None,
+    capabilities: list[RunnerRequirement] | None,
+    declared: frozenset[str] | None,
+    log_dir: Path | None,
+) -> list[TestResult]:
+    """Re-run the capability-gated tests against a diminished SUT.
+
+    Returns ``results`` with those tests' verdicts replaced. A SUT that does
+    not honour `REDUCED_CAPABILITIES_ENV` keeps its original skips — the point
+    is to run the tests, not to report a verdict nobody produced.
+    """
+    blocked = _capability_skips(results)
+    if not blocked:
+        return results
+
+    logger.info(
+        'Re-running %d capability-gated test(s) against a reduced SUT: %s',
+        len(blocked), ', '.join(sorted(blocked)),
     )
+    reduced_suite = LoadedSuite(
+        tests=[t for t in suite.tests if t.id in blocked],
+        variables=suite.variables,
+        sources=suite.sources,
+        rewrites=suite.rewrites,
+    )
+
+    with _reduced_capabilities():
+        rerun, reduced_card = await _run_pass(
+            reduced_suite,
+            transport=transport,
+            variables=variables,
+            capabilities=capabilities,
+            declared=declared,
+            log_dir=log_dir,
+            log_name='acts_sut_reduced',
+        )
+
+    still_advertised = {
+        name for name in set(blocked.values())
+        if (reduced_card.get('capabilities') or {}).get(name)
+    }
+    if still_advertised:
+        logger.warning(
+            'The SUT still advertises %s with %s set, so %s stay skipped. An '
+            'agent honouring it must publish a smaller `capabilities` block.',
+            ', '.join(sorted(still_advertised)),
+            REDUCED_CAPABILITIES_ENV,
+            ', '.join(sorted(blocked)),
+        )
+        return results
+
+    replacement = {r.id: r for r in rerun}
+    return [replacement.get(r.id, r) for r in results]
 
 
 def to_report(
