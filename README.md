@@ -96,7 +96,7 @@ Within these transport scenarios, the following A2A features can be tested:
 - `test_suite/scenarios/`: The scenario schemas, and the resolver that binds a role-based scenario to concrete agents via `matrix.yaml`.
 - `test_suite/`: The Eulerian traversal logic that turns a scenario into a nested instruction.
 - `scenarios/`: The shared scenario sets — `traversal/pr.yaml`, `traversal/nightly.yaml`, and `traversal/smoke.yaml`, plus the legacy `smoke.json` kept as a compatibility pin.
-- `dashboard/`: Static web assets (HTML, JS, CSS) for rendering compatibility matrix test results.
+- `dashboard/`: Single-page app that renders the compatibility matrix test results; built to static files and published to GitHub Pages.
 - `scripts/`: Auxiliary utilities — the shared `run_itk.sh` driver, result reporting, nightly metrics, and the scenario coverage diff. See [`scripts/README.md`](scripts/README.md).
 - `itk_runner.py`: The scenario execution pipeline — plan, start a cluster, run, tear down. Shared by both front ends below.
 - `itk_service_v2.py`: HTTP `/run` handler, for CI. A thin wrapper over `itk_runner`.
@@ -334,7 +334,8 @@ The data presentation pipeline operates via a decoupled publication model:
 When integrating automated nightly matrix runs for a newly onboarded language library, follow these steps to render its compatibility outputs globally:
 
 1. Ensure the new SDK's nightly continuous integration workflow publishes its final output JSON artifacts to a rolling release tag named `nightly-metrics`.
-2. Modify the automated dashboard deployment workflow within this repository ([.github/workflows/deploy_dashboard.yaml](https://github.com/a2aproject/a2a-itk/blob/main/.github/workflows/deploy_dashboard.yaml)) to fetch the metric payload from the new target SDK's release space alongside existing baseline configurations.
+2. Modify the automated dashboard deployment workflow within this repository ([.github/workflows/deploy_dashboard.yml](https://github.com/a2aproject/a2a-itk/blob/main/.github/workflows/deploy_dashboard.yml)) to fetch the metric payload from the new target SDK's release space alongside existing baseline configurations.
+3. Add the SDK to the `SDKS` list in [`dashboard/src/lib.ts`](https://github.com/a2aproject/a2a-itk/blob/main/dashboard/src/lib.ts) so a tab appears for it.
 
 ---
 

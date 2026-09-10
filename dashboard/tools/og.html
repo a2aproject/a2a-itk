@@ -1,0 +1,33 @@
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+  *{box-sizing:border-box;margin:0}
+  body{width:1200px;height:630px;background:#0a0a0a;color:#e5e7eb;
+       font-family:Inter,sans-serif;overflow:hidden;position:relative;
+       padding:64px 72px;display:flex;flex-direction:column;justify-content:space-between}
+  .top{display:flex;align-items:center;justify-content:space-between}
+  .mark{height:44px}
+  .kit{font-size:19px;color:#9ca3af;letter-spacing:.02em}
+  h1{font-size:66px;font-weight:600;letter-spacing:-.03em;line-height:1.05;max-width:15ch}
+  h1 em{font-style:normal;color:#9ca3af}
+  .foot{display:flex;align-items:center;gap:14px;font-size:21px;color:#9ca3af}
+  .grid{display:flex;gap:9px}
+  .c{width:58px;height:30px;border-radius:6px;font:500 12px JetBrains Mono,monospace;
+     display:flex;align-items:center;justify-content:center;
+     color:#34d399;background:#06281f;border:1px solid rgba(52,211,153,.32)}
+  .c.m{color:#fbbf24;background:#2a1f06;border-color:rgba(251,191,36,.32)}
+  .glow{position:absolute;width:760px;height:760px;right:-300px;top:-300px;border-radius:50%;
+        background:radial-gradient(circle,rgba(59,130,246,.16),transparent 68%)}
+</style>
+<div class="glow"></div>
+<div class="top">
+  <img class="mark" src="wordmark-white.svg">
+  <span class="kit">Integration Test Kit</span>
+</div>
+<h1>SDK compatibility, <em>every night</em></h1>
+<div class="foot">
+  <div class="grid">
+    <span class="c">Pass</span><span class="c">Pass</span><span class="c m">Mixed</span><span class="c">Pass</span>
+  </div>
+  <span>Python · Go · Rust · Java · TypeScript · .NET</span>
+</div>
