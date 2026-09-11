@@ -195,8 +195,6 @@ def main() -> int:
                     transport=TransportBinding(binding),
                     suite_path=args.suite,
                     test_ids=args.tests,
-                    # The corpus names these and no document defines them.
-                    variables=acts_runner.RUNNER_VARIABLES,
                     gate_on_behaviors=not args.no_gate,
                 )
             )

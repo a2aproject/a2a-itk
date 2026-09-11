@@ -87,6 +87,8 @@ def _test_result(result: TestResult) -> dict[str, Any]:
     }
     if result.skip_reason:
         out['skip_reason'] = result.skip_reason
+    if result.configuration:
+        out['configuration'] = result.configuration
     if result.failure is not None:
         out['failure'] = result.failure.as_json()
     if result.steps:
