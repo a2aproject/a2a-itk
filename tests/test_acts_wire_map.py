@@ -257,7 +257,8 @@ class TestErrorsMatchA2ASpec:
         ),
         ErrorType.UNSUPPORTED_OPERATION: (-32004, 'FAILED_PRECONDITION', 400),
         ErrorType.CONTENT_TYPE_NOT_SUPPORTED: (-32005, 'INVALID_ARGUMENT', 400),
-        ErrorType.EXTENDED_CARD_NOT_SUPPORTED: (
+        ErrorType.INVALID_AGENT_RESPONSE: (-32006, 'INTERNAL', 500),
+        ErrorType.EXTENDED_AGENT_CARD_NOT_CONFIGURED: (
             -32007, 'FAILED_PRECONDITION', 400,
         ),
         ErrorType.EXTENSION_SUPPORT_REQUIRED: (
@@ -292,6 +293,7 @@ class TestErrorsMatchA2ASpec:
         """
         for error, code in (
             (ErrorType.JSON_PARSE, -32700),
+            (ErrorType.INVALID_REQUEST, -32600),
             (ErrorType.METHOD_NOT_FOUND, -32601),
             (ErrorType.INVALID_PARAMS, -32602),
             (ErrorType.INTERNAL, -32603),
@@ -302,68 +304,50 @@ class TestErrorsMatchA2ASpec:
             assert binding.http_status is None
             assert binding.reason is None
 
-    #: ACTS names that are a different spelling of an A2A error. The §11.6
-    #: reason derives from the *A2A* name, so these cannot be checked against
-    #: their own. Kept explicit rather than skipped, so a new divergence has
-    #: to be added here deliberately.
-    ACTS_RENAMES = {
-        ErrorType.EXTENDED_CARD_NOT_SUPPORTED: (
-            'ExtendedAgentCardNotConfiguredError'
-        ),
-    }
-
     def test_reason_is_upper_snake_of_the_name(self):
         """A2A §11.6's derivation rule, checked rather than assumed."""
         for error, binding in ERRORS.items():
-            if binding.reason is None or binding.aliases is not None:
+            if binding.reason is None:
                 continue
-            a2a_name = self.ACTS_RENAMES.get(error, error.value)
             expected = re.sub(
-                r'(?<!^)(?=[A-Z])', '_', a2a_name.removesuffix('Error')
+                r'(?<!^)(?=[A-Z])', '_', error.value.removesuffix('Error')
             ).upper()
             assert binding.reason == expected, error.value
 
-    def test_extended_card_binds_to_the_a2a_spelling(self):
-        """ACTS says `ExtendedCardNotSupportedError`; A2A says
-        `ExtendedAgentCardNotConfiguredError`. Same error, same code."""
-        binding = binding_for_error(ErrorType.EXTENDED_CARD_NOT_SUPPORTED)
-        assert binding.jsonrpc_code == -32007
-        assert binding.reason == 'EXTENDED_AGENT_CARD_NOT_CONFIGURED'
+    def test_every_error_name_is_an_a2a_name(self):
+        """The enum carries no name A2A does not define.
 
-    def test_streaming_not_supported_aliases_unsupported_operation(self):
-        """ACTS invents this error; A2A §3.3.2 answers it with
-        `UnsupportedOperationError`, so that is what the wire carries.
-
-        ACTS §6.2 assigns it -32007, which belongs to
-        `ExtendedAgentCardNotConfigured` — following that would make two
-        distinct errors indistinguishable.
+        ACTS once invented `StreamingNotSupportedError` and misspelled
+        `ExtendedAgentCardNotConfiguredError`; both are gone, so every row
+        binds to a real A2A error and nothing needs aliasing.
         """
-        binding = binding_for_error(ErrorType.STREAMING_NOT_SUPPORTED)
-        assert binding.aliases is ErrorType.UNSUPPORTED_OPERATION
-        assert binding.jsonrpc_code == -32004
-        assert binding.reason == 'UNSUPPORTED_OPERATION'
+        a2a_names = set(self.SPEC_5_4) | {
+            ErrorType.JSON_PARSE,
+            ErrorType.INVALID_REQUEST,
+            ErrorType.METHOD_NOT_FOUND,
+            ErrorType.INVALID_PARAMS,
+            ErrorType.INTERNAL,
+        }
+        assert set(ERRORS) == a2a_names
 
 
 class TestReverseLookups:
     def test_jsonrpc_code_round_trips(self):
         for error, binding in ERRORS.items():
-            if binding.aliases is not None:
-                continue
             assert error_for_jsonrpc_code(binding.jsonrpc_code) is error
 
     def test_reason_round_trips(self):
         for error, binding in ERRORS.items():
-            if binding.aliases is not None or binding.reason is None:
+            if binding.reason is None:
                 continue
             assert error_for_reason(binding.reason) is error
 
-    def test_an_alias_never_wins_a_reverse_lookup(self):
-        """Two ACTS names share -32004. A wire error is reported under the
-        A2A name, and `StreamingNotSupportedError` is not one."""
-        assert error_for_jsonrpc_code(-32004) is ErrorType.UNSUPPORTED_OPERATION
-        assert error_for_reason('UNSUPPORTED_OPERATION') is (
-            ErrorType.UNSUPPORTED_OPERATION
-        )
+    def test_every_code_and_reason_is_unique(self):
+        """Reverse lookup needs a single winner, so no row may share either."""
+        codes = [b.jsonrpc_code for b in ERRORS.values()]
+        reasons = [b.reason for b in ERRORS.values() if b.reason is not None]
+        assert len(codes) == len(set(codes))
+        assert len(reasons) == len(set(reasons))
 
     def test_unknown_values_return_none_rather_than_guessing(self):
         assert error_for_jsonrpc_code(-1) is None

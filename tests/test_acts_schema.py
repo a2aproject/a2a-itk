@@ -322,12 +322,19 @@ class TestAssertionTreesArePreserved:
         assert s.params == {'anything': {'at': ['all', 1, None]}}
 
     def test_stray_key_directly_under_expect_is_rejected(self):
-        """The corpus does this at two sites, both a `task` key, which
-        `compat.py` moves under `body` before validation — so the schema
-        itself stays strict. Two further stray keys are `error`; that is a
-        different defect, and becomes `expect_error` instead."""
+        """`expect` admits only `status`, `headers` and `body`.
+
+        A response field placed directly here would send the runner looking
+        for a top-level `task` on the response, and fail every time.
+        """
         with pytest.raises(ValidationError):
             Step.model_validate(_step(expect={'task': {'id': {'type': 'string'}}}))
+
+    def test_headers_are_accepted(self):
+        s = Step.model_validate(
+            _step(expect={'headers': {'Content-Type': {'starts_with': 'application/'}}})
+        )
+        assert s.expect.headers == {'Content-Type': {'starts_with': 'application/'}}
 
 
 class TestExpectError:
@@ -349,8 +356,8 @@ class TestExpectError:
 
     def test_error_type_may_be_omitted(self):
         """Five corpus tests assert only a message — "some error, don't
-        constrain which" — and the `expect.error` compat rule produces the
-        same shape. See PROVENANCE.md §C."""
+        constrain which". The spec makes `error_type` optional for exactly
+        that case: some requirements mandate a failure without naming it."""
         e = ExpectError.model_validate({'message': {'type': 'string'}})
         assert e.error_type is None
         assert e.literal_error_type() is None
@@ -426,8 +433,10 @@ class TestNamedAssertion:
 class TestEnumsMatchTheSpec:
     def test_operations_are_the_spec_set(self):
         """Guards against a push-config style rename drifting into the enum.
-        The corpus uses the legacy spellings at 18 sites; they belong in
-        `compat.PUSH_CONFIG_OPERATIONS`, never here."""
+
+        The corpus once used `set_push_notification_config` and friends at 18
+        sites; A2A §5.3 names none of them, and they are gone upstream.
+        """
         assert {o.value for o in Operation} == {
             'send_message', 'send_streaming_message', 'get_task', 'list_tasks',
             'cancel_task', 'subscribe_to_task', 'get_agent_card',

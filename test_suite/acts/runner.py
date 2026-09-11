@@ -49,6 +49,7 @@ from test_suite.acts.assertions import (
     Failure,
     UntilError,
     evaluate_body,
+    evaluate_headers,
     evaluate_error,
     evaluate_named,
     evaluate_status,
@@ -59,6 +60,7 @@ from test_suite.acts.dispatcher.base import (
     Dispatcher,
     MalformedResponse,
     StreamEvent,
+    StreamNotOpened,
     WireError,
     WireResponse,
 )
@@ -190,6 +192,11 @@ class TestResult:
     result: Outcome
     duration_ms: int
     skip_reason: str | None = None
+    #: The deviation mode this verdict came from (spec §12.8), or None for the
+    #: default SUT. A result obtained from a differently-configured instance is
+    #: not interchangeable with one from the agent the rest of the run tested,
+    #: and a report that does not say so overstates what was covered.
+    configuration: str | None = None
     failure: FailureDetail | None = None
     steps: tuple[StepResult, ...] = ()
 
@@ -240,14 +247,6 @@ def unsatisfiable_skips(results: Iterable[TestResult]) -> list[TestResult]:
     ]
 
 
-def _error_info(error: WireError) -> Mapping[str, Any] | None:
-    """The `google.rpc.ErrorInfo` among an error's details, if it carried one."""
-    for detail in error.details:
-        if isinstance(detail, Mapping) and 'ErrorInfo' in str(detail.get('@type', '')):
-            return detail
-    return None
-
-
 def _observed_error(error: WireError) -> dict[str, Any]:
     """An error as an assertion target for `expect_error` (spec §6.2).
 
@@ -263,13 +262,10 @@ def _observed_error(error: WireError) -> dict[str, Any]:
     # ever has an integer to put under it.
     if error.jsonrpc_code is not None:
         observed['code'] = error.jsonrpc_code
-    if isinstance(error.raw, Mapping) and 'data' in error.raw:
-        observed['data'] = error.raw['data']  # JSON-RPC `error.data`
-    elif error.details:
-        observed['data'] = list(error.details)  # REST / gRPC `details[]`
-    info = _error_info(error)
-    if info is not None:
-        observed['details'] = info
+    # One key for the details array on every binding: JSON-RPC spells it
+    # `error.data` (§9.5) and REST `error.details` (§11.6), and the dispatcher
+    # has already normalized both into `WireError.details`.
+    observed['details'] = list(error.details)
     return observed
 
 
@@ -479,6 +475,20 @@ class Runner:
             elif actual != expected:
                 return f'agent card capability {name}={actual!r}, needs {expected!r}'
 
+        if preconditions.authentication is not None:
+            # Presence of both, and nothing about their shape. `securitySchemes`
+            # alone offers schemes a client *may* use; only a non-empty
+            # `securityRequirements` says one is required, and an agent that
+            # requires nothing is not obliged to reject anything (A2A §7.4).
+            requires_auth = bool(
+                card.get('securitySchemes') and card.get('securityRequirements')
+            )
+            if requires_auth is not preconditions.authentication:
+                return (
+                    f'agent card authentication={requires_auth}, '
+                    f'needs {preconditions.authentication}'
+                )
+
         wanted_skills = {s['id'] for s in (preconditions.skills or []) if 'id' in s}
         if wanted_skills:
             have = {s.get('id') for s in (card.get('skills') or [])}
@@ -668,15 +678,28 @@ class Runner:
 
         try:
             events, status, timed_out = await self._collect(source, step.expect_stream)
+        except StreamNotOpened as exc:
+            if step.expect_error is None:
+                raise
+            # Refusing to open the stream is the conformant answer to
+            # `CORE-CAP-002` and `STREAM-SUB-003`, and the SUT said which error
+            # it was in an ordinary error document. The dispatcher parsed it,
+            # so this reads exactly like a unary failure.
+            observed = (
+                _observed_error(exc.response.error)
+                if exc.response.error is not None
+                else {'message': str(exc)}
+            )
+            result = evaluate_error(_resolved(step.expect_error, scope), observed)
+            if exc.response.error is not None:
+                result = _explain_unnamed(result, exc.response.error)
+            return self._finish(step, scope, result, started, attempts=1)
         except DispatchError as exc:
             if step.expect_error is None:
                 raise
-            # A stream the SUT refuses to open *is* the expected outcome:
-            # `STREAM-SUB-003` subscribes to a terminal task and requires an
-            # error. The transport reports that as a failed call rather than
-            # as a WireError, so there is no code to name — an `expect_error`
-            # that asserts a specific `error_type` will still fail, honestly,
-            # because nothing here can identify one.
+            # The call failed without producing an error document — a dropped
+            # connection, say. There is nothing to name, so an `expect_error`
+            # asserting a specific `error_type` still fails, honestly.
             result = evaluate_error(
                 _resolved(step.expect_error, scope), {'message': str(exc)}
             )
@@ -907,6 +930,10 @@ class Runner:
             if step.expect.status is not None:
                 result += evaluate_status(
                     scope.substitute(step.expect.status), response.status
+                )
+            if step.expect.headers is not None:
+                result += evaluate_headers(
+                    scope.substitute(step.expect.headers), response.headers
                 )
             if step.expect.body is not None:
                 if response.error is not None and step.kind() is not StepKind.RAW:

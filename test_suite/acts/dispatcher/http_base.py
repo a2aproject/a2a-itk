@@ -17,13 +17,14 @@ import json
 from typing import Any, AsyncIterator, Callable, Mapping
 
 import httpx
-from httpx_sse import SSEError, aconnect_sse
+from httpx_sse import EventSource, SSEError
 
 from test_suite.acts.dispatcher.base import (
     DispatchError,
     MalformedResponse,
     Dispatcher,
     StreamEvent,
+    StreamNotOpened,
     WireError,
     WireResponse,
 )
@@ -329,15 +330,27 @@ class HttpDispatcher(Dispatcher):
         if content is None and payload is not None:
             content = json.dumps(payload)
         try:
-            async with aconnect_sse(
-                self._client,
+            # Opened by hand rather than through `aconnect_sse`, which checks
+            # the content type from inside its own `client.stream` block and
+            # so closes the response before the caller can read it. The body
+            # of a non-SSE reply is exactly what is needed here: it is where a
+            # refusal says which error it is.
+            async with self._client.stream(
                 method,
                 self._url(path),
                 headers=merged,
                 content=content,
-            ) as source:
+            ) as response:
+                if not self._is_sse(response):
+                    await response.aread()
+                    raise StreamNotOpened(
+                        f'the SUT answered a streaming request with content type '
+                        f'{response.headers.get("content-type", "<none>")!r} '
+                        f'instead of opening a stream',
+                        self._refusal(response),
+                    )
                 index = 0
-                async for sse in source.aiter_sse():
+                async for sse in EventSource(response).aiter_sse():
                     try:
                         data = json.loads(sse.data)
                     except ValueError:
@@ -347,7 +360,7 @@ class HttpDispatcher(Dispatcher):
                         data=self._unwrap_stream_event(data) if unwrap else data,
                         raw=sse.data,
                         event=sse.event or None,
-                        status=source.response.status_code,
+                        status=response.status_code,
                     )
                     index += 1
         except SSEError as exc:
@@ -357,6 +370,29 @@ class HttpDispatcher(Dispatcher):
             raise MalformedResponse(str(exc)) from exc
         except httpx.HTTPError as exc:
             raise DispatchError(f'{type(exc).__name__}: {exc}') from exc
+
+    @staticmethod
+    def _is_sse(response: httpx.Response) -> bool:
+        return SSE_CONTENT_TYPE in response.headers.get('content-type', '').partition(';')[0]
+
+    def _refusal(self, response: httpx.Response) -> WireResponse:
+        """A non-SSE reply to a streaming call, parsed as an ordinary one."""
+        parsed, text = parse_json_body(response)
+        return WireResponse(
+            status=response.status_code,
+            payload=parsed,
+            error=self._error_from(response, parsed),
+            headers=dict(response.headers),
+            raw_body=text,
+        )
+
+    def _error_from(self, response: httpx.Response, parsed: Any) -> WireError | None:
+        """This binding's error document, if the reply carries one.
+
+        Implemented by each subclass, which already needs it for the unary
+        path; declared here so :meth:`_refusal` can reach it.
+        """
+        raise NotImplementedError
 
     def _unwrap_stream_event(self, data: Any) -> Any:
         """Per-binding unwrapping of one event's payload. Identity by default."""

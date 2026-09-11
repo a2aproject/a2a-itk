@@ -1,18 +1,14 @@
 """The pinned ACTS corpus in ``scenarios/acts/`` loads, and stays as pinned.
 
-Two things are being asserted:
+Two things are being asserted: that the schema and loader handle the real
+corpus rather than just fixtures, and that its measurable shape — counts,
+levels, behaviours, per-binding applicability — does not drift unnoticed.
 
-1. the schema and loader handle the real corpus, not just fixtures; and
-2. the compat rules that make it loadable fire on exactly the sites they are
-   documented to fire on.
-
-The second is what lets the corpus stay verbatim *and* runnable: the gap
-between what upstream ships and what we can execute is stated as a number, so
-it cannot widen unnoticed.
+The corpus is loaded exactly as shipped. Nothing is rewritten on the way in,
+so a load failure here is a defect to fix upstream.
 
 A refresh should make these fail. That is the prompt to re-read
-``PROVENANCE.md``, and — where a site count has dropped to zero — to delete
-the corresponding compat rule.
+``PROVENANCE.md`` and re-derive the numbers.
 """
 
 from __future__ import annotations
@@ -22,14 +18,13 @@ from pathlib import Path
 import pytest
 
 from test_suite.acts import (
-    EXPECTED_SITES,
     Level,
     Operation,
     StepKind,
     TransportBinding,
     load_suite,
-    site_counts,
 )
+from test_suite.acts.runner import KNOWN_CAPABILITIES
 
 
 CORPUS = Path(__file__).resolve().parent.parent / 'scenarios' / 'acts'
@@ -38,23 +33,12 @@ MANIFEST = CORPUS / 'suite.acts.yaml'
 
 @pytest.fixture(scope='module')
 def corpus():
-    """The whole corpus, loaded strictly, with compat rules applied.
+    """The whole corpus, exactly as shipped, loaded strictly.
 
-    Strict on purpose: with the rules in ``compat.py`` the corpus is fully
-    valid, and the day it stops being so is the day we want to hear about it.
+    Strict on purpose: the corpus is fully valid against the schema, and the
+    day it stops being so is the day we want to hear about it.
     """
     return load_suite(MANIFEST)
-
-
-@pytest.fixture(scope='module')
-def verbatim():
-    """The corpus exactly as upstream ships it — no compat, so not strict.
-
-    Every assertion made against this fixture is a statement about a defect
-    that is still open upstream. When one is fixed, the assertion fails, and
-    that is the signal to drop both it and the rule that worked around it.
-    """
-    return load_suite(MANIFEST, strict=False, compat=False)
 
 
 class TestCorpusLoads:
@@ -94,7 +78,7 @@ class TestCorpusLoads:
 
     def test_variables_come_from_the_manifest_and_suites(self, corpus):
         assert corpus.variables == {
-            'baseUrl': '{{SUT_BASE_URL}}',
+            'baseUrl': '{{env.SUT_BASE_URL}}',
             'webhookUrl': 'https://example.com/webhooks/a2a-tests',
         }
 
@@ -103,14 +87,33 @@ class TestCorpusShape:
     def test_every_test_has_at_least_one_step(self, corpus):
         assert all(entry.test.steps for entry in corpus)
 
+    def test_no_test_gates_on_a_capability_a2a_does_not_define(self, corpus):
+        """The assertion that would have caught the `authentication` defect.
+
+        Five MUST/SHOULD tests gated on `capabilities.authentication` for the
+        life of the corpus. Nothing failed — they simply skipped, on every
+        binding against every SDK, and the reports read as though the auth
+        requirements were covered.
+        """
+        offenders = [
+            (entry.id, name)
+            for entry in corpus
+            for name in (
+                (entry.test.preconditions.capabilities if entry.test.preconditions else None)
+                or {}
+            )
+            if name not in KNOWN_CAPABILITIES
+        ]
+        assert offenders == []
+
     def test_every_step_has_a_resolvable_kind(self, corpus):
         counts = {k: 0 for k in StepKind}
         for entry in corpus:
             for step in entry.test.steps:
                 counts[step.kind()] += 1
         assert counts == {
-            StepKind.OPERATION: 139,
-            StepKind.RAW: 21,
+            StepKind.OPERATION: 142,
+            StepKind.RAW: 22,
             StepKind.CLIENT: 9,
             StepKind.ASSERTION: 0,
         }
@@ -119,10 +122,10 @@ class TestCorpusShape:
         """Most tests are transport-agnostic; that is what makes one corpus
         runnable against all three bindings."""
         restricted = [e for e in corpus if e.test.transport]
-        assert len(restricted) == 25
+        assert len(restricted) == 26
         assert len(corpus.for_transport(TransportBinding.JSONRPC)) == 101
-        assert len(corpus.for_transport(TransportBinding.GRPC)) == 89
-        assert len(corpus.for_transport(TransportBinding.REST)) == 93
+        assert len(corpus.for_transport(TransportBinding.GRPC)) == 88
+        assert len(corpus.for_transport(TransportBinding.REST)) == 92
 
     def test_every_step_reference_names_a_real_step(self, corpus):
         """A dotted `{{step.var}}` is a capture reference.
@@ -190,57 +193,26 @@ class TestBehaviorContract:
         that does needs the SUT to recognise the `tck-*` prefix and play along.
 
         Note the corpus also writes `requires_behaviors: []` explicitly on
-        some tests, so "declares the key" (80) is not "needs a behavior" (70).
+        some tests, so "declares the key" (80) is not "needs a behavior" (69).
         """
-        assert len([e for e in corpus if e.test.behaviors()]) == 70
+        assert len([e for e in corpus if e.test.behaviors()]) == 69
         assert len([e for e in corpus if e.test.requires_behaviors is not None]) == 80
 
 
-class TestVerbatimCorpusIsStillBroken:
-    """PROVENANCE §A — the corpus as upstream ships it, load-blocking defects.
+class TestCorpusNeedsNoRewriting:
+    """The corpus satisfies the schema as shipped.
 
-    Each assertion here describes a defect that is **still open upstream**.
-    They are written to fail when it is fixed, because that is precisely when
-    the matching compat rule should be deleted.
+    It did not always: twenty-six tests once violated the CDDL and were
+    rewritten at load time. Those defects are fixed upstream, the rewriting
+    is gone, and these assertions are what stop it coming back.
     """
 
-    def test_twenty_six_tests_fail_the_cddl(self, verbatim):
-        assert len(verbatim.errors) == 26
-        assert len(verbatim.tests) == 85
+    def test_strict_load_of_the_shipped_corpus_succeeds(self):
+        assert len(load_suite(MANIFEST).tests) == 111
 
-    def test_the_whole_push_suite_is_unloadable(self, verbatim):
-        """The most expensive consequence: no push-notification coverage at
-        all without compat, which is why the rules exist rather than the 26
-        tests simply being skipped."""
-        loaded = {entry.id for entry in verbatim}
-        assert not [tid for tid in loaded if tid.startswith('PUSH-')]
-
-    def test_strict_load_of_the_verbatim_corpus_raises(self):
-        from test_suite.acts import ActsFileError
-
-        with pytest.raises(ActsFileError, match='expect_error.code'):
-            load_suite(MANIFEST, compat=False)
-
-
-class TestCompatRulesFireWherePinned:
-    """PROVENANCE §A — the rewrite table, asserted site by site.
-
-    A count that moves means the corpus moved. A count that reaches zero
-    means upstream fixed that defect and the rule is now dead code.
-    """
-
-    def test_site_counts_match_the_pinned_table(self, corpus):
-        assert site_counts(corpus.rewrites) == EXPECTED_SITES
-
-    def test_every_rewrite_names_a_real_test(self, corpus):
-        known = {entry.id for entry in corpus}
-        for rewrite in corpus.rewrites:
-            test_id = rewrite.where.split('.', 1)[0]
-            assert test_id in known, rewrite
-
-    def test_no_push_notification_config_operation_names_survive(self, corpus):
-        """The spec's abstract-operation enum has no `*_push_notification_config`
-        member, so a surviving one would be undispatchable."""
+    def test_push_operations_use_the_abstract_enum_names(self, corpus):
+        """The enum has no `*_push_notification_config` member, so a surviving
+        one would be undispatchable."""
         used = {
             step.operation for entry in corpus for step in entry.test.steps
             if step.operation is not None
@@ -248,114 +220,123 @@ class TestCompatRulesFireWherePinned:
         assert Operation.CREATE_PUSH_CONFIG in used
         assert all('push_notification' not in op.value for op in used)
 
-    def test_failure_assertions_become_expect_error(self, corpus):
-        """`expect: {error: ...}` becomes a bare `expect_error` — "some A2A
-        error". Deliberately not a *named* error: picking which one would be
-        us writing the test rather than running it."""
-        for test_id, step_id in [
-            ('CORE-MULTI-006', 'turn2'),
-            ('STREAM-SUB-003', 'subscribe'),
-        ]:
-            entry = corpus.by_id(test_id)
-            assert entry is not None, test_id
-            step = next(s for s in entry.test.steps if s.id == step_id)
-            assert step.expect is None
-            assert step.expect_error is not None
-            assert step.expect_error.error_type is None
+    def test_failures_are_asserted_with_expect_error(self, corpus):
+        """`expect: {error: ...}` is not a way to assert a failure."""
+        for entry in corpus:
+            for step in entry.test.steps:
+                if step.expect is not None and step.expect.body:
+                    assert 'error' not in step.expect.body or step.raw is not None, (
+                        f'{entry.id}/{step.id}'
+                    )
 
-    def test_response_assertions_move_under_expect_body(self, corpus):
+    def test_response_assertions_live_under_expect_body(self, corpus):
         for test_id in ('STREAM-SUB-001', 'STREAM-SUB-003'):
-            entry = corpus.by_id(test_id)
-            first = entry.test.steps[0]
+            first = corpus.by_id(test_id).test.steps[0]
             assert first.expect is not None
             assert 'task' in first.expect.body
 
 
-class TestKnownDefectsLeftInPlace:
-    """PROVENANCE §B — defects that parse, so they are simply left wrong.
+class TestUpstreamFixesArePinned:
+    """Defects that used to be recorded here as open, now closed upstream.
 
-    Compensating for these in code would mean deciding what a conformance
-    test *meant*. They stay broken, visibly, until upstream fixes them.
+    Each of these was once a known-wrong shape this suite worked around or
+    reported. They are pinned in their corrected form so a corpus refresh that
+    regressed one would fail loudly rather than quietly reintroduce it.
     """
 
     def test_version_negotiation_uses_the_normative_jsonrpc_code(self, corpus):
-        """Not a defect, despite a review comment on #1882 calling it one.
+        """`VER-NEG-001` asserts -32009, matching A2A §5.4.
 
-        `VER-NEG-001` asserts -32009, matching A2A §5.4 and the reference SDK.
-        ACTS §6.2 says -32006 and
         [r3305157228](https://github.com/a2aproject/A2A/pull/1882#discussion_r3305157228)
-        asks the corpus to follow it — but -32006 is
-        `InvalidAgentResponseError`, and the ACTS table's own footnote defers
-        to A2A. Pinned so nobody "corrects" this into being wrong.
+        asks for -32006, which is `InvalidAgentResponseError`. Pinned so
+        nobody "corrects" this into being wrong.
         """
         entry = corpus.by_id('VER-NEG-001')
         assert entry.test.steps[0].expect.body['error']['code'] == -32009
 
-    def test_inline_file_part_uses_bytes_not_raw(self, corpus):
-        """The `Part` proto calls the base64 field `raw`."""
+    def test_inline_file_part_uses_the_flat_part_shape(self, corpus):
+        """A2A 1.0's `Part` is flat: `raw`/`filename`/`mediaType`, with no
+        nested `file` or `fileUrl` member and no `bytes` field."""
         entry = corpus.by_id('CLIENT-PARSE-006')
         payload = entry.test.steps[0].client_response.wire_payload
-        files = list(_find_key(payload, 'file'))
-        assert files, 'expected an inline file part in the golden payload'
-        assert any('bytes' in f for f in files)
-        assert not any('raw' in f for f in files)
+        assert not list(_find_key(payload, 'file'))
+        assert not list(_find_key(payload, 'fileUrl'))
+        parts = [
+            part
+            for artifact in payload['result']['artifacts']
+            for part in artifact['parts']
+        ]
+        assert any(set(p) >= {'raw', 'filename', 'mediaType'} for p in parts)
+        assert any(set(p) >= {'url', 'filename', 'mediaType'} for p in parts)
 
-    def test_rest_problem_details_asserts_a_format_a2a_does_not_use(self, corpus):
-        """A2A §11.6 mandates the `google.rpc.Status` shape, not RFC 7807."""
+    def test_rest_errors_assert_the_google_rpc_status_shape(self, corpus):
+        """A2A §11.6 mandates `google.rpc.Status`, not RFC 7807."""
         step = corpus.by_id('REST-PD-001').test.steps[0]
-        assert set(step.expect.body) == {'type', 'title', 'status'}
+        assert set(step.expect.body) == {'error'}
+        assert set(step.expect.body['error']) == {'code', 'message', 'details'}
 
-    def test_a_grpc_only_test_asserts_an_http_status(self, corpus):
-        """gRPC has no HTTP status, so both of these are silent no-ops."""
-        entry = corpus.by_id('GRPC-STREAM-002')
-        assert entry.test.transport == [TransportBinding.GRPC]
-        assert [s.expect.status for s in entry.test.steps] == [200, 200]
+    def test_runner_requirements_is_used_where_headers_are_asserted(self, corpus):
+        """The spec field for "this test needs a runner capability", finally
+        carrying the three tests that inspect response headers."""
+        declared = {e.id for e in corpus if e.test.runner_requirements}
+        assert declared == {'CARD-CACHE-001', 'JSONRPC-CT-001', 'REST-CT-001'}
+        for entry in corpus:
+            for step in entry.test.steps:
+                if step.expect is not None and step.expect.headers:
+                    assert entry.test.runner_requirements, entry.id
 
-    def test_runner_requirements_is_never_used(self, corpus):
-        """The spec field for "this test needs a runner capability" — and 23
-        tests that need one say so only in prose, tagged `runner-special`."""
-        assert all(e.test.runner_requirements is None for e in corpus)
+    def test_prose_only_tests_are_down_to_twenty(self, corpus):
+        """`runner-special` marks a test whose real check is in its
+        description. Three grew real assertions when `expect.headers` and a
+        bimodal `any_of` arrived; the rest still need format work upstream."""
         special = [e for e in corpus if 'runner-special' in (e.test.tags or [])]
-        assert len(special) == 23
+        assert len(special) == 20
+
+    def test_extended_card_is_its_own_operation(self, corpus):
+        """A2A §5.3 gives it a method of its own; it is not a flag on
+        `get_agent_card`."""
+        for test_id in ('CARD-EXT-001', 'SEC-EXTCARD-003'):
+            step = corpus.by_id(test_id).test.steps[0]
+            assert step.operation is Operation.GET_EXTENDED_AGENT_CARD
+            assert step.params == {}
 
 
 class TestKnownDivergencesStillPresent:
-    """PROVENANCE §C — shapes that are legal, or arguably so.
+    """Shapes that are legal, or arguably so.
 
     Pinned so that "we decided not to touch this" stays a decision on the
     record rather than something a later reader assumes was an oversight.
     """
 
     def test_error_assertions_that_do_not_name_an_error_type(self, corpus):
-        """Five come from the corpus, two from the `expect.error` compat
-        rule; all seven mean "some A2A error, don't constrain which"."""
+        """Three tests assert only that *some* error came back.
+
+        Deliberate in each case: the spec mandates a failure without mandating
+        which error. `SEC-AUTH-003` used to be here and is not any longer —
+        A2A requires an inaccessible task to be reported *not found*, so
+        naming the error is the whole substance of the test and leaving it
+        unnamed let any two error strings pass a MUST.
+        """
         unconstrained = [
             (entry.id, step.id)
             for entry in corpus for step in entry.test.steps
             if step.expect_error is not None and step.expect_error.error_type is None
         ]
         assert sorted(unconstrained) == [
-            ('CORE-CTX-001', 'send'),
             ('CORE-ERR-009', 'get-missing'),
             ('CORE-MULTI-003', 'mismatch'),
             ('CORE-MULTI-006', 'turn2'),
-            ('SEC-AUTH-003', 'get-missing-task'),
-            ('SEC-AUTH-003', 'get-other-user-task'),
-            ('STREAM-SUB-003', 'subscribe'),
         ]
 
-    def test_one_error_assertion_is_an_assertion_object(self, corpus):
-        step = corpus.by_id('CORE-ERR-002').test.steps[0]
-        assert step.expect_error.literal_error_type() is None
-        assert step.expect_error.error_type == {
-            'one_of': ['TaskNotFoundError', 'TaskNotCancelableError'],
-        }
-
-    def test_extended_card_is_a_param_not_a_separate_operation(self, corpus):
-        entry = corpus.by_id('CARD-EXT-001')
-        step = entry.test.steps[0]
-        assert step.operation is Operation.GET_AGENT_CARD
-        assert step.params == {'extended': True}
+    def test_every_named_error_type_is_a_literal(self, corpus):
+        """No test needs an assertion object for `error_type` any more."""
+        for entry in corpus:
+            for step in entry.test.steps:
+                if step.expect_error is None or step.expect_error.error_type is None:
+                    continue
+                assert step.expect_error.literal_error_type() is not None, (
+                    f'{entry.id}/{step.id}'
+                )
 
 
 def _step_references(step):

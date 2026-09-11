@@ -36,6 +36,7 @@ from test_suite.acts.dispatcher.base import (
     DispatchError,
     Dispatcher,
     StreamEvent,
+    StreamNotOpened,
     UnsupportedByBinding,
     WireError,
     WireResponse,
@@ -309,9 +310,20 @@ class GrpcDispatcher(Dispatcher):
                 yield StreamEvent(index=index, data=_to_dict(message))
                 index += 1
         except AioRpcError as exc:
-            # A stream that dies partway is a result, not a harness failure,
-            # but there is no WireResponse to carry it here — the runner sees
-            # the events yielded so far and this error.
+            if index == 0:
+                # Nothing was streamed at all, so the SUT refused the call
+                # rather than dying partway — the conformant answer when it
+                # does not support streaming (A2A §3.3.4) or the task is
+                # already terminal (§3.1.6). The status and its trailing
+                # `ErrorInfo` say which error that is, so parse them exactly
+                # as the unary path does instead of flattening to a string.
+                raise StreamNotOpened(
+                    f'the SUT refused the stream: '
+                    f'{exc.code().name}: {exc.details()}',
+                    _response_from_rpc_error(exc),
+                ) from exc
+            # A stream that dies partway is a result too, but the events
+            # already yielded are part of it, so it stays a plain failure.
             raise DispatchError(
                 f'stream failed after {index} event(s): '
                 f'{exc.code().name}: {exc.details()}'
