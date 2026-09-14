@@ -37,10 +37,24 @@ RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 && \
 ENV NODE_VERSION=v20.11.1
 RUN curl -L https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz | tar -xJ -C /usr/local --strip-components=1
 
-# Install .NET SDK 8.0
-RUN curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin --channel 8.0 --install-dir /usr/local/dotnet
+# Install the .NET 10 SDK, plus the 8.0 ASP.NET Core runtime.
+#
+# SDK 10 because a2a-dotnet's SDK projects multi-target `net10.0;net8.0`, and
+# an SDK can only build target frameworks up to its own version — SDK 8 fails
+# the net10.0 leg outright.
+#
+# The 8.0 runtime because an SDK builds down but does not run down: the itk
+# agent targets net8.0, and a framework-dependent net8.0 app needs the 8.0
+# shared framework present. Roll-forward does not cross a major version by
+# default. The runtime package is a fraction of a second SDK's size, so this
+# is cheaper than installing both SDKs.
+RUN curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh && \
+    bash /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/local/dotnet && \
+    bash /tmp/dotnet-install.sh --channel 8.0 --runtime aspnetcore --install-dir /usr/local/dotnet && \
+    rm /tmp/dotnet-install.sh
 ENV PATH=$PATH:/usr/local/dotnet
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+ENV NUGET_PACKAGES=/root/.cache/a2a-itk/nuget
 
 # Install Rust 1.98.0
 ENV RUST_VERSION=1.98.0
