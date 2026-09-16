@@ -18,12 +18,14 @@ from test_suite.acts import load_suite
 from test_suite.acts.assertions import (
     LEAF_OPERATORS,
     OPERATORS,
+    _accepts,
     TYPE_NAMES,
     UntilError,
     evaluate,
     evaluate_body,
     evaluate_collection,
     evaluate_error,
+    evaluate_headers,
     evaluate_named,
     evaluate_status,
     evaluate_until,
@@ -391,6 +393,53 @@ class TestExpectStatus:
         assert evaluate_status(200, 500).first.path == 'status'
 
 
+class TestExpectHeaders:
+    """`expect.headers` — the only way to check what is not in the body."""
+
+    CONTENT_TYPE = {'Content-Type': {'starts_with': 'application/a2a+json'}}
+    #: `CARD-CACHE-001`: either caching header satisfies the requirement.
+    CACHING = {
+        'any_of': [
+            {'Cache-Control': {'type': 'string'}},
+            {'ETag': {'type': 'string'}},
+        ]
+    }
+
+    def test_a_present_header_matches(self):
+        assert evaluate_headers(
+            self.CONTENT_TYPE, {'Content-Type': 'application/a2a+json'}
+        ).ok
+
+    def test_field_names_are_case_insensitive(self):
+        """RFC 9110 §5.1. A SUT lowercasing its headers is still conformant."""
+        assert evaluate_headers(
+            self.CONTENT_TYPE, {'content-type': 'application/a2a+json; charset=utf-8'}
+        ).ok
+
+    def test_a_wrong_value_fails(self):
+        result = evaluate_headers(
+            self.CONTENT_TYPE, {'Content-Type': 'application/json'}
+        )
+        assert not result.ok
+        assert result.first.path == 'headers.Content-Type'
+
+    def test_a_missing_header_fails(self):
+        assert not evaluate_headers(self.CONTENT_TYPE, {'Date': 'now'}).ok
+
+    def test_no_headers_at_all_fails_rather_than_passing_vacuously(self):
+        """The gRPC case. An unchecked assertion must never read as a pass."""
+        assert not evaluate_headers(self.CONTENT_TYPE, {}).ok
+        assert not evaluate_headers(self.CONTENT_TYPE, None).ok
+
+    def test_a_combinator_sees_the_folded_headers(self):
+        """`any_of` hands the same mapping to each branch, so the names inside
+        it need folding too — which is why the response is wrapped rather than
+        the assertion tree rewritten."""
+        assert evaluate_headers(self.CACHING, {'etag': 'W/"1"'}).ok
+        assert evaluate_headers(self.CACHING, {'cache-control': 'max-age=60'}).ok
+        assert not evaluate_headers(self.CACHING, {'Content-Type': 'text/plain'}).ok
+
+
 class TestExpectError:
     def test_a_literal_error_name(self):
         expected = ExpectError(error_type='TaskNotFoundError')
@@ -626,23 +675,23 @@ class TestCorpus:
             except Exception as exc:  # pragma: no cover - the assertion reports it
                 pytest.fail(f'{test_id}/{step_id} raised {exc!r}')
 
-    def test_exactly_one_key_shadows_an_operator_name(self, suite):
-        """The disambiguation rule, measured against the real corpus.
+    def test_no_key_shadows_an_operator_name(self, suite):
+        """The disambiguation rule has no live site left in the corpus.
 
-        `REST-PD-001` asserts on an RFC 9457 body whose member is named
-        `type`. If a refresh adds another such site, or if the rule regresses
-        so that this one is read as an operator, this fails.
+        `REST-PD-001` used to be one: it asserted an RFC 9457 body whose
+        member really is named `type`. It now asserts the `google.rpc.Status`
+        shape A2A §11.6 mandates, which collides with nothing. The rule itself
+        still matters for hand-written documents and is exercised in
+        `TestDisambiguation`; this measures that the shipped corpus does not
+        depend on it. A refresh that reintroduces such a site fails here.
         """
-        problem_details = suite.by_id('REST-PD-001')
-        body = problem_details.test.steps[0].expect.body
-        assert set(body) == {'type', 'title', 'status'}
-        # Read as fields: a well-formed problem-details body passes.
-        assert evaluate_body(
-            body, {'type': 'about:blank', 'title': 'Not Found', 'status': 404}
-        ).ok
-        # Read as fields: a body whose `type` is not a string fails on it.
-        result = evaluate_body(body, {'type': 404, 'title': 'x', 'status': 404})
-        assert [f.path for f in result.failures] == ['body.type']
+        shadowing = [
+            (test_id, step_id, key)
+            for test_id, step_id, tree in self._assertion_trees(suite)
+            for key, argument in _walk_keys(tree)
+            if key in OPERATORS and not _accepts(key, argument)
+        ]
+        assert shadowing == []
 
     def test_every_until_expression_parses(self, suite):
         seen = 0
@@ -663,4 +712,15 @@ class TestCorpus:
             for assertion in named:
                 evaluate_named(assertion, {})
                 seen += 1
-        assert seen == 11
+        assert seen == 13
+
+
+def _walk_keys(node):
+    """Every mapping key in an assertion tree, with the argument it carries."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield key, value
+            yield from _walk_keys(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _walk_keys(value)

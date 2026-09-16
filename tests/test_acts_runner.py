@@ -390,7 +390,17 @@ class TestExpectError:
         )
         assert run(runner_for(dispatcher), a_test(step)).result is Outcome.PASS
 
-    def test_jsonrpc_error_data_is_assertable(self):
+    def test_error_details_are_assertable(self):
+        """One key for the details array on every binding.
+
+        JSON-RPC calls it `error.data` and REST `error.details` (A2A §9.5,
+        §11.6); both are the same list of `@type`-tagged objects, so
+        `expect_error.details` asserts on either.
+        """
+        info = {
+            '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+            'reason': 'TASK_NOT_FOUND',
+        }
         dispatcher = FakeDispatcher(
             WireResponse(
                 status=200,
@@ -398,12 +408,16 @@ class TestExpectError:
                     message='boom',
                     error_type=ErrorType.TASK_NOT_FOUND,
                     jsonrpc_code=-32001,
-                    raw={'code': -32001, 'message': 'boom', 'data': {'hint': 'x'}},
+                    details=(info,),
+                    raw={'code': -32001, 'message': 'boom', 'data': [info]},
                 ),
             )
         )
         step = get_task(
-            expect_error={'error_type': 'TaskNotFoundError', 'data': {'type': 'object'}}
+            expect_error={
+                'error_type': 'TaskNotFoundError',
+                'details': {'type': 'array', 'count_gte': 1},
+            }
         )
         assert run(runner_for(dispatcher), a_test(step)).result is Outcome.PASS
 
@@ -596,26 +610,73 @@ class TestPreconditions:
         assert 'pushNotifications' in result.skip_reason
 
     def test_a_capability_the_spec_does_not_define_is_marked_unsatisfiable(self):
-        """`SEC-AUTH-001..004` gate on `authentication`, which A2A 1.0 has not got.
+        """An ordinary "capability=False" skip reads as "not applicable here".
 
-        An ordinary "capability=False" skip reads as "not applicable to this
-        agent", so four MUST tests sat invisible on every binding. The marker
-        says nobody can clear it by configuring the SUT differently.
+        `SEC-AUTH-001..004` and `SEC-AUTH-006` gated on
+        `capabilities.authentication`, which A2A has not got, and so sat
+        invisible on every binding against every SDK. They now gate on
+        `preconditions.authentication` instead, but the marker stays: it is
+        what caught that, and it says nobody can clear the skip by configuring
+        the SUT differently.
         """
         runner = runner_for(FakeDispatcher(ok()), agent_card=self.CARD)
         test = a_test(
-            get_task(), preconditions={'capabilities': {'authentication': True}}
+            get_task(), preconditions={'capabilities': {'telepathy': True}}
         )
         result = run(runner, test)
         assert result.result is Outcome.SKIP
         assert result.skip_reason.startswith(UNSATISFIABLE)
-        assert "'authentication' is not a capability" in result.skip_reason
+        assert "'telepathy' is not a capability" in result.skip_reason
 
     def test_the_known_set_comes_from_the_specs_own_proto(self):
         """Written out by hand it would drift; derived, it cannot."""
         assert KNOWN_CAPABILITIES == {
             'streaming', 'pushNotifications', 'extensions', 'extendedAgentCard',
         }
+
+    SECURED_CARD = {
+        'securitySchemes': {'bearerAuth': {'httpAuthSecurityScheme': {'scheme': 'Bearer'}}},
+        'securityRequirements': [{'schemes': {'bearerAuth': {'list': []}}}],
+    }
+
+    def test_authentication_is_read_off_the_top_level_of_the_card(self):
+        """Not off `capabilities`, which has no member for it."""
+        runner = runner_for(FakeDispatcher(ok()), agent_card=self.SECURED_CARD)
+        result = run(runner, a_test(get_task(), preconditions={'authentication': True}))
+        assert result.result is not Outcome.SKIP
+
+    def test_an_agent_declaring_no_security_skips_a_test_needing_it(self):
+        """A2A conditions the obligation on the agent's own declaration, so a
+        rejection test is genuinely not applicable to an open agent."""
+        runner = runner_for(FakeDispatcher(ok()), agent_card=self.CARD)
+        result = run(runner, a_test(get_task(), preconditions={'authentication': True}))
+        assert result.result is Outcome.SKIP
+        assert result.skip_reason == 'agent card authentication=False, needs True'
+
+    def test_schemes_without_requirements_do_not_count_as_requiring_auth(self):
+        """`securitySchemes` offers a scheme a client *may* use; only a
+        non-empty `securityRequirements` says one is required."""
+        runner = runner_for(
+            FakeDispatcher(ok()),
+            agent_card={
+                'securitySchemes': {'bearerAuth': {}}, 'securityRequirements': []
+            },
+        )
+        result = run(runner, a_test(get_task(), preconditions={'authentication': True}))
+        assert result.result is Outcome.SKIP
+        assert 'authentication=False' in result.skip_reason
+
+    def test_a_test_needing_an_open_agent_skips_against_a_secured_one(self):
+        runner = runner_for(FakeDispatcher(ok()), agent_card=self.SECURED_CARD)
+        result = run(runner, a_test(get_task(), preconditions={'authentication': False}))
+        assert result.result is Outcome.SKIP
+        assert result.skip_reason == 'agent card authentication=True, needs False'
+
+    def test_the_skip_is_not_marked_unsatisfiable(self):
+        """A configurable deployment can meet it, unlike a phantom capability."""
+        runner = runner_for(FakeDispatcher(ok()), agent_card=self.CARD)
+        result = run(runner, a_test(get_task(), preconditions={'authentication': True}))
+        assert not (result.skip_reason or '').startswith(UNSATISFIABLE)
 
     def test_an_unsatisfiable_skip_is_not_an_error(self):
         """It is the corpus that is wrong, and the SUT must not wear it.

@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import os
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -101,6 +102,29 @@ REDUCIBLE_CAPABILITIES = ('streaming', 'pushNotifications', 'extendedAgentCard')
 #: How `Runner._unmet_precondition` words a skip the reduced pass can clear:
 #: the card advertises something the test needs absent.
 _CAPABILITY_SKIP = re.compile(r'agent card capability (\w+)=True, needs False')
+
+#: Set in the SUT's environment for the auth pass. An agent that honours it
+#: declares a security scheme on its card *and* enforces it.
+#:
+#: `SEC-AUTH-001/002/003/004/006` assert that an agent requiring a credential
+#: rejects a request that lacks one. A2A conditions that obligation on the
+#: agent's own declared requirements, so against an agent declaring none the
+#: tests are correctly not applicable — and every ITK fixture declares none by
+#: default, because the traversal suite dials it with no credential at all.
+#:
+#: One agent cannot both require and not require a credential, which is the
+#: same shape as the reduced pass and the reason this is a separate SUT rather
+#: than a flag on the first one. Enforcing during the main pass instead would
+#: cost fourteen raw steps that must be *served*: an absent `Authorization`
+#: header means "reject me" in `SEC-AUTH-001` and "serve me" in
+#: `JSONRPC-ENV-001`, and no server can tell those two requests apart.
+AUTH_ENFORCED_ENV = 'ITK_ACTS_AUTH'
+
+#: How `Runner._unmet_precondition` words a skip the auth pass can clear: the
+#: card declares no security requirement and the test needs one. Deliberately
+#: distinct from `_CAPABILITY_SKIP` — the two passes move the SUT along
+#: different axes and neither may claim the other's skips.
+_SECURITY_SKIP = re.compile(r'agent card authentication=False, needs True')
 
 #: Variables the corpus names that no document defines (spec §12.2).
 RUNNER_VARIABLES: dict[str, Any] = {
@@ -263,6 +287,13 @@ async def run(
     log_dir: Path | None = None,
 ) -> ActsRun:
     """Start the SUT, run the corpus against it, and collect the results."""
+    # Merged here rather than by the caller, so every front end gets them. The
+    # CLI used to pass them and `POST /run-acts` did not, which left
+    # `{{insufficientAuthToken}}` unresolved on the service path and turned
+    # `SEC-EXTCARD-002` into an error about the harness. A caller may still
+    # override any of them.
+    variables = {**RUNNER_VARIABLES, **(variables or {})}
+
     suite = load_suite(suite_path or DEFAULT_SUITE)
     if test_ids:
         selected = [t for t in suite.tests if t.id in set(test_ids)]
@@ -273,7 +304,6 @@ async def run(
             tests=selected,
             variables=suite.variables,
             sources=suite.sources,
-            rewrites=suite.rewrites,
         )
 
     declared = None
@@ -300,15 +330,17 @@ async def run(
         log_name='acts_sut',
     )
 
-    results = await _rerun_capability_skips(
-        results,
-        suite,
-        transport=transport,
-        variables=variables,
-        capabilities=capabilities,
-        declared=declared,
-        log_dir=log_dir,
-    )
+    for deviation in DEVIATIONS:
+        results = await _rerun_deviation(
+            results,
+            suite,
+            deviation=deviation,
+            transport=transport,
+            variables=variables,
+            capabilities=capabilities,
+            declared=declared,
+            log_dir=log_dir,
+        )
 
     return ActsRun(
         results=results,
@@ -361,91 +393,194 @@ async def _run_pass(
 
 
 @contextlib.contextmanager
-def _reduced_capabilities() -> Iterator[None]:
-    """Ask the next SUT this process spawns to advertise nothing optional.
+def _sut_env(name: str) -> Iterator[None]:
+    """Ask the next SUT this process spawns to deviate from its defaults.
 
     The launcher gives the child no explicit environment, so it inherits this
     one — which is why setting a variable here reaches the agent without any
-    plumbing through `Cluster`.
+    plumbing through `Cluster`. The corollary is that two SUTs alive at once
+    cannot be told apart this way, so the deviations are serial passes.
     """
-    previous = os.environ.get(REDUCED_CAPABILITIES_ENV)
-    os.environ[REDUCED_CAPABILITIES_ENV] = '1'
+    previous = os.environ.get(name)
+    os.environ[name] = '1'
     try:
         yield
     finally:
         if previous is None:
-            os.environ.pop(REDUCED_CAPABILITIES_ENV, None)
+            os.environ.pop(name, None)
         else:
-            os.environ[REDUCED_CAPABILITIES_ENV] = previous
+            os.environ[name] = previous
+
+
+@dataclass(frozen=True)
+class Deviation:
+    """A SUT started differently, to reach tests the default one cannot run.
+
+    Some preconditions are mutually exclusive with the deployment the rest of
+    the corpus needs: an agent cannot both advertise streaming and refuse it,
+    nor both require a credential and serve the raw steps that must go
+    unauthenticated. Rather than leave those branches of the protocol untested
+    by anybody, the run starts a second agent configured to meet them and
+    splices its verdicts in.
+
+    Each deviation is keyed on the *skip reason* rather than on a list of test
+    ids: the corpus is authored upstream and copied here, so a hard-coded list
+    would silently stop matching when a test is added or renamed, whereas a
+    derived selector leaves an uncleared skip visible in the report.
+    """
+
+    #: Environment variable the SUT must honour.
+    env_var: str
+    #: Which skips this pass is allowed to claim.
+    skip_pattern: re.Pattern[str]
+    #: Distinguishes this pass's agent log from the others'.
+    log_name: str
+    #: Human-readable, for the log line naming what is being re-run.
+    description: str
+    #: Why the SUT did not enter the mode, read off its card — or None if it
+    #: did. Takes the card and the set of regex captures that caused the skips.
+    took_effect: Callable[[dict[str, Any], set[str]], str | None]
+
+
+def _capabilities_dropped(card: dict[str, Any], names: set[str]) -> str | None:
+    """Whether the reduced SUT stopped advertising what it was asked to."""
+    still = sorted(n for n in names if (card.get('capabilities') or {}).get(n))
+    if not still:
+        return None
+    return (
+        f'the card still advertises {", ".join(still)}; an agent honouring '
+        f'this must publish a smaller `capabilities` block'
+    )
+
+
+def _security_declared(card: dict[str, Any], names: set[str]) -> str | None:
+    """Whether the auth SUT came up declaring a credential requirement.
+
+    Only that the card *claims* one. Whether the claim is true is what
+    `SEC-AUTH-001` and the rest are for, and checking it here as well would
+    duplicate the very tests this pass exists to run.
+    """
+    absent = [
+        k for k in ('securitySchemes', 'securityRequirements') if not card.get(k)
+    ]
+    if not absent:
+        return None
+    return (
+        f'the card declares no {", ".join(absent)}; an agent honouring this '
+        f'must publish at least one security scheme and one security '
+        f'requirement (A2A §7.3)'
+    )
+
+
+#: The deviations, in the order they run. Both are serial: each is a whole SUT
+#: start, and `_sut_env` cannot differentiate two children alive at once.
+DEVIATIONS: tuple[Deviation, ...] = (
+    Deviation(
+        env_var=REDUCED_CAPABILITIES_ENV,
+        skip_pattern=_CAPABILITY_SKIP,
+        log_name='acts_sut_reduced',
+        description='capability-gated',
+        took_effect=_capabilities_dropped,
+    ),
+    Deviation(
+        env_var=AUTH_ENFORCED_ENV,
+        skip_pattern=_SECURITY_SKIP,
+        log_name='acts_sut_auth',
+        description='authentication-gated',
+        took_effect=_security_declared,
+    ),
+)
+
+
+def _skips_matching(
+    results: list[TestResult], pattern: re.Pattern[str]
+) -> dict[str, str]:
+    """Tests skipped for a reason ``pattern`` matches, and what it captured.
+
+    The capture is the empty string for a pattern with no group, which is what
+    the auth deviation wants: the skip names no particular thing to restore.
+    """
+    found = {}
+    for result in results:
+        match = pattern.search(result.skip_reason or '')
+        if match is not None:
+            found[result.id] = match.group(1) if match.groups() else ''
+    return found
 
 
 def _capability_skips(results: list[TestResult]) -> dict[str, str]:
     """Tests skipped only because the SUT advertises what they need absent."""
-    found = {}
-    for result in results:
-        match = _CAPABILITY_SKIP.search(result.skip_reason or '')
-        if match is not None:
-            found[result.id] = match.group(1)
-    return found
+    return _skips_matching(results, _CAPABILITY_SKIP)
 
 
-async def _rerun_capability_skips(
+async def _rerun_deviation(
     results: list[TestResult],
     suite: LoadedSuite,
     *,
+    deviation: Deviation,
     transport: TransportBinding,
     variables: dict[str, Any] | None,
     capabilities: list[RunnerRequirement] | None,
     declared: frozenset[str] | None,
     log_dir: Path | None,
 ) -> list[TestResult]:
-    """Re-run the capability-gated tests against a diminished SUT.
+    """Re-run the tests ``deviation`` can unblock against a second SUT.
 
     Returns ``results`` with those tests' verdicts replaced. A SUT that does
-    not honour `REDUCED_CAPABILITIES_ENV` keeps its original skips — the point
-    is to run the tests, not to report a verdict nobody produced.
+    not honour the environment variable keeps its original skips — the point
+    is to run the tests, not to report a verdict nobody produced. So does a SUT
+    that fails to start: an agent that will not come up in a deviated mode is
+    worth a warning, not the loss of the whole binding's report.
     """
-    blocked = _capability_skips(results)
+    blocked = _skips_matching(results, deviation.skip_pattern)
     if not blocked:
         return results
 
     logger.info(
-        'Re-running %d capability-gated test(s) against a reduced SUT: %s',
-        len(blocked), ', '.join(sorted(blocked)),
+        'Re-running %d %s test(s) against a %s SUT: %s',
+        len(blocked), deviation.description, deviation.env_var,
+        ', '.join(sorted(blocked)),
     )
-    reduced_suite = LoadedSuite(
+    narrowed = LoadedSuite(
         tests=[t for t in suite.tests if t.id in blocked],
         variables=suite.variables,
         sources=suite.sources,
-        rewrites=suite.rewrites,
     )
 
-    with _reduced_capabilities():
-        rerun, reduced_card = await _run_pass(
-            reduced_suite,
-            transport=transport,
-            variables=variables,
-            capabilities=capabilities,
-            declared=declared,
-            log_dir=log_dir,
-            log_name='acts_sut_reduced',
-        )
-
-    still_advertised = {
-        name for name in set(blocked.values())
-        if (reduced_card.get('capabilities') or {}).get(name)
-    }
-    if still_advertised:
+    try:
+        with _sut_env(deviation.env_var):
+            rerun, card = await _run_pass(
+                narrowed,
+                transport=transport,
+                variables=variables,
+                capabilities=capabilities,
+                declared=declared,
+                log_name=deviation.log_name,
+                log_dir=log_dir,
+            )
+    except ActsRunError as exc:
         logger.warning(
-            'The SUT still advertises %s with %s set, so %s stay skipped. An '
-            'agent honouring it must publish a smaller `capabilities` block.',
-            ', '.join(sorted(still_advertised)),
-            REDUCED_CAPABILITIES_ENV,
-            ', '.join(sorted(blocked)),
+            'The %s pass could not run (%s), so %s stay skipped.',
+            deviation.env_var, exc, ', '.join(sorted(blocked)),
         )
         return results
 
-    replacement = {r.id: r for r in rerun}
+    refused = deviation.took_effect(card, set(blocked.values()))
+    if refused is not None:
+        logger.warning(
+            'With %s set, %s, so %s stay skipped.',
+            deviation.env_var, refused, ', '.join(sorted(blocked)),
+        )
+        return results
+
+    # Stamped here rather than inside `Runner`, which has no idea it is being
+    # run against anything unusual. Spec §12.8 requires it: a verdict from a
+    # differently-configured instance is not interchangeable with one from the
+    # agent the rest of the run tested.
+    replacement = {
+        r.id: dataclasses.replace(r, configuration=deviation.env_var)
+        for r in rerun
+    }
     return [replacement.get(r.id, r) for r in results]
 
 
@@ -475,10 +610,14 @@ def to_report(
 
 
 __all__ = [
+    'AUTH_ENFORCED_ENV',
     'DEFAULT_SUITE',
+    'DEVIATIONS',
+    'REDUCED_CAPABILITIES_ENV',
     'SUT_ID',
     'ActsRun',
     'ActsRunError',
+    'Deviation',
     'build_dispatcher',
     'fetch_agent_card',
     'interface_for',

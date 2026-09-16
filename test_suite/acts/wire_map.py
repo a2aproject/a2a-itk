@@ -125,9 +125,6 @@ class ErrorBinding:
     grpc_status: str | None = None
     http_status: int | None = None
     reason: str | None = None
-    #: Set when the ACTS name is not the A2A name, or has no A2A row at all.
-    #: The value is the A2A error this one is answered by.
-    aliases: ErrorType | None = None
 
 
 # --------------------------------------------------------------------------
@@ -258,14 +255,11 @@ OPERATIONS: Mapping[Operation, OperationBinding] = MappingProxyType(_OPERATIONS)
 
 
 # --------------------------------------------------------------------------
-# Errors — A2A §5.4 for the eight A2A-specific errors, §9.5 for the standard
-# JSON-RPC ones, plus the one ACTS invents (see StreamingNotSupported below).
-# `reason` is the §11.6 ErrorInfo string: UPPER_SNAKE of the name minus the
-# `Error` suffix. That derivation holds for seven of the nine rows carrying a
-# reason and breaks on the other two — ExtendedCardNotSupported and
-# StreamingNotSupported, each for a documented reason on its own row. Which is
-# why this is a table and not a function: it is the wire contract, and one row
-# of drift upstream should show up as a diff here.
+# Errors — A2A §5.4 for the nine A2A-specific errors, §9.5 for the five
+# standard JSON-RPC ones. `reason` is the §11.6 ErrorInfo string: UPPER_SNAKE
+# of the name minus the `Error` suffix. That derivation holds on every row,
+# but this stays a table rather than a function because it is the wire
+# contract, and a row of drift upstream should show up as a diff here.
 # --------------------------------------------------------------------------
 
 _ERRORS: dict[ErrorType, ErrorBinding] = {
@@ -299,6 +293,18 @@ _ERRORS: dict[ErrorType, ErrorBinding] = {
         http_status=400,
         reason='CONTENT_TYPE_NOT_SUPPORTED',
     ),
+    ErrorType.INVALID_AGENT_RESPONSE: ErrorBinding(
+        jsonrpc_code=-32006,
+        grpc_status='INTERNAL',
+        http_status=500,
+        reason='INVALID_AGENT_RESPONSE',
+    ),
+    ErrorType.EXTENDED_AGENT_CARD_NOT_CONFIGURED: ErrorBinding(
+        jsonrpc_code=-32007,
+        grpc_status='FAILED_PRECONDITION',
+        http_status=400,
+        reason='EXTENDED_AGENT_CARD_NOT_CONFIGURED',
+    ),
     ErrorType.EXTENSION_SUPPORT_REQUIRED: ErrorBinding(
         jsonrpc_code=-32008,
         grpc_status='FAILED_PRECONDITION',
@@ -311,29 +317,10 @@ _ERRORS: dict[ErrorType, ErrorBinding] = {
         http_status=400,
         reason='VERSION_NOT_SUPPORTED',
     ),
-    # ACTS's name for A2A's `ExtendedAgentCardNotConfiguredError`. Same error,
-    # same -32007; only the spelling differs, so it binds to the A2A row.
-    ErrorType.EXTENDED_CARD_NOT_SUPPORTED: ErrorBinding(
-        jsonrpc_code=-32007,
-        grpc_status='FAILED_PRECONDITION',
-        http_status=400,
-        reason='EXTENDED_AGENT_CARD_NOT_CONFIGURED',
-    ),
-    # ACTS invents this one; A2A has no such error. §3.3.2 says an agent that
-    # cannot stream returns `UnsupportedOperationError`, so that is what the
-    # wire will carry and what this must match. ACTS §6.2 assigns it -32007,
-    # which actually belongs to ExtendedAgentCardNotConfigured — following
-    # that would make the two indistinguishable on the wire.
-    ErrorType.STREAMING_NOT_SUPPORTED: ErrorBinding(
-        jsonrpc_code=-32004,
-        grpc_status='FAILED_PRECONDITION',
-        http_status=400,
-        reason='UNSUPPORTED_OPERATION',
-        aliases=ErrorType.UNSUPPORTED_OPERATION,
-    ),
     # The standard JSON-RPC errors (A2A §9.5). A2A never maps these onto gRPC
     # or REST, so the other columns stay None rather than being guessed.
     ErrorType.JSON_PARSE: ErrorBinding(jsonrpc_code=-32700),
+    ErrorType.INVALID_REQUEST: ErrorBinding(jsonrpc_code=-32600),
     ErrorType.METHOD_NOT_FOUND: ErrorBinding(jsonrpc_code=-32601),
     ErrorType.INVALID_PARAMS: ErrorBinding(jsonrpc_code=-32602),
     ErrorType.INTERNAL: ErrorBinding(jsonrpc_code=-32603),
@@ -412,17 +399,12 @@ def binding_for_error(error: ErrorType) -> ErrorBinding:
     return ERRORS[error]
 
 
-# Reverse lookups need a single winner per wire value, and two ACTS names
-# share -32004 / UNSUPPORTED_OPERATION. The alias loses: a wire error is
-# reported under the A2A name, and `StreamingNotSupportedError` is not one.
-_CANONICAL = {e: b for e, b in _ERRORS.items() if b.aliases is None}
-
 _BY_JSONRPC_CODE: Mapping[int, ErrorType] = MappingProxyType(
-    {b.jsonrpc_code: e for e, b in _CANONICAL.items()}
+    {b.jsonrpc_code: e for e, b in _ERRORS.items()}
 )
 
 _BY_REASON: Mapping[str, ErrorType] = MappingProxyType(
-    {b.reason: e for e, b in _CANONICAL.items() if b.reason is not None}
+    {b.reason: e for e, b in _ERRORS.items() if b.reason is not None}
 )
 
 
@@ -449,5 +431,5 @@ def errors_sharing_http_status(status: int) -> tuple[ErrorType, ...]:
     pretending the status identified it.
     """
     return tuple(
-        e for e, b in _CANONICAL.items() if b.http_status == status
+        e for e, b in _ERRORS.items() if b.http_status == status
     )

@@ -262,7 +262,18 @@ class TestProtoJsonProjection:
 
 class TestDispatch:
     def test_binding_is_grpc(self):
-        assert GrpcDispatcher('x:1').binding is TransportBinding.GRPC
+        # Constructed inside a loop, like every other dispatcher here: the
+        # constructor opens a `grpc.aio` channel, which binds to the running
+        # loop and raises without one. Whether a loop happens to be current
+        # otherwise depends on which test file ran first.
+        async def binding():
+            dispatcher = GrpcDispatcher('x:1')
+            try:
+                return dispatcher.binding
+            finally:
+                await dispatcher.aclose()
+
+        assert asyncio.run(binding()) is TransportBinding.GRPC
 
     def test_unary_call_reaches_the_right_rpc(self):
         agent = FakeAgent()

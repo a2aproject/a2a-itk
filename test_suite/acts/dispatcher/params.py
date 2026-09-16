@@ -7,11 +7,10 @@ and the same bridge serves all three bindings — JSON-RPC, REST and gRPC all
 carry the identical request messages, so this is not transport-specific and
 must not be duplicated into the adapters.
 
-This is a sibling of :mod:`test_suite.acts.compat`, and follows the same rule:
-**every reshaping here is mechanical**, determined by the target message's own
-shape, never a guess about what a test meant. The corpus corroborates both of
-them — each writes its ``expect.body`` against the reshaped form already, so
-the assertions and the request would otherwise disagree with each other.
+The rule is that **every reshaping here is mechanical**, determined by the
+target message's own shape, never a guess about what a test meant. Where a
+step needs one, its own ``expect.body`` is written against the reshaped form
+already, so the assertions and the request would otherwise disagree.
 
 Anything needing judgement belongs upstream as a spec question, not here.
 """

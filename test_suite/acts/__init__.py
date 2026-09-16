@@ -3,9 +3,8 @@
 ACTS ([A2A#1882](https://github.com/a2aproject/A2A/pull/1882)) declares
 protocol-conformance tests as YAML: a sequence of abstract, transport-agnostic
 operations against one SUT, plus assertions on what comes back. This package
-is the ITK-side implementation: `schema.py` models the format, `compat.py`
-reconciles the shipped corpus with it, `loader.py` turns a manifest into a
-flat, ordered run plan, `wire_map.py` and `dispatcher/` bind an abstract
+is the ITK-side implementation: `schema.py` models the format, `loader.py`
+turns a manifest into a flat, ordered run plan, `wire_map.py` and `dispatcher/` bind an abstract
 operation to a transport, `variables.py` and `assertions.py` decide what a
 response means, `streaming.py` does the same for a sequence of events,
 `behaviors.py` reads the SUT's `tck-*` contract, `runner.py` sequences the
@@ -20,10 +19,10 @@ standing decision (SCOPE "keep ACTS and traversal as distinct suites sharing
 agents + config; don't force one model into the other").
 
 The corpus itself lives in `scenarios/acts/`, as a byte-identical mirror of the
-upstream snapshot named in its `PROVENANCE.md`. Twenty-six of its tests violate
-the ACTS CDDL; `compat.py` rewrites those defects at load time rather than
-editing the YAML, so the mirror stays refreshable. `compat=False` on any loader
-entry point shows the corpus exactly as shipped.
+upstream snapshot named in its `PROVENANCE.md`. It is loaded exactly as shipped
+and validated strictly; a corpus that does not satisfy the schema is a defect
+to raise upstream, which keeps the mirror refreshable and keeps this package a
+description of the format rather than of one snapshot.
 """
 
 from test_suite.acts.assertions import (
@@ -35,16 +34,10 @@ from test_suite.acts.assertions import (
     evaluate_body,
     evaluate_collection,
     evaluate_error,
+    evaluate_headers,
     evaluate_named,
     evaluate_status,
     evaluate_until,
-)
-from test_suite.acts.compat import (
-    EXPECTED_SITES,
-    PUSH_CONFIG_OPERATIONS,
-    Rewrite,
-    normalize_document,
-    site_counts,
 )
 from test_suite.acts.loader import (
     ActsFileError,
@@ -147,6 +140,7 @@ __all__ = [
     'evaluate_body',
     'evaluate_collection',
     'evaluate_error',
+    'evaluate_headers',
     'evaluate_named',
     'evaluate_status',
     'evaluate_stream',
@@ -155,7 +149,6 @@ __all__ = [
     'EventMatch',
     'EXECUTABLE_KINDS',
     'ExpectBlock',
-    'EXPECTED_SITES',
     'ExpectError',
     'ExpectStream',
     'Failure',
@@ -175,7 +168,6 @@ __all__ = [
     'MISSING',
     'NamedAssertion',
     'normalize',
-    'normalize_document',
     'Operation',
     'OperationBinding',
     'OPERATIONS',
@@ -185,19 +177,16 @@ __all__ = [
     'parse_document',
     'PathError',
     'Preconditions',
-    'PUSH_CONFIG_OPERATIONS',
     'RawBlock',
     'read_path',
     'read_path_all',
     'references',
     'render_validation_error',
     'Repeat',
-    'Rewrite',
     'RunError',
     'Runner',
     'RunnerRequirement',
     'Scope',
-    'site_counts',
     'Step',
     'StepKind',
     'StepResult',

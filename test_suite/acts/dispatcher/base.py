@@ -119,6 +119,27 @@ class WireResponse:
         return self.error is None
 
 
+class StreamNotOpened(MalformedResponse):
+    """The SUT refused a streaming request instead of opening a stream.
+
+    Not every non-SSE answer to a streaming call is a defect. A2A §3.3.4 makes
+    an agent that does not advertise ``streaming`` return
+    ``UnsupportedOperationError``, and §3.1.6 says the same of subscribing to a
+    task already in a terminal state — so the *conformant* reply to those two
+    is an ordinary error document and no event stream at all.
+
+    The parsed reply travels with the exception so the runner can evaluate
+    ``expect_error`` against it. Without that the refusal reaches the report as
+    "the content type was wrong", and an agent doing exactly what the spec
+    demands is recorded as non-conformant — which is what ``CORE-CAP-002`` and
+    ``STREAM-SUB-003`` did on every SDK.
+    """
+
+    def __init__(self, message: str, response: WireResponse) -> None:
+        super().__init__(message)
+        self.response = response
+
+
 @dataclass(frozen=True, slots=True)
 class StreamEvent:
     """One event from a streaming call.

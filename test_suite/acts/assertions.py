@@ -493,6 +493,49 @@ def evaluate_status(
     return evaluate(status, actual, path=path)
 
 
+class _FoldedHeaders(Mapping):
+    """The response headers, looked up case-insensitively.
+
+    HTTP field names are case-insensitive (RFC 9110 §5.1), so a SUT answering
+    `content-type` has to satisfy a test written against `Content-Type`.
+    Wrapping the response rather than folding the assertion tree keeps
+    combinators working: `any_of` hands the same mapping to each branch, and
+    the header names inside those branches need folding too.
+    """
+
+    __slots__ = ('_folded',)
+
+    def __init__(self, actual: Mapping[str, str] | None) -> None:
+        self._folded = {k.lower(): v for k, v in (actual or {}).items()}
+
+    def __getitem__(self, key: str) -> str:
+        return self._folded[key.lower()]
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and key.lower() in self._folded
+
+    def __iter__(self):
+        return iter(self._folded)
+
+    def __len__(self) -> int:
+        return len(self._folded)
+
+
+def evaluate_headers(
+    headers: Mapping[str, Any],
+    actual: Mapping[str, str] | None,
+    *,
+    path: str = 'headers',
+) -> AssertionResult:
+    """Evaluate an `expect.headers` block (spec §6.1).
+
+    A binding that produces no headers at all reports every declared one as
+    missing rather than passing vacuously: the assertion was never checked,
+    and a conformance run must not record that as a pass.
+    """
+    return _evaluate_map(headers, _FoldedHeaders(actual), path)
+
+
 def evaluate_error(
     expected: ExpectError, observed: Mapping[str, Any], *, path: str = 'error'
 ) -> AssertionResult:
@@ -504,14 +547,11 @@ def evaluate_error(
     `error_type: {one_of: [...]}` works exactly like any other.
     """
     result = _PASS
-    for name in ('error_type', 'message', 'data'):
+    for name in ('error_type', 'message', 'details'):
         assertion = getattr(expected, name)
         if assertion is not None:
             observed_value = observed.get(name, MISSING)
             result += evaluate(assertion, observed_value, path=_join(path, name))
-    if expected.details is not None:
-        details = observed.get('details', MISSING)
-        result += _evaluate_map(expected.details, details, _join(path, 'details'))
     return result
 
 
@@ -683,6 +723,7 @@ __all__ = [
     'evaluate_body',
     'evaluate_collection',
     'evaluate_error',
+    'evaluate_headers',
     'evaluate_named',
     'evaluate_status',
     'evaluate_until',

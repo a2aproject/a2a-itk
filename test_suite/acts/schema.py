@@ -3,10 +3,8 @@
 Mirrors [A2A#1882](https://github.com/a2aproject/A2A/pull/1882) — see
 ``scenarios/acts/PROVENANCE.md`` for the pinned snapshot.
 
-This module states what the CDDL permits, and nothing else. The shipped corpus
-violates it in 26 tests; those are rewritten on the way in by
-:mod:`test_suite.acts.compat`, deliberately kept out of here so that this stays
-a description of the format rather than of one snapshot of one corpus.
+This module states what the CDDL permits, and nothing else — a description of
+the format rather than of one snapshot of one corpus.
 
 **What this validates, and what it deliberately does not.** The document
 envelope, the suite and test envelopes, and the *shape* of every step are
@@ -98,18 +96,23 @@ class ErrorType(str, enum.Enum):
     binding, and a test should not have to care.
     """
 
+    # A2A-specific errors, in the order of A2A §5.4.
     TASK_NOT_FOUND = 'TaskNotFoundError'
     TASK_NOT_CANCELABLE = 'TaskNotCancelableError'
+    PUSH_NOTIFICATION_NOT_SUPPORTED = 'PushNotificationNotSupportedError'
     UNSUPPORTED_OPERATION = 'UnsupportedOperationError'
     CONTENT_TYPE_NOT_SUPPORTED = 'ContentTypeNotSupportedError'
-    INVALID_PARAMS = 'InvalidParamsError'
-    VERSION_NOT_SUPPORTED = 'VersionNotSupportedError'
-    PUSH_NOTIFICATION_NOT_SUPPORTED = 'PushNotificationNotSupportedError'
-    STREAMING_NOT_SUPPORTED = 'StreamingNotSupportedError'
+    INVALID_AGENT_RESPONSE = 'InvalidAgentResponseError'
+    EXTENDED_AGENT_CARD_NOT_CONFIGURED = 'ExtendedAgentCardNotConfiguredError'
     EXTENSION_SUPPORT_REQUIRED = 'ExtensionSupportRequiredError'
-    EXTENDED_CARD_NOT_SUPPORTED = 'ExtendedCardNotSupportedError'
+    VERSION_NOT_SUPPORTED = 'VersionNotSupportedError'
+
+    # Standard JSON-RPC errors, from A2A §9.5. That binding only: A2A gives
+    # them no gRPC or HTTP representation.
     JSON_PARSE = 'JSONParseError'
+    INVALID_REQUEST = 'InvalidRequestError'
     METHOD_NOT_FOUND = 'MethodNotFoundError'
+    INVALID_PARAMS = 'InvalidParamsError'
     INTERNAL = 'InternalError'
 
 
@@ -194,6 +197,13 @@ class Preconditions(_Model):
     """
 
     capabilities: dict[str, Any] | None = None
+    #: Whether the agent must *require* a credential. Deliberately not a member
+    #: of `capabilities`: A2A declares authentication at the top level of the
+    #: card, in `securitySchemes` and `securityRequirements`, and
+    #: `AgentCapabilities` has no member for it. The corpus gated four MUST-level
+    #: tests on `capabilities.authentication` for exactly this reason and they
+    #: skipped against every agent ever run.
+    authentication: bool | None = None
     skills: list[dict[str, Any]] | None = None
     transport: list[TransportBinding] | None = None
     extensions: list[str] | None = None
@@ -326,13 +336,16 @@ class Repeat(_Model):
 class ExpectBlock(_Model):
     """Assertions on a non-streaming response.
 
-    Only ``status`` and ``body``. A response field placed directly here would
-    make the runner look for a top-level ``task`` on the response and always
-    fail, so ``extra='forbid'`` catches it. The corpus does it at four sites;
-    :mod:`test_suite.acts.compat` moves them before validation.
+    Only ``status``, ``headers`` and ``body``. A response field placed directly
+    here would make the runner look for a top-level ``task`` on the response
+    and always fail, so ``extra='forbid'`` catches it.
     """
 
     status: Assertion = None
+    #: Response header assertions, keyed by header name (case-insensitive).
+    #: The only way to verify content types, caching directives and
+    #: authentication challenges, none of which appear in the body.
+    headers: dict[str, Assertion] | None = None
     body: dict[str, Assertion] | None = None
 
 
@@ -341,17 +354,16 @@ class ExpectError(_Model):
 
     error_type: Assertion = Field(
         default=None,
-        description='Abstract error name, or an assertion over it. The CDDL '
-                    'requires it; five corpus tests omit it and assert only a '
-                    '`message`, which reads as "any A2A error". Optional here '
-                    'for exactly that case — see PROVENANCE.md §C.',
-        # Do not tighten this to match the CDDL: it would reject those five
-        # tests, and the compat rule for `expect: {error: ...}` produces the
-        # same shape.
+        description='Abstract error name, or an assertion over it. Optional: '
+                    'some requirements mandate that an operation fail without '
+                    'mandating which error it fails with, and such a test '
+                    'asserts only on `message` or `details`.',
     )
     message: Assertion = None
-    data: Assertion = None
-    details: dict[str, Assertion] | None = None
+    #: The error details array — JSON-RPC ``error.data`` (§9.5) and REST
+    #: ``error.details`` (§11.6) are the same list of ``@type``-tagged objects,
+    #: so one transport-neutral key covers both.
+    details: Assertion = None
 
     @model_validator(mode='after')
     def _known_error_name(self) -> ExpectError:
