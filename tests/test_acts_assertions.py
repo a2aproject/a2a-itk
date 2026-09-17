@@ -426,6 +426,21 @@ class TestExpectHeaders:
     def test_a_missing_header_fails(self):
         assert not evaluate_headers(self.CONTENT_TYPE, {'Date': 'now'}).ok
 
+    def test_a_failure_reports_the_headers_that_were_actually_present(self):
+        """`actual` reaches the §13 report verbatim.
+
+        It used to arrive as `<_FoldedHeaders object at 0x...>`, the opposite
+        of a diagnostic: the reader of a missing-Cache-Control failure most
+        wants to see which headers the SUT did send.
+        """
+        result = evaluate_headers(
+            self.CACHING, {'Content-Type': 'application/json', 'Date': 'now'}
+        )
+        assert not result.ok
+        actual = str(result.first.actual)
+        assert 'object at 0x' not in actual
+        assert 'content-type' in actual and 'date' in actual
+
     def test_no_headers_at_all_fails_rather_than_passing_vacuously(self):
         """The gRPC case. An unchecked assertion must never read as a pass."""
         assert not evaluate_headers(self.CONTENT_TYPE, {}).ok
