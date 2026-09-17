@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "fetch-metrics": "./scripts/fetch-metrics.sh",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "tsc --noEmit && node --test src/lib.test.ts src/shell.test.ts"
+    "test": "tsc --noEmit && node --test src/itk/lib.test.ts src/acts/lib.test.ts src/shell.test.ts"
   },
   "dependencies": {
     "react": "^19.2.0",

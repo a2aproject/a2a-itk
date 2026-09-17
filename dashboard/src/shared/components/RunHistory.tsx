@@ -1,13 +1,25 @@
-import { runPassed } from "../lib.ts";
-import type { Run } from "../types.ts";
+import type { RunMeta } from "../types.ts";
 
-interface Props {
-  runs: Run[];
+interface Props<T extends RunMeta> {
+  runs: T[];
   activeIndex: number;
   onSelect: (index: number) => void;
+  /** Whether a run counts as clean; each domain decides for itself. */
+  isOk: (run: T) => boolean;
+  /** Screen-reader wording for the green/red dot, e.g. "conformant". */
+  okLabel: string;
+  failLabel: string;
 }
 
-export default function RunHistory({ runs, activeIndex, onSelect }: Props) {
+/** The run picker both domains share: newest first, one row per nightly run. */
+export default function RunHistory<T extends RunMeta>({
+  runs,
+  activeIndex,
+  onSelect,
+  isOk,
+  okLabel,
+  failLabel,
+}: Props<T>) {
   return (
     <aside className="card history" aria-label="Nightly run history">
       <div className="card-head">
@@ -16,7 +28,7 @@ export default function RunHistory({ runs, activeIndex, onSelect }: Props) {
       </div>
       <ol className="run-list">
         {runs.map((run, index) => {
-          const ok = runPassed(run);
+          const ok = isOk(run);
           return (
             <li key={`${run.timestamp}-${run.commit_sha}`}>
               <button
@@ -35,7 +47,7 @@ export default function RunHistory({ runs, activeIndex, onSelect }: Props) {
                   </time>
                   <span className="mono">{run.commit_sha.slice(0, 7)}</span>
                 </span>
-                <span className="sr-only">{ok ? "all passed" : "has failures"}</span>
+                <span className="sr-only">{ok ? okLabel : failLabel}</span>
               </button>
             </li>
           );

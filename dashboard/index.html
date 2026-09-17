@@ -53,12 +53,12 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
       media="print"
       onload="this.media='all'"
     />
     <noscript>
-      <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" />
+      <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" />
     </noscript>
 
     <script type="application/ld+json">
@@ -131,16 +131,16 @@
         <div class="intro">
           <h1>A2A SDK compatibility dashboard</h1>
           <p>
-            Nightly interoperability results for the
-            <a href="https://goo.gle/a2a">Agent2Agent (A2A) protocol</a> SDKs. Every run
-            exercises each SDK against its peers across the JSON-RPC, gRPC and HTTP+JSON
-            transports, for both streaming and non-streaming behaviours.
+            Nightly results for the <a href="https://goo.gle/a2a">Agent2Agent (A2A)</a>
+            protocol SDKs, over the JSON-RPC, gRPC and HTTP+JSON transports. Two suites
+            run every night: interoperability, which exercises each SDK against its
+            peers, and conformance, which checks each SDK against the specification.
           </p>
         </div>
 
         <p class="notice" id="boot-loading" role="status">
-          <span class="spinner" aria-hidden="true"></span> Loading the interoperability
-          matrix…
+          <span class="spinner" aria-hidden="true"></span> Loading the latest nightly
+          results…
         </p>
 
         <div id="boot-no-js">
@@ -154,7 +154,7 @@
             <li>Java — a2a-java</li>
           </ul>
           <p>
-            The live matrix needs JavaScript. See the
+            The live results need JavaScript. See the
             <a href="https://github.com/a2aproject/a2a-itk#readme"
               >Integration Test Kit documentation</a
             >

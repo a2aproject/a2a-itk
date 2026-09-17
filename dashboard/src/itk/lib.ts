@@ -1,16 +1,7 @@
-// Pure derivation helpers for the ITK compatibility dashboard.
-// Kept free of React/DOM so `node --test src/lib.test.ts` can exercise them.
+// Pure derivation helpers for the interoperability view.
+// Kept free of React/DOM so `node --test` can exercise them directly.
 
-import type { Behavior, CellStatus, Run, Scenario, SdkTarget, Topology } from "./types.ts";
-
-export const SDKS: SdkTarget[] = [
-  { id: "python", label: "Python", file: "itk_python.json", repo: "a2a-python" },
-  { id: "go", label: "Go", file: "itk_go.json", repo: "a2a-go" },
-  { id: "rust", label: "Rust", file: "itk_rust.json", repo: "a2a-rs" },
-  { id: "dotnet", label: ".NET", file: "itk_dotnet.json", repo: "a2a-dotnet" },
-  { id: "ts", label: "TypeScript", file: "itk_ts.json", repo: "a2a-js" },
-  { id: "java", label: "Java", file: "itk_java.json", repo: "a2a-java" },
-];
+import type { Behavior, CellStatus, Run, Scenario, Topology } from "./types.ts";
 
 export const PROTOCOLS = ["jsonrpc", "grpc", "http_json"] as const;
 
@@ -51,10 +42,6 @@ export const runPassed = (run: Run): boolean =>
 
 export const failedScenarios = (run: Run): Scenario[] =>
   (run.scenarios || []).filter((s) => !s.passed);
-
-/** Newest run first. Does not mutate the input. */
-export const sortRuns = (runs: Run[]): Run[] =>
-  [...runs].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
 
 export function scenarioIncludesSdk(scenario: Scenario, activeSdk: string): boolean {
   const sdks = (scenario.sdks || []).map(lower);

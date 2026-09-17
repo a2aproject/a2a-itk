@@ -11,7 +11,9 @@ import {
   scenarioIncludesSdk,
   summaryTopology,
 } from "../lib.ts";
-import type { Run, SdkTarget } from "../types.ts";
+import { commitUrl } from "../../shared/sdks.ts";
+import type { SdkTarget } from "../../shared/types.ts";
+import type { Run } from "../types.ts";
 
 interface Props {
   run: Run;
@@ -33,7 +35,7 @@ export default function RunDetail({ run, sdk }: Props) {
   }, [run, scenarios, sdk.id]);
 
   const ok = runPassed(run);
-  const commitUrl = `https://github.com/a2aproject/${sdk.repo}/commit/${run.commit_sha}`;
+  const commitHref = commitUrl(sdk, run.commit_sha);
 
   return (
     <div className="detail">
@@ -57,7 +59,7 @@ export default function RunDetail({ run, sdk }: Props) {
           <div>
             <dt>Commit</dt>
             <dd>
-              <a className="mono" href={commitUrl}>
+              <a className="mono" href={commitHref}>
                 {run.commit_sha.slice(0, 7)}
               </a>
             </dd>

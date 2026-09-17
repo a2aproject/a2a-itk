@@ -1,2 +1,4 @@
 dist/
+# Nightly metrics, fetched by scripts/fetch-metrics.sh — never committed.
 public/itk_*.json
+public/acts_*.json

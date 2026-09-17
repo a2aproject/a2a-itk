@@ -10,9 +10,9 @@ import {
   runPassed,
   scenarioIncludesSdk,
   sdkKind,
-  sortRuns,
   summaryTopology,
 } from "./lib.ts";
+import { sortRuns } from "../shared/sdks.ts";
 import { layoutTopology } from "./topology.ts";
 import type { Scenario } from "./types.ts";
 

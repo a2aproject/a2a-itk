@@ -49,21 +49,10 @@ jobs:
       - name: Typecheck and test
         run: npm test
 
-      - name: Fetch live nightly compatibility metrics
-        run: |
-          echo "Syncing latest interop logs from SDK rolling releases..."
-          # Metrics land in public/ so Vite copies them verbatim into dist/.
-          base=https://github.com/a2aproject
-          fetch() {
-            curl -L -f -o "public/$1" "$base/$2/releases/download/nightly-metrics/$3" \
-              || echo "[]" > "public/$1"
-          }
-          fetch itk_python.json a2a-python itk_python.json
-          fetch itk_go.json     a2a-go     itk_go.json
-          fetch itk_rust.json   a2a-rs     itk_rust.json
-          fetch itk_java.json   a2a-java   itk_java.json
-          fetch itk_ts.json     a2a-js     itk_js.json
-          echo "Metrics synchronized successfully!"
+      - name: Fetch live nightly interop and conformance metrics
+        # Shared with `npm run fetch-metrics` so the deployed site and local
+        # dev always render the same set of files.
+        run: ./scripts/fetch-metrics.sh
 
       - name: Build static site
         run: npm run build

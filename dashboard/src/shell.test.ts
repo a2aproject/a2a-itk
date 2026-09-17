@@ -7,8 +7,8 @@ const read = (rel: string) =>
   readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
 
 const html = read("../index.html");
-const layout = read("./components/Layout.tsx");
-const header = read("./components/Header.tsx");
+const layout = read("./shared/components/Layout.tsx");
+const header = read("./shared/components/Header.tsx");
 
 /** Collapse whitespace so JSX line wrapping does not count as a difference. */
 const squash = (s: string) => s.replace(/\s+/g, " ").trim();

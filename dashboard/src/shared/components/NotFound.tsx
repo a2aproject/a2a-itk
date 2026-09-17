@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { SDKS } from "../lib.ts";
-import { sdkPath } from "../routes.tsx";
+import { DEFAULT_DOMAIN, sdkPath } from "../../routes.tsx";
+import { SDKS } from "../sdks.ts";
 
 export default function NotFound() {
   const { pathname } = useLocation();
@@ -19,7 +19,7 @@ export default function NotFound() {
       <ul className="not-found-links">
         {SDKS.map((sdk) => (
           <li key={sdk.id}>
-            <Link to={sdkPath(sdk.id)}>{sdk.label}</Link>
+            <Link to={sdkPath(DEFAULT_DOMAIN, sdk.id)}>{sdk.label}</Link>
           </li>
         ))}
       </ul>
