@@ -520,6 +520,16 @@ class _FoldedHeaders(Mapping):
     def __len__(self) -> int:
         return len(self._folded)
 
+    def __repr__(self) -> str:
+        """What the SUT actually sent.
+
+        A `Failure` carries `actual` through to the §13 report as-is, so
+        without this a missing-header failure reports
+        `<_FoldedHeaders object at 0x...>` — swallowing the one diagnostic
+        that would have said which headers *were* present.
+        """
+        return repr(self._folded)
+
 
 def evaluate_headers(
     headers: Mapping[str, Any],

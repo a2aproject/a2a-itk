@@ -24,7 +24,9 @@ from test_suite.acts import (
     TransportBinding,
     load_suite,
 )
+from acts_runner import RUNNER_CAPABILITIES
 from test_suite.acts.runner import KNOWN_CAPABILITIES
+from test_suite.acts.schema import RunnerRequirement
 
 
 CORPUS = Path(__file__).resolve().parent.parent / 'scenarios' / 'acts'
@@ -284,6 +286,41 @@ class TestUpstreamFixesArePinned:
             for step in entry.test.steps:
                 if step.expect is not None and step.expect.headers:
                     assert entry.test.runner_requirements, entry.id
+
+    def test_the_harness_declares_every_capability_the_corpus_asks_for(
+        self, corpus
+    ):
+        """Otherwise a gated test skips for a reason that is about us, not it.
+
+        This is the check that was missing. `expect.headers` was wired into
+        the runner and the corpus tagged those three tests
+        `header_inspection`, but no front end ever declared the capability, so
+        all three skipped on every nightly for a release while reading as an
+        honest "this runner cannot do that".
+
+        A new requirement in the corpus now has to be either met in
+        `RUNNER_CAPABILITIES` or listed below as one we genuinely cannot
+        arrange.
+        """
+        needed = {
+            requirement
+            for entry in corpus
+            for requirement in entry.test.runner_requirements or ()
+        }
+        # Not arranged by this harness: no webhook receiver is reachable from
+        # the SUT, and no real credentials are issued to it.
+        cannot_arrange = {
+            RunnerRequirement.WEBHOOK_ENDPOINT,
+            RunnerRequirement.AUTH_CREDENTIALS,
+            RunnerRequirement.CONCURRENT_STREAMS,
+            RunnerRequirement.STREAM_DISCONNECT,
+        }
+        unmet = needed - set(RUNNER_CAPABILITIES) - cannot_arrange
+        assert not unmet, (
+            f'the corpus needs {sorted(r.value for r in unmet)}, which the '
+            f'runner neither declares in RUNNER_CAPABILITIES nor admits it '
+            f'cannot arrange'
+        )
 
     def test_prose_only_tests_are_down_to_twenty(self, corpus):
         """`runner-special` marks a test whose real check is in its

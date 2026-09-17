@@ -132,6 +132,17 @@ RUNNER_VARIABLES: dict[str, Any] = {
     'otherUserTaskId': '00000000-0000-0000-0000-0000000000ff',
 }
 
+#: Capabilities (spec §12.1) this harness has by construction, as against ones
+#: a caller has to arrange — a webhook receiver, real credentials.
+#:
+#: The dispatchers put response headers on every `WireResponse` that has any:
+#: both HTTP bindings on their normal path, and `fetch_agent_card` on all
+#: three, the card being plain HTTP even under gRPC. A gRPC unary reply
+#: carries none, but no test gated on this asks a gRPC RPC for one.
+RUNNER_CAPABILITIES: tuple[RunnerRequirement, ...] = (
+    RunnerRequirement.HEADER_INSPECTION,
+)
+
 #: Protocol bindings as the agent card spells them, mapped to ACTS's names.
 #: The card says `JSONRPC` / `GRPC` / `HTTP_JSON`; ACTS says `rest` for the
 #: last one. The two vocabularies are separate on purpose, so the translation
@@ -293,6 +304,13 @@ async def run(
     # `SEC-EXTCARD-002` into an error about the harness. A caller may still
     # override any of them.
     variables = {**RUNNER_VARIABLES, **(variables or {})}
+
+    # Same reasoning, and the same bug until now: no front end passed
+    # `capabilities`, so the three tests tagged `header_inspection` skipped on
+    # every run even though the dispatchers had been reporting headers all
+    # along. What the harness can do is the harness's to declare, not the
+    # caller's to remember.
+    capabilities = [*RUNNER_CAPABILITIES, *(capabilities or ())]
 
     suite = load_suite(suite_path or DEFAULT_SUITE)
     if test_ids:
