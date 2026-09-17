@@ -235,12 +235,13 @@ class TestFromDefault:
     def test_default_matrix_loads(self):
         """The repo-root matrix.yaml must parse and contain the live entries.
 
-        Currently: v10 across all 5 SDKs, plus v03 overlays for python/go/ts.
-        java and rust have no v03 baseline. If new SDKs or lines land, this
-        list needs updating — that's the point.
+        Currently: v10 across all 6 SDKs, plus v03 overlays for python/go/ts.
+        java, rust and dotnet have no v03 baseline. If new SDKs or lines land,
+        this list needs updating — that's the point.
         """
         m = Matrix.from_default()
         expected = [
+            ('dotnet', 'v10'),
             ('go', 'v03'), ('go', 'v10'),
             ('java', 'v10'),
             ('python', 'v03'), ('python', 'v10'),
@@ -309,17 +310,21 @@ class TestTransports:
                 'repo': 'a/b', 'ref': 'main', 'transports': 'jsonrpc',
             }}}})
 
-    def test_only_go_v03_is_restricted_here(self):
+    def test_only_lines_that_cannot_serve_a_transport_are_restricted_here(self):
         """`transports` is only for a line that cannot speak one from
-        anywhere. go_v03 is the sole such case; ts_v03's grpc/http_json limit
-        is pairwise and lives in known_failures.yaml.
+        anywhere: go_v03 has no http_json, and a2a-dotnet ships no gRPC server.
+        ts_v03's grpc/http_json limit is pairwise, so it lives in
+        known_failures.yaml instead.
         """
         m = Matrix.from_default()
         restricted = {
             e.agent_id: sorted(e.transports)
             for e in m.entries() if e.transports != ALL_TRANSPORTS
         }
-        assert restricted == {'go_v03': ['grpc', 'jsonrpc']}
+        assert restricted == {
+            'dotnet_v10': ['http_json', 'jsonrpc'],
+            'go_v03': ['grpc', 'jsonrpc'],
+        }
 
 
 class TestEntries:
