@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://a2aproject.github.io/a2a-itk/dashboard/sitemap.xml
