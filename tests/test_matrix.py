@@ -235,12 +235,13 @@ class TestFromDefault:
     def test_default_matrix_loads(self):
         """The repo-root matrix.yaml must parse and contain the live entries.
 
-        Currently: v10 across all 5 SDKs, plus v03 overlays for python/go/ts.
-        java and rust have no v03 baseline. If new SDKs or lines land, this
-        list needs updating — that's the point.
+        Currently: v10 across all 6 SDKs, plus v03 overlays for python/go/ts.
+        dotnet, java, and rust have no v03 baseline. If new SDKs or lines
+        land, this list needs updating — that's the point.
         """
         m = Matrix.from_default()
         expected = [
+            ('dotnet', 'v10'),
             ('go', 'v03'), ('go', 'v10'),
             ('java', 'v10'),
             ('python', 'v03'), ('python', 'v10'),
