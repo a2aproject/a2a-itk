@@ -67,3 +67,73 @@ exclusions:
       pass against the same peer. This is the one combination that exposes
       it, because go_v03 has no http_json at all and ts_v03 over http_json is
       already excluded for non-TS SUTs.
+
+  # ---------------------------------------------------------------------
+  # a2a-dotnet as SUT: no gRPC server at all
+  # ---------------------------------------------------------------------
+  - sut_sdk: [dotnet]
+    transports: [grpc]
+    reason: >
+      The .NET SDK defines the GRPC protocol-binding name but implements no
+      gRPC server or client — there is no Grpc.* package reference anywhere in
+      src/. The itk agent parses --grpcPort and never listens on it. Recorded
+      here as well as in matrix.yaml because the ceiling there only governs
+      dotnet_v10 as a peer; as SUT the agent is `current`, which the matrix
+      deliberately does not resolve.
+
+  # ---------------------------------------------------------------------
+  # a2a-dotnet as SUT: push notifications are unimplemented
+  # ---------------------------------------------------------------------
+  - sut_sdk: [dotnet]
+    behaviors: [push_notification]
+    reason: >
+      A2AServer answers every push-notification config operation —
+      Create/Get/List/Delete — with PushNotificationNotSupported
+      unconditionally; there is no option to turn it on. The agent card
+      advertises pushNotifications=false to match, so ACTS skips its
+      PUSH-* tests for the same reason.
+
+  # ---------------------------------------------------------------------
+  # a2a-dotnet as SUT: v0.3 peers over JSON-RPC only
+  # ---------------------------------------------------------------------
+  - sut_sdk: [dotnet]
+    agents: [python_v03, go_v03, ts_v03]
+    transports: [http_json]
+    reason: >
+      A2A.V0_3Compat ships a JSON-RPC server (MapA2AWithV03Compat) and a
+      JSON-RPC client (V03CompatClientFactory, which wraps A2A.V0_3.A2AClient)
+      and no REST counterpart for either, so the itk agent advertises a v0.3
+      interface for JSONRPC only. Over jsonrpc the same peers pass.
+
+  # ---------------------------------------------------------------------
+  # a2a-dotnet as SUT: go_v03's send configuration omits acceptedOutputModes
+  # ---------------------------------------------------------------------
+  - sut_sdk: [dotnet]
+    agents: [go_v03]
+    reason: >
+      On the return hop go v0.3 sends message/send with a `configuration`
+      object that carries no `acceptedOutputModes`. .NET's
+      A2A.V0_3.MessageSendConfiguration marks that property [JsonRequired], so
+      System.Text.Json rejects the request before the handler sees it —
+      "missing required properties". Same strictness class as a2a-dotnet#435,
+      which relaxed AgentMessage.kind/messageId for this reason. python_v03
+      passes over jsonrpc, so this is the go pairing specifically.
+
+  # ---------------------------------------------------------------------
+  # a2a-java calling a2a-dotnet over JSON-RPC
+  # ---------------------------------------------------------------------
+  - sut_sdk: [dotnet]
+    agents: [java_v10]
+    transports: [jsonrpc]
+    reason: >
+      Return hop only, and JSON-RPC only — the same pair passes over
+      http_json. java's itk agent reports "Streaming error calling <dotnet>
+      via jsonrpc: org.a2aproject.sdk.spec.InvalidParamsError: Parameter 'id'
+      may not be null" and yields no result for the leg, so the traversal ends
+      with the outbound token and neither the return token nor
+      traversal-completed. The dotnet side logs a GetTask for
+      "<taskId>:subscribe", which is not an id it ever issued. Root cause not
+      established: the frames dotnet emits do carry a JSON-RPC `id`, so the
+      null is something java derives rather than reads. First surfaced when
+      a2a-dotnet moved to the shared scenario set — the pair had never run
+      before, since its old local set only named python_v10 and go_v10.

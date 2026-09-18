@@ -12,7 +12,8 @@
 # it's spawned via `Kind.MOUNT` from the container's bind mount.
 #
 # v03 lines point at `+itk` overlay tags: the underlying v0.3.X release
-# with the itk agent grafted onto its `itk/` subdir. `java` and `rust` have no v03.
+# with the itk agent grafted onto its `itk/` subdir. `java`, `rust` and
+# `dotnet` have no v03.
 #
 # `transports` is the line's capability ceiling: a scenario runs a peer only
 # over transports the line supports. This holds whether the peer is named
@@ -43,3 +44,9 @@ sdks:
     v10: {repo: a2aproject/a2a-java, ref: main}
   rust:
     v10: {repo: a2aproject/a2a-rs, ref: main}
+  dotnet:
+    # No grpc: the SDK names the GRPC binding but ships no gRPC server, so this
+    # line cannot serve that transport to anyone. That is a capability ceiling
+    # rather than a broken pair, which is why it belongs here and not in
+    # known_failures.yaml.
+    v10: {repo: a2aproject/a2a-dotnet, ref: main, transports: [jsonrpc, http_json]}
