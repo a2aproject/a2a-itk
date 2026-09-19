@@ -1,0 +1,50 @@
+{
+  "axis": "enums",
+  "description": "Enum representation on the JSON wire. proto3 JSON accepts a value by name or by number and emits the name for known values. Unknown values are emitted as their number so that an SDK which predates a value can still carry it.",
+  "vectors": [
+    {
+      "id": "enum.known_by_name",
+      "message": "TaskStatus",
+      "input": { "state": "TASK_STATE_WORKING" },
+      "expected": { "state": "TASK_STATE_WORKING" },
+      "rationale": "Baseline. A known value given by name round-trips as that name."
+    },
+    {
+      "id": "enum.known_by_number",
+      "message": "TaskStatus",
+      "input": { "state": 2 },
+      "expected": { "state": "TASK_STATE_WORKING" },
+      "rationale": "proto3 JSON accepts the number on input and emits the name on output."
+    },
+    {
+      "id": "enum.zero_value",
+      "message": "TaskStatus",
+      "input": { "state": "TASK_STATE_UNSPECIFIED" },
+      "expected": {},
+      "rationale": "The zero value is a proto3 default and is omitted from output."
+    },
+    {
+      "id": "enum.unknown_number",
+      "message": "TaskStatus",
+      "input": { "state": 99 },
+      "expected": { "state": 99 },
+      "rationale": "TaskState currently defines 0 through 8. An SDK that does not know a value must carry the number through rather than substituting a sentinel, or a version bump breaks every older intermediary at once.",
+      "issues": ["a2aproject/a2a-js#640"]
+    },
+    {
+      "id": "enum.role_known",
+      "message": "Message",
+      "input": { "messageId": "m1", "role": "ROLE_USER" },
+      "expected": { "messageId": "m1", "role": "ROLE_USER" },
+      "rationale": "Baseline on a second enum, so a failure on Role is distinguishable from a failure on TaskState."
+    },
+    {
+      "id": "enum.role_unknown_number",
+      "message": "Message",
+      "input": { "messageId": "m1", "role": 77 },
+      "expected": { "messageId": "m1", "role": 77 },
+      "rationale": "Same forward-compatibility requirement as enum.unknown_number, on Role.",
+      "issues": ["a2aproject/a2a-js#640"]
+    }
+  ]
+}
