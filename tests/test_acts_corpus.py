@@ -13,6 +13,9 @@ A refresh should make these fail. That is the prompt to re-read
 
 from __future__ import annotations
 
+import json
+
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -79,10 +82,9 @@ class TestCorpusLoads:
         }
 
     def test_variables_come_from_the_manifest_and_suites(self, corpus):
-        assert corpus.variables == {
-            'baseUrl': '{{env.SUT_BASE_URL}}',
-            'webhookUrl': 'https://example.com/webhooks/a2a-tests',
-        }
+        # `webhookUrl` is runner-provided now (§12.2): the URL the runner
+        # listens on is not something a document can state.
+        assert corpus.variables == {'baseUrl': '{{env.SUT_BASE_URL}}'}
 
 
 class TestCorpusShape:
@@ -114,9 +116,16 @@ class TestCorpusShape:
             for step in entry.test.steps:
                 counts[step.kind()] += 1
         assert counts == {
-            StepKind.OPERATION: 142,
+            # 142 before the vacuity audit added six: the missing half of
+            # CORE-ERR-009, a positive control on each SEC-EXTCARD test, and
+            # two on REST-STATUS-001. Three more when the streaming tests were
+            # given the long-running task their concurrency needs a subject.
+            StepKind.OPERATION: 151,
             StepKind.RAW: 22,
             StepKind.CLIENT: 9,
+            # The five push tests that used to register a config and assert
+            # nothing about what the SUT then delivered.
+            StepKind.WEBHOOK: 5,
             StepKind.ASSERTION: 0,
         }
 
@@ -164,6 +173,7 @@ class TestCorpusShape:
         assert sorted(bare - set(corpus.variables)) == [
             'insufficientAuthToken',
             'otherUserTaskId',
+            'webhookUrl',
         ]
 
 
@@ -195,10 +205,12 @@ class TestBehaviorContract:
         that does needs the SUT to recognise the `tck-*` prefix and play along.
 
         Note the corpus also writes `requires_behaviors: []` explicitly on
-        some tests, so "declares the key" (80) is not "needs a behavior" (69).
+        some tests, so "declares the key" (81) is not "needs a behavior" (70).
         """
-        assert len([e for e in corpus if e.test.behaviors()]) == 69
-        assert len([e for e in corpus if e.test.requires_behaviors is not None]) == 80
+        # 69/80 before REST-STATUS-001 gained a positive control, which needs
+        # a real task and so a behaviour to produce one.
+        assert len([e for e in corpus if e.test.behaviors()]) == 70
+        assert len([e for e in corpus if e.test.requires_behaviors is not None]) == 81
 
 
 class TestCorpusNeedsNoRewriting:
@@ -236,6 +248,30 @@ class TestCorpusNeedsNoRewriting:
             first = corpus.by_id(test_id).test.steps[0]
             assert first.expect is not None
             assert 'task' in first.expect.body
+
+    def test_canned_agent_cards_carry_every_required_skill_field(self, corpus):
+        """A §10 payload is what the SUT's own client has to parse, so a card
+        the spec forbids tests the client's tolerance, not its correctness.
+
+        `a2a.proto` marks all four of `id`, `name`, `description` and `tags`
+        REQUIRED on `AgentSkill`, and a strict client rejects a card missing
+        any of them before reaching the `capabilities` under test.
+        """
+        required = {'id', 'name', 'description', 'tags'}
+        for entry in corpus:
+            for step in entry.test.steps:
+                if step.client_response is None:
+                    continue
+                payload = step.client_response.wire_payload
+                if not isinstance(payload, Mapping):
+                    continue
+                for skill in payload.get('skills') or ():
+                    missing = required - set(skill)
+                    assert not missing, (
+                        f'{entry.id}/{step.id}: skill {skill.get("id")!r} '
+                        f'omits {sorted(missing)}, which a2a.proto marks '
+                        f'REQUIRED on AgentSkill'
+                    )
 
 
 class TestUpstreamFixesArePinned:
@@ -278,14 +314,42 @@ class TestUpstreamFixesArePinned:
         assert set(step.expect.body['error']) == {'code', 'message', 'details'}
 
     def test_runner_requirements_is_used_where_headers_are_asserted(self, corpus):
-        """The spec field for "this test needs a runner capability", finally
-        carrying the three tests that inspect response headers."""
+        """The spec field for "this test needs a runner capability".
+
+        Without it a runner that cannot supply the fixture hits the
+        unresolved-variable failure path, or runs something weaker, instead of
+        skipping.
+        """
         declared = {e.id for e in corpus if e.test.runner_requirements}
-        assert declared == {'CARD-CACHE-001', 'JSONRPC-CT-001', 'REST-CT-001'}
+        assert declared == {
+            # inspect a response header
+            'CARD-CACHE-001', 'JSONRPC-CT-001', 'REST-CT-001',
+            # name a §12.2 runner-provided variable
+            'SEC-AUTH-002', 'SEC-AUTH-003', 'SEC-EXTCARD-002', 'CORE-ERR-009',
+            # need a receiver the SUT can actually POST to
+            'PUSH-DELIV-001', 'PUSH-DELIV-002', 'PUSH-DELIV-003',
+            'SEC-PUSH-001', 'SEC-PUSH-002',
+            # need two streams open at once, or one broken mid-flight
+            'STREAM-MULTI-001', 'STREAM-MULTI-002', 'STREAM-RESUB-001',
+        }
         for entry in corpus:
             for step in entry.test.steps:
                 if step.expect is not None and step.expect.headers:
                     assert entry.test.runner_requirements, entry.id
+
+    def test_every_runner_variable_reference_declares_its_requirement(
+        self, corpus
+    ):
+        """§12.2: naming one of these without declaring `auth_credentials`
+        turns a runner's missing fixture into an unresolved-variable error
+        about the harness, where the spec wants an honest skip."""
+        for entry in corpus:
+            source = json.dumps(entry.test.model_dump(mode='json'))
+            for variable in ('insufficientAuthToken', 'otherUserTaskId'):
+                if f'{{{{{variable}}}}}' in source:
+                    assert RunnerRequirement.AUTH_CREDENTIALS in (
+                        entry.test.runner_requirements or ()
+                    ), f'{entry.id} names {variable}'
 
     def test_the_harness_declares_every_capability_the_corpus_asks_for(
         self, corpus
@@ -307,14 +371,19 @@ class TestUpstreamFixesArePinned:
             for entry in corpus
             for requirement in entry.test.runner_requirements or ()
         }
-        # Not arranged by this harness: no webhook receiver is reachable from
-        # the SUT, and no real credentials are issued to it.
+        # `webhook_endpoint` is granted per run rather than statically, so it
+        # is absent from `RUNNER_CAPABILITIES` without being unarrangeable.
         cannot_arrange = {
             RunnerRequirement.WEBHOOK_ENDPOINT,
-            RunnerRequirement.AUTH_CREDENTIALS,
-            RunnerRequirement.CONCURRENT_STREAMS,
-            RunnerRequirement.STREAM_DISCONNECT,
         }
+        # A requirement in both lists is a contradiction: `auth_credentials`
+        # sat in `cannot_arrange` after the harness gained it, so declaring it
+        # looked satisfied here while the tests went on skipping.
+        both = set(RUNNER_CAPABILITIES) & cannot_arrange
+        assert not both, (
+            f'{sorted(r.value for r in both)} is declared in '
+            f'RUNNER_CAPABILITIES and also listed as unarrangeable'
+        )
         unmet = needed - set(RUNNER_CAPABILITIES) - cannot_arrange
         assert not unmet, (
             f'the corpus needs {sorted(r.value for r in unmet)}, which the '
@@ -346,13 +415,18 @@ class TestKnownDivergencesStillPresent:
     """
 
     def test_error_assertions_that_do_not_name_an_error_type(self, corpus):
-        """Three tests assert only that *some* error came back.
+        """Two tests assert only that *some* error came back.
 
-        Deliberate in each case: the spec mandates a failure without mandating
-        which error. `SEC-AUTH-003` used to be here and is not any longer —
-        A2A requires an inaccessible task to be reported *not found*, so
-        naming the error is the whole substance of the test and leaving it
-        unnamed let any two error strings pass a MUST.
+        Deliberate in both: the spec mandates a failure without mandating
+        which error, and each still produces a genuine contrast because the
+        same operation succeeds earlier in the test.
+
+        Two have left this list. `SEC-AUTH-003` first — A2A requires an
+        inaccessible task to be reported *not found*, so naming the error is
+        the whole substance and leaving it unnamed let any two error strings
+        pass a MUST. Then `CORE-ERR-009`, for the same reason: it asserts the
+        indistinguishability of a missing and an unauthorized resource, which
+        is a claim about *which* error, not about failure.
         """
         unconstrained = [
             (entry.id, step.id)
@@ -360,7 +434,6 @@ class TestKnownDivergencesStillPresent:
             if step.expect_error is not None and step.expect_error.error_type is None
         ]
         assert sorted(unconstrained) == [
-            ('CORE-ERR-009', 'get-missing'),
             ('CORE-MULTI-003', 'mismatch'),
             ('CORE-MULTI-006', 'turn2'),
         ]

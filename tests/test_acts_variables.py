@@ -300,9 +300,15 @@ class TestCorpusReferences:
     def test_every_reference_is_a_capture_a_document_var_or_injected(self, suite):
         """Nothing in the corpus needs `env.` or `$uuid`.
 
-        The two that resolve to neither a capture nor a document variable are
-        the runner-injected pair, which the pipeline supplies. If a corpus
-        refresh adds a third, this is where it surfaces.
+        The three that resolve to neither a capture nor a document variable
+        are the runner-injected set of §12.2, which the pipeline supplies. If
+        a corpus refresh adds a fourth, this is where it surfaces.
+
+        `webhookUrl` joined them when the delivery tests stopped being
+        vacuous. It was a document literal naming example.com, so every push
+        config pointed at an address nobody answers and no test could tell
+        delivery from silence. It has to be the URL the runner itself is
+        listening on, which is not something a document can state.
         """
         injected = set()
         for loaded in suite.tests:
@@ -316,7 +322,9 @@ class TestCorpusReferences:
             for reference in references(test.model_dump(exclude_none=True, mode='json')):
                 if reference not in declared and reference not in suite.variables:
                     injected.add(reference)
-        assert injected == {'insufficientAuthToken', 'otherUserTaskId'}
+        assert injected == {
+            'insufficientAuthToken', 'otherUserTaskId', 'webhookUrl',
+        }
 
     def test_every_capture_path_parses(self, suite):
         for loaded in suite.tests:

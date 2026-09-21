@@ -108,6 +108,17 @@ def allocate_pair(reservoir: AddressReservoir | None = None) -> tuple[int, int]:
     return http, grpc
 
 
+def free_port(reservoir: AddressReservoir | None = None) -> int:
+    """One free port, reserved against the rest of this process.
+
+    `allocate_pair` is for an agent, which needs both an HTTP and a gRPC
+    port. The ACTS webhook receiver needs exactly one, and taking a pair to
+    discard half would reserve a port nothing ever binds.
+    """
+    r = reservoir if reservoir is not None else _default_reservoir
+    return _one_free_port(r)
+
+
 def release(*ports: int, reservoir: AddressReservoir | None = None) -> None:
     """Return ports to the reservoir so they can be reused."""
     r = reservoir if reservoir is not None else _default_reservoir

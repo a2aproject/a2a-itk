@@ -74,6 +74,7 @@ from test_suite.acts.schema import (
     RunnerRequirement,
     Step,
     StepKind,
+    StreamPlan,
     Test,
     TransportBinding,
 )
@@ -104,9 +105,12 @@ DEFAULT_STREAM_TIMEOUT_MS: Final = 30_000
 #: `spec_version`. On gRPC the dispatcher turns it into call metadata.
 VERSION_HEADER = 'A2A-Version'
 
+#: How often a webhook step re-reads the receiver while waiting.
+_WEBHOOK_POLL_S: Final = 0.25
+
 #: Step kinds the runner can execute.
 EXECUTABLE_KINDS: Final[frozenset[StepKind]] = frozenset(
-    {StepKind.OPERATION, StepKind.RAW, StepKind.CLIENT}
+    {StepKind.OPERATION, StepKind.RAW, StepKind.CLIENT, StepKind.WEBHOOK}
 )
 
 #: The behaviour a `client_response` step is delivered through (ACTS §10).
@@ -218,6 +222,59 @@ def _declared_timeout_ms(expect: Any | None) -> int | None:
     here: nothing the SUT can be held to.
     """
     return None if expect is None else expect.timeout_ms
+
+
+def _stream_label(index: int, total: int) -> str:
+    """"stream 1 of 2 " when there are several, "" when there is one."""
+    return '' if total == 1 else f'stream {index} of {total} '
+
+
+def _within_stream(
+    result: AssertionResult, index: int, plan: StreamPlan | None
+) -> AssertionResult:
+    """Attribute a failure to the stream of a set that produced it.
+
+    The members of a set are not interchangeable, so "got 1 event" has to say
+    which of them fell short.
+    """
+    if result.ok:
+        return result
+    named = (plan.description if plan is not None else None) or f'stream {index}'
+    return AssertionResult(
+        tuple(
+            replace(
+                failure,
+                path=f'streams[{index}].{failure.path}',
+                message=f'{named}: {failure.message}',
+            )
+            for failure in result.failures
+        ),
+        result.checks,
+    )
+
+
+async def _hang_up(source: AsyncIterator[StreamEvent], *, required: bool) -> None:
+    """Close the stream now, rather than leaving it to a garbage collection.
+
+    An async generator abandoned at a `yield` holds its response open until it
+    is collected; closing it unwinds the dispatcher's `async with
+    client.stream(...)`, which is what puts the disconnect on the wire.
+
+    ``required`` raises rather than disconnecting nothing quietly.
+    """
+    aclose = getattr(source, 'aclose', None)
+    if aclose is None:
+        if required:
+            raise DispatchError(
+                f'{type(source).__name__} cannot be closed, so this binding '
+                f'cannot disconnect mid-stream'
+            )
+        return
+    try:
+        await aclose()
+    except RuntimeError:
+        # Already closed, or closed from under us by the timeout's cancellation.
+        pass
 
 
 #: Capability names an agent card can carry, taken from the specification's own
@@ -337,8 +394,12 @@ class Runner:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
         new_uuid: Callable[[], str] | None = None,
+        read_webhook: Callable[[str], Awaitable[list[Mapping[str, Any]]]] | None = None,
     ) -> None:
         self.dispatcher = dispatcher
+        #: Notifications delivered so far for one task id, oldest first.
+        #: ``None`` when no receiver is running.
+        self._read_webhook = read_webhook
         #: Overlaid on the document's own `variables`, so a runner-supplied
         #: value wins. The corpus references two variables no document
         #: defines and they can only arrive this way.
@@ -544,6 +605,8 @@ class Runner:
         try:
             if step.kind() is StepKind.CLIENT:
                 return await self._run_client_step(step, scope, started)
+            if step.kind() is StepKind.WEBHOOK:
+                return await self._run_webhook_step(step, scope, started)
             if _is_streaming(step):
                 return await self._run_streaming_step(step, scope, started)
             return await self._run_unary_step(step, scope, started)
@@ -557,6 +620,115 @@ class Runner:
             # right: a raw step on gRPC is a test that should have declared a
             # transport, not a defect in the agent.
             return self._step(step, Outcome.ERROR, started, message=str(exc))
+
+    async def _run_webhook_step(
+        self, step: Step, scope: Scope, started: float
+    ) -> StepResult:
+        """Assert on what the SUT delivered to the runner's own receiver.
+
+        Polls rather than blocks, delivery being asynchronous. A missing
+        receiver is the runner's gap, not the SUT's, so it lands as `error`.
+        """
+        block = step.expect_webhook
+        if self._read_webhook is None:
+            return self._step(
+                step, Outcome.ERROR, started,
+                message=(
+                    f'{step.id} reads delivered notifications but no webhook '
+                    f'receiver is configured; the test should have declared '
+                    f'`runner_requirements: [webhook_endpoint]`'
+                ),
+            )
+
+        try:
+            task_id = scope.substitute(block.task_id)
+        except (UnresolvedVariable, PathError) as exc:
+            return self._step(step, Outcome.ERROR, started, message=str(exc))
+
+        deadline = self._clock() + block.timeout_ms / 1000
+        delivered: list[Mapping[str, Any]] = []
+        while True:
+            delivered = list(await self._read_webhook(str(task_id)))
+            if len(delivered) >= block.min_count or self._clock() >= deadline:
+                break
+            await self._sleep(_WEBHOOK_POLL_S)
+
+        if len(delivered) < block.min_count:
+            return self._step(
+                step, Outcome.FAIL, started,
+                failure=FailureDetail(
+                    message=(
+                        f'the SUT delivered {len(delivered)} notification(s) '
+                        f'for task {task_id} in {block.timeout_ms}ms; the test '
+                        f'needs {block.min_count}'
+                    ),
+                    step_id=step.id,
+                    expected=block.min_count,
+                    actual=len(delivered),
+                    assertion_path='webhook.min_count',
+                ),
+                checks=1,
+            )
+
+        events = [dict(n.get('event') or {}) for n in delivered]
+        scope.record_response(step.id, events[-1])
+
+        checks = 1
+        for name, subject, target in (
+            ('each_event', block.each_event, events),
+            ('final_event', block.final_event, events[-1:]),
+        ):
+            if subject is None:
+                continue
+            for index, event in enumerate(target):
+                result = evaluate_body(
+                    scope.substitute(subject), event, path=f'webhook.{name}[{index}]'
+                )
+                checks += result.checks
+                if not result.ok:
+                    return self._step(
+                        step, Outcome.FAIL, started,
+                        failure=FailureDetail.from_assertion(result.first, step.id),
+                        checks=checks,
+                    )
+
+        if block.headers is not None:
+            for index, notification in enumerate(delivered):
+                result = evaluate_headers(
+                    scope.substitute(block.headers),
+                    notification.get('headers') or {},
+                    path=f'webhook.headers[{index}]',
+                )
+                checks += result.checks
+                if not result.ok:
+                    return self._step(
+                        step, Outcome.FAIL, started,
+                        failure=FailureDetail.from_assertion(result.first, step.id),
+                        checks=checks,
+                    )
+
+        if block.token is not None:
+            tokens = [n.get('token') for n in delivered]
+            for index, token in enumerate(tokens):
+                result = evaluate_body(
+                    {'token': scope.substitute(block.token)},
+                    {'token': token},
+                    path=f'webhook.token[{index}]',
+                )
+                checks += result.checks
+                if not result.ok:
+                    return self._step(
+                        step, Outcome.FAIL, started,
+                        failure=FailureDetail.from_assertion(result.first, step.id),
+                        checks=checks,
+                    )
+
+        named = self._evaluate_named(step.assertions, scope, step_id=step.id)
+        if named is not None:
+            return self._step(
+                step, Outcome.FAIL, started, failure=named, checks=checks
+            )
+        return self._step(step, Outcome.PASS, started, checks=checks)
 
     async def _run_client_step(
         self, step: Step, scope: Scope, started: float
@@ -664,23 +836,101 @@ class Runner:
     async def _run_streaming_step(
         self, step: Step, scope: Scope, started: float
     ) -> StepResult:
-        """A streaming operation, or a raw request answered with a stream."""
+        """A streaming operation, or a raw request answered with a stream.
+
+        `expect_stream.streams` (§7.3) opens one stream per entry, at once and
+        all from the same request.
+        """
         if step.repeat is not None:
             return self._step(
                 step, Outcome.ERROR, started,
                 message='`repeat` cannot re-dispatch a streaming step',
             )
 
+        block = step.expect_stream
+        plans: tuple[StreamPlan | None, ...] = (
+            tuple(block.streams) if block is not None and block.streams else (None,)
+        )
+
         try:
-            source = self._stream_source(step, scope)
+            open_stream = self._stream_opener(step, scope)
         except (UnresolvedVariable, PathError) as exc:
             return self._step(step, Outcome.ERROR, started, message=str(exc))
 
-        try:
-            events, status, timed_out = await self._collect(source, step.expect_stream)
-        except StreamNotOpened as exc:
-            if step.expect_error is None:
-                raise
+        gathered = await asyncio.gather(
+            *(
+                self._collect(
+                    open_stream(), block,
+                    disconnect_after=None if plan is None else plan.disconnect_after,
+                )
+                for plan in plans
+            ),
+            # `False` would propagate the first exception while the other
+            # streams read on, leaking their connections for the rest of the run.
+            return_exceptions=True,
+        )
+
+        raised = next((r for r in gathered if isinstance(r, BaseException)), None)
+        if raised is not None:
+            return self._stream_refusal(step, scope, started, raised)
+
+        collected: list[tuple[list[StreamedEvent], int | None, bool]] = list(gathered)
+        for index, (events, _, timed_out) in enumerate(collected):
+            if timed_out and not _declared_timeout_ms(block):
+                # The bound was ours, not the test's, so we cannot say the SUT
+                # overran anything — only that this run could not finish
+                # reading. `error` keeps an arbitrary deadline from being
+                # published as a §7 violation, and still counts against `must`
+                # conformance, so a SUT that never closes a stream cannot be
+                # reported conformant either.
+                return self._step(
+                    step, Outcome.ERROR, started,
+                    message=(
+                        f'{_stream_label(index, len(plans))}still open after '
+                        f'{self.stream_timeout_ms}ms and the step declares no '
+                        f'`timeout_ms`; stopped reading at {len(events)} event(s)'
+                    ),
+                )
+
+        # The first stream stands for the step; `capture` alongside `streams`
+        # is rejected by the schema, so only an `assertion` step reads this.
+        payloads = [event.payload for event in collected[0][0]]
+        scope.record_response(step.id, payloads)
+        captured = self._capture(step, scope, payloads)
+        if captured is not None:
+            return self._step(step, Outcome.FAIL, started, message=captured)
+
+        result = AssertionResult()
+        for index, (plan, (events, status, timed_out)) in enumerate(
+            zip(plans, collected)
+        ):
+            one = AssertionResult()
+            if block is not None:
+                one += evaluate_stream(block, events, timed_out=timed_out)
+            elif step.expect_error is not None:
+                # The stream opened, so the error the step required did not
+                # happen.
+                one += _failed(
+                    f'expected an error, but the stream opened and produced '
+                    f'{len(events)} event(s)',
+                    'an error', f'{len(events)} event(s)',
+                )
+            if plan is not None:
+                one += evaluate_stream(plan, events)
+            one += self._evaluate_stream_status(step, scope, status, len(events))
+            result += one if len(plans) == 1 else _within_stream(one, index, plan)
+
+        return self._finish(step, scope, result, started, attempts=1)
+
+    def _stream_refusal(
+        self, step: Step, scope: Scope, started: float, exc: BaseException
+    ) -> StepResult:
+        """What a stream that never opened means for the step.
+
+        Only ever one stream's worth: a step cannot carry both `expect_stream`
+        (where `streams` lives) and `expect_error`.
+        """
+        if isinstance(exc, StreamNotOpened) and step.expect_error is not None:
             # Refusing to open the stream is the conformant answer to
             # `CORE-CAP-002` and `STREAM-SUB-003`, and the SUT said which error
             # it was in an ordinary error document. The dispatcher parsed it,
@@ -694,9 +944,8 @@ class Runner:
             if exc.response.error is not None:
                 result = _explain_unnamed(result, exc.response.error)
             return self._finish(step, scope, result, started, attempts=1)
-        except DispatchError as exc:
-            if step.expect_error is None:
-                raise
+
+        if isinstance(exc, DispatchError) and step.expect_error is not None:
             # The call failed without producing an error document — a dropped
             # connection, say. There is nothing to name, so an `expect_error`
             # asserting a specific `error_type` still fails, honestly.
@@ -705,49 +954,31 @@ class Runner:
             )
             return self._finish(step, scope, result, started, attempts=1)
 
-        if timed_out and not _declared_timeout_ms(step.expect_stream):
-            # The bound was ours, not the test's, so we cannot say the SUT
-            # overran anything — only that this run could not finish reading.
-            # `error` keeps an arbitrary deadline from being published as a §7
-            # violation, and still counts against `must` conformance, so a SUT
-            # that never closes a stream cannot be reported conformant either.
-            return self._step(
-                step, Outcome.ERROR, started,
-                message=(
-                    f'stream still open after {self.stream_timeout_ms}ms and the '
-                    f'step declares no `timeout_ms`; stopped reading at '
-                    f'{len(events)} event(s)'
-                ),
-            )
+        raise exc
 
-        scope.record_response(step.id, [event.payload for event in events])
-        captured = self._capture(step, scope, [event.payload for event in events])
-        if captured is not None:
-            return self._step(step, Outcome.FAIL, started, message=captured)
+    def _stream_opener(
+        self, step: Step, scope: Scope
+    ) -> Callable[[], AsyncIterator[StreamEvent]]:
+        """A thunk that opens one more stream for this step, on demand.
 
-        result = AssertionResult()
-        if step.expect_stream is not None:
-            result += evaluate_stream(step.expect_stream, events, timed_out=timed_out)
-        elif step.expect_error is not None:
-            # The stream opened, so the error the step required did not happen.
-            result += _failed(
-                f'expected an error, but the stream opened and produced '
-                f'{len(events)} event(s)',
-                'an error', f'{len(events)} event(s)',
-            )
-        result += self._evaluate_stream_status(step, scope, status, len(events))
-        return self._finish(step, scope, result, started, attempts=1)
-
-    def _stream_source(self, step: Step, scope: Scope) -> AsyncIterator[StreamEvent]:
+        Resolved once, so an unresolved variable is reported before any
+        connection is made and every stream of a set sends identical bytes —
+        down to the `messageId` `_prepare_params` generates.
+        """
         if step.kind() is StepKind.RAW:
             raw: RawBlock = _resolved(step.raw, scope)
-            return self.dispatcher.stream_raw(raw, self._raw_headers())
-        return self.dispatcher.stream(
-            step.operation, self._prepare_params(step, scope), self._headers()
-        )
+            headers = self._raw_headers()
+            return lambda: self.dispatcher.stream_raw(raw, headers)
+        params = self._prepare_params(step, scope)
+        headers = self._headers()
+        return lambda: self.dispatcher.stream(step.operation, params, headers)
 
     async def _collect(
-        self, source: AsyncIterator[StreamEvent], expect: Any | None
+        self,
+        source: AsyncIterator[StreamEvent],
+        expect: Any | None,
+        *,
+        disconnect_after: int | None = None,
     ) -> tuple[list[StreamedEvent], int | None, bool]:
         """Read a stream into a list, bounded by `timeout_ms` and `max_count`.
 
@@ -759,12 +990,16 @@ class Runner:
         default the *other* can stand in for — `max_count` cuts a stream short
         only if events keep arriving, and a SUT that opens a stream and then
         goes quiet sends none.
+
+        ``disconnect_after`` is a third bound, and the only deliberate one.
         """
         events: list[StreamedEvent] = []
         status: int | None = None
         # `expect` is absent when a streaming operation asserts only that the
         # call fails — `STREAM-SUB-003` subscribes to a terminal task.
         limit = None if expect is None or expect.max_count is None else expect.max_count + 1
+        if disconnect_after is not None:
+            limit = disconnect_after if limit is None else min(limit, disconnect_after)
 
         async def pump() -> None:
             nonlocal status
@@ -776,11 +1011,13 @@ class Runner:
                     break
 
         deadline = _declared_timeout_ms(expect) or self.stream_timeout_ms
+        timed_out = False
         try:
             await asyncio.wait_for(pump(), deadline / 1000)
         except (asyncio.TimeoutError, TimeoutError):
-            return events, status, True
-        return events, status, False
+            timed_out = True
+        await _hang_up(source, required=disconnect_after is not None)
+        return events, status, timed_out
 
     def _evaluate_stream_status(
         self, step: Step, scope: Scope, status: int | None, count: int

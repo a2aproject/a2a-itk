@@ -1132,6 +1132,253 @@ class TestStreamingSteps:
         assert 'text/event-stream' in result.failure.message
 
 
+class StreamRecorder(Dispatcher):
+    """Reports how its streams were *used*, not only what they carried.
+
+    Concurrency and disconnection are facts about the connections; a
+    dispatcher handing back a list of events shows neither.
+
+    The streams rendezvous at a barrier before sending anything, so a runner
+    that opens them one at a time leaves the first waiting alone and sets
+    `serialized` — a failure in a second rather than a hang.
+    """
+
+    binding = TransportBinding.JSONRPC
+
+    def __init__(self, events: list[Any], *, concurrent: int = 1) -> None:
+        self._events = events
+        self._concurrent = concurrent
+        self._barrier: asyncio.Barrier | None = None
+        self.serialized = False
+        self.requests: list[tuple[Operation, Mapping[str, Any]]] = []
+        #: Events actually handed over, per stream, in the order they opened.
+        self.delivered: list[int] = []
+        #: Indices of streams the runner hung up on.
+        self.hung_up: list[int] = []
+        #: `delivered`, as it stood the moment each hang-up arrived. *When* is
+        #: the whole question: an abandoned generator is closed too, but not
+        #: until the loop shuts down and every other stream has finished.
+        self.hung_up_at: list[list[int]] = []
+
+    async def stream(self, operation, params=None, headers=None):
+        index = len(self.requests)
+        self.requests.append((operation, dict(params or {})))
+        self.delivered.append(0)
+
+        if self._concurrent > 1:
+            if self._barrier is None:
+                self._barrier = asyncio.Barrier(self._concurrent)
+            try:
+                await asyncio.wait_for(self._barrier.wait(), 1.0)
+            except (asyncio.TimeoutError, TimeoutError):
+                self.serialized = True
+
+        try:
+            for position, data in enumerate(self._events):
+                # Before the yield: a hang-up never resumes the generator, so
+                # counting after it would record the cut stream as sent nothing.
+                self.delivered[index] += 1
+                yield StreamEvent(index=position, data=data, status=200)
+                # Let the other streams run, so a hang-up on one is observed
+                # while the rest are still being read.
+                await asyncio.sleep(0)
+        except GeneratorExit:
+            self.hung_up.append(index)
+            self.hung_up_at.append(list(self.delivered))
+            raise
+
+    async def dispatch(self, operation, params=None, headers=None):
+        return WireResponse(status=200, payload={})
+
+    async def dispatch_raw(self, raw, headers=None):
+        return WireResponse(status=200, payload={})
+
+    async def stream_raw(self, raw, headers=None):
+        raise UnsupportedByBinding('not used')
+        yield  # pragma: no cover - makes this a generator
+
+
+class TestConcurrentStreams:
+    """`expect_stream.streams` — ACTS §7.3, `concurrent_streams`."""
+
+    def subscribe(self, **kwargs):
+        return Step(
+            id='subscribe',
+            operation=Operation.SUBSCRIBE_TO_TASK,
+            params={'id': 'T1'},
+            **kwargs,
+        )
+
+    def a_concurrent_test(self, *steps):
+        return a_test(*steps, runner_requirements=['concurrent_streams'])
+
+    def capable(self, dispatcher):
+        return runner_for(dispatcher, capabilities=[
+            RunnerRequirement.CONCURRENT_STREAMS, RunnerRequirement.STREAM_DISCONNECT,
+        ])
+
+    def test_both_streams_are_open_at_the_same_time(self):
+        """The claim `STREAM-MULTI-001` makes, and the one no single stream
+        can make however many events it collects."""
+        dispatcher = StreamRecorder(
+            [status_update('TASK_STATE_COMPLETED')], concurrent=2
+        )
+        step = self.subscribe(expect_stream={
+            'min_count': 1, 'streams': [{}, {}],
+        })
+        result = run(self.capable(dispatcher), self.a_concurrent_test(step))
+        assert not dispatcher.serialized
+        assert len(dispatcher.requests) == 2
+        assert result.result is Outcome.PASS
+
+    def test_every_stream_sends_the_identical_request(self):
+        """Rebuilding the params per stream would give each its own generated
+        `messageId` — on `send_streaming_message`, a different task apiece."""
+        dispatcher = StreamRecorder(
+            [status_update('TASK_STATE_COMPLETED')], concurrent=2
+        )
+        step = Step(
+            id='stream',
+            operation=Operation.SEND_STREAMING_MESSAGE,
+            params={'message': {'role': 'ROLE_USER'}},
+            expect_stream={'min_count': 1, 'streams': [{}, {}]},
+        )
+        run(self.capable(dispatcher), self.a_concurrent_test(step))
+        first, second = dispatcher.requests
+        assert first == second
+
+    def test_the_shared_block_is_asserted_against_every_stream(self):
+        dispatcher = StreamRecorder([status_update('TASK_STATE_WORKING')], concurrent=2)
+        step = self.subscribe(expect_stream={'min_count': 2, 'streams': [{}, {}]})
+        result = run(self.capable(dispatcher), self.a_concurrent_test(step))
+        assert result.result is Outcome.FAIL
+        assert 'at least 2' in result.failure.message
+
+    def test_a_per_stream_assertion_only_binds_its_own_stream(self):
+        dispatcher = StreamRecorder([status_update('TASK_STATE_WORKING')], concurrent=2)
+        step = self.subscribe(expect_stream={'streams': [
+            {'description': 'lenient', 'min_count': 1},
+            {'description': 'strict', 'min_count': 9},
+        ]})
+        result = run(self.capable(dispatcher), self.a_concurrent_test(step))
+        assert result.result is Outcome.FAIL
+        assert 'at least 9' in result.failure.message
+
+    def test_a_failure_names_the_stream_that_produced_it(self):
+        """The members of a set are not interchangeable, so "got 1" has to
+        say which."""
+        dispatcher = StreamRecorder([status_update('TASK_STATE_WORKING')], concurrent=2)
+        step = self.subscribe(expect_stream={'streams': [
+            {'description': 'the lenient one', 'min_count': 1},
+            {'description': 'the strict one', 'min_count': 9},
+        ]})
+        result = run(self.capable(dispatcher), self.a_concurrent_test(step))
+        assert result.failure.message.startswith('the strict one: ')
+        assert result.failure.assertion_path.startswith('streams[1].')
+
+    def test_one_stream_reads_exactly_as_it_did_before_streams_existed(self):
+        """A single stream must not start reporting itself as `streams[0]`."""
+        dispatcher = StreamRecorder([status_update('TASK_STATE_WORKING')])
+        step = self.subscribe(expect_stream={'min_count': 4})
+        result = run(self.capable(dispatcher), a_test(step))
+        assert result.failure.message == 'expected at least 4 event(s), got 1'
+
+
+class TestStreamDisconnect:
+    """`disconnect_after` — ACTS §7.3, `stream_disconnect`."""
+
+    def subscribe(self, step_id='subscribe', **kwargs):
+        return Step(
+            id=step_id,
+            operation=Operation.SUBSCRIBE_TO_TASK,
+            params={'id': 'T1'},
+            **kwargs,
+        )
+
+    def capable(self, dispatcher):
+        return runner_for(dispatcher, capabilities=[
+            RunnerRequirement.CONCURRENT_STREAMS, RunnerRequirement.STREAM_DISCONNECT,
+        ])
+
+    def test_reading_stops_at_the_declared_event(self):
+        dispatcher = StreamRecorder([status_update('TASK_STATE_WORKING')] * 20)
+        step = self.subscribe(expect_stream={
+            'min_count': 1, 'streams': [{'disconnect_after': 1}],
+        })
+        test = a_test(step, runner_requirements=['stream_disconnect'])
+        assert run(self.capable(dispatcher), test).result is Outcome.PASS
+        assert dispatcher.delivered == [1]
+
+    def test_a_stream_read_to_the_end_is_not_reported_as_hung_up(self):
+        dispatcher = StreamRecorder([status_update('TASK_STATE_COMPLETED')])
+        step = self.subscribe(expect_stream={'min_count': 1})
+        run(self.capable(dispatcher), a_test(step))
+        assert dispatcher.hung_up == []
+
+    def test_hanging_up_on_one_stream_leaves_the_others_reading(self):
+        """`STREAM-MULTI-002`, in miniature.
+
+        `hung_up_at` is the load-bearing assertion, and why this test is
+        concurrent: closure *eventually* proves nothing, since
+        `shutdown_asyncgens` closes an abandoned generator too. Only a real
+        hang-up lands while the other stream is mid-flight — `[1, 1]`, not
+        `[1, 4]`.
+        """
+        events = [status_update('TASK_STATE_WORKING')] * 3 + [
+            status_update('TASK_STATE_COMPLETED')
+        ]
+        dispatcher = StreamRecorder(events, concurrent=2)
+        step = self.subscribe(expect_stream={
+            'min_count': 1,
+            'streams': [
+                {'description': 'hangs up', 'disconnect_after': 1},
+                {
+                    'description': 'stays',
+                    'final_event': {'status': {'state': 'TASK_STATE_COMPLETED'}},
+                },
+            ],
+        })
+        test = a_test(
+            step, runner_requirements=['concurrent_streams', 'stream_disconnect']
+        )
+        result = run(self.capable(dispatcher), test)
+        assert result.result is Outcome.PASS
+        assert dispatcher.delivered == [1, 4]
+        assert dispatcher.hung_up_at == [[1, 1]]
+
+    def test_a_disconnect_needs_a_stream_that_can_be_closed(self):
+        """Rather than silently reading `disconnect_after` events and calling
+        that a disconnect."""
+        dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_WORKING')] * 5)
+
+        def uncloseable(*args, **kwargs):
+            async def once():
+                yield StreamEvent(index=0, data=status_update('TASK_STATE_WORKING'))
+
+            class Iterator:
+                def __init__(self) -> None:
+                    self._inner = once()
+
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    return await self._inner.__anext__()
+
+            return Iterator()
+
+        dispatcher.stream = uncloseable
+        step = self.subscribe(expect_stream={
+            'min_count': 1, 'streams': [{'disconnect_after': 1}],
+        })
+        result = run(
+            self.capable(dispatcher),
+            a_test(step, runner_requirements=['stream_disconnect']),
+        )
+        assert result.result is Outcome.ERROR
+        assert 'cannot disconnect mid-stream' in result.failure.message
+
+
 class TestClientSteps:
     """ACTS §10, delivered through the `tck-client-parse` behaviour."""
 
@@ -1314,3 +1561,92 @@ class TestAgainstTheCorpus:
         results = self._run_all(suite, TransportBinding.JSONRPC)
         assert not is_conformant(results)
         assert any(r.result is Outcome.FAIL for r in results)
+
+
+class TestWebhookSteps:
+    """Assertions over what the SUT pushed, not over a reply to the runner.
+
+    Five tests used to register a push config and assert nothing about
+    delivery, so an SDK that stored the config and never called back passed
+    two MUSTs. `expect_webhook` is what closes that, and these are the checks
+    that it can actually fail.
+    """
+
+    def a_webhook_test(self, **block):
+        block.setdefault('task_id', 'T1')
+        return a_test(Step(id='delivered', expect_webhook=block))
+
+    def receiver(self, notifications):
+        async def read(task_id):
+            assert task_id == 'T1'
+            return notifications
+        return read
+
+    def test_a_delivery_that_arrived_passes(self):
+        runner = runner_for(
+            FakeDispatcher(),
+            read_webhook=self.receiver([{'event': {'task': {'id': 'T1'}}}]),
+        )
+        result = run(runner, self.a_webhook_test(each_event={'task': {'id': 'T1'}}))
+        assert result.result is Outcome.PASS
+
+    def test_no_delivery_fails_and_says_how_many_arrived(self):
+        """The whole point: silence has to be a failure, not a pass."""
+        runner = runner_for(FakeDispatcher(), read_webhook=self.receiver([]))
+        result = run(runner, self.a_webhook_test(timeout_ms=0))
+        assert result.result is Outcome.FAIL
+        assert 'delivered 0 notification' in result.failure.message
+        assert result.failure.assertion_path == 'webhook.min_count'
+
+    def test_a_wrong_payload_fails_and_locates_itself(self):
+        runner = runner_for(
+            FakeDispatcher(),
+            read_webhook=self.receiver([{'event': {'task': {'id': 'OTHER'}}}]),
+        )
+        result = run(runner, self.a_webhook_test(each_event={'task': {'id': 'T1'}}))
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'webhook.each_event[0].task.id'
+
+    def test_a_missing_credential_header_fails(self):
+        """A2A §4.3.3 makes the `authentication` credentials a MUST on the
+        push request, and an anonymous delivery is what SEC-PUSH-001 exists
+        to catch."""
+        runner = runner_for(
+            FakeDispatcher(),
+            read_webhook=self.receiver([{'event': {'task': {}}, 'headers': {}}]),
+        )
+        result = run(runner, self.a_webhook_test(headers={'Authorization': 'Bearer t'}))
+        assert result.result is Outcome.FAIL
+        assert 'headers' in result.failure.assertion_path
+
+    def test_the_credential_header_passes_and_folds_case(self):
+        """HTTP header names are case-insensitive, and the receiver
+        lowercases what it captured."""
+        runner = runner_for(
+            FakeDispatcher(),
+            read_webhook=self.receiver([
+                {'event': {'task': {}}, 'headers': {'authorization': 'Bearer t'}},
+            ]),
+        )
+        result = run(runner, self.a_webhook_test(headers={'Authorization': 'Bearer t'}))
+        assert result.result is Outcome.PASS
+
+    def test_the_token_header_is_available_but_unasserted_by_the_corpus(self):
+        """A2A defines `PushNotificationConfig.token` but no header to carry
+        it: a2a-python always sends `X-A2A-Notification-Token`, a2a-js sends
+        it only when `authentication` is absent, and neither is wrong. The
+        assertion stays available for a runner that knows its SUT's
+        convention; no corpus test may require it."""
+        runner = runner_for(
+            FakeDispatcher(),
+            read_webhook=self.receiver([{'event': {'task': {}}, 'token': 'expected'}]),
+        )
+        assert run(runner, self.a_webhook_test(token='expected')).result is Outcome.PASS
+
+    def test_without_a_receiver_the_run_errors_rather_than_blaming_the_sut(self):
+        """A missing receiver is the runner's gap. `webhook_endpoint` is what
+        keeps such a test from reaching here, and if one does the verdict must
+        not read as a SUT defect."""
+        result = run(runner_for(FakeDispatcher()), self.a_webhook_test())
+        assert result.result is Outcome.ERROR
+        assert 'webhook_endpoint' in (result.failure.message or '')

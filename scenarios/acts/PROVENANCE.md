@@ -3,7 +3,7 @@
 The `*.acts.yaml` files in this directory are a **byte-identical mirror** of
 `tests/acts/*.acts.yaml` in the A2A repository:
 
-    a2aproject/A2A @ 7bae1d8f46c1d7e94e94ffe46b1237460111a4ec
+    a2aproject/A2A @ 82c277f342a2fd7ea47548e2de94f97ea578a7ed
     branch: conformance-spec-adjustments
 
 - [#2227](https://github.com/a2aproject/A2A/pull/2227) — the commit above, which
@@ -32,7 +32,7 @@ arrive here as a copy.
 4. Verify against the commit, from the repo root:
 
    ```bash
-   SHA=7bae1d8
+   SHA=82c277f342a2fd7ea47548e2de94f97ea578a7ed
    for f in scenarios/acts/*.acts.yaml; do
      git -C ../A2A show "$SHA:tests/acts/$(basename "$f")" \
        | cmp -s - "$f" || echo "DRIFT: $f"

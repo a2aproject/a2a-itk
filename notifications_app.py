@@ -15,6 +15,7 @@ class Notification(BaseModel):
 
     event: dict[str, Any]
     token: str | None = None
+    headers: dict[str, str] = {}
 
 
 def _extract_task_id_v10(data: dict) -> str | None:
@@ -110,6 +111,7 @@ def create_notifications_app() -> FastAPI:
                 Notification(
                     event=event_to_store,
                     token=token,
+                    headers={k.lower(): v for k, v in request.headers.items()},
                 )
             )
         return {
