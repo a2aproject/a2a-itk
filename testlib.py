@@ -464,11 +464,14 @@ async def _execute_single_itk_test(  # noqa: PLR0913
 
         base_uri = agents.card_uri(first_sdk)
         target_url = f'{base_uri.rstrip("/")}/jsonrpc'
-        is_go_env = os.path.exists('/app/agents/repo/itk/go.mod') or os.path.exists(
-            'agents/repo/itk/go.mod'
+        from test_suite.launcher import config as itk_config
+
+        mount = itk_config.mount_dir()
+        is_go_env = (mount / 'go.mod').is_file() or os.path.exists(
+            '/app/agents/repo/itk/go.mod'
         )
-        is_rust_env = os.path.exists('/app/agents/repo/itk/Cargo.toml') or os.path.exists(
-            'agents/repo/itk/Cargo.toml'
+        is_rust_env = (mount / 'Cargo.toml').is_file() or os.path.exists(
+            '/app/agents/repo/itk/Cargo.toml'
         )
         if (
             'go' in first_sdk
@@ -547,6 +550,21 @@ async def _execute_single_itk_test(  # noqa: PLR0913
     finally:
         if notif_server_process and notif_port:
             logger.info('Stopping notification server for test %s', label)
+            notif_server_process.terminate()
+            try:
+                notif_server_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                notif_server_process.kill()
+                notif_server_process.wait(timeout=5)
+            if getattr(notif_server_process, 'stdout', None) not in (
+                None,
+                subprocess.PIPE,
+                subprocess.DEVNULL,
+            ):
+                try:
+                    notif_server_process.stdout.close()
+                except Exception:
+                    pass
             _clean_ports(notif_port)
 
     return test_result
@@ -566,15 +584,19 @@ async def execute_itk_test(  # noqa: PLR0913
     label = scenario_name or 'euler'
 
     if not build_subtests:
-        res = await _execute_single_itk_test(
-            sdks=sdks,
-            behavior=behavior,
-            agents=agents,
-            edges=edges,
-            scenario_name=label,
-            protocols=protocols,
-            streaming=streaming,
-        )
+        try:
+            res = await _execute_single_itk_test(
+                sdks=sdks,
+                behavior=behavior,
+                agents=agents,
+                edges=edges,
+                scenario_name=label,
+                protocols=protocols,
+                streaming=streaming,
+            )
+        except Exception as e:
+            logger.exception('Test %s failed with exception: %s', label, e)
+            res = False
         return {label: {'passed': res, 'sdks': sdks, 'edges': edges}}
 
     from test_suite import _get_valid_subgraphs

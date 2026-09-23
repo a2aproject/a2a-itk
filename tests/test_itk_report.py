@@ -17,6 +17,7 @@ from scripts.itk_report import (
     format_report,
     main,
     scenario_passed,
+    startup_lines,
     validate,
 )
 
@@ -120,6 +121,72 @@ class TestFormatReport:
         )
         _, all_passed = format_report(data, 'T')
         assert all_passed is False
+
+
+# ---------------------------------------------------------------------------
+# Dropped-peer (startup) section
+# ---------------------------------------------------------------------------
+
+
+class TestStartupSection:
+    _STARTUP = {
+        'dropped_peers': {'python_v10': 'build: uv sync --locked failed'},
+        'trimmed': [{'name': 'trio', 'dropped': ['python_v10']}],
+        'skipped': [{'name': 'pair', 'missing': ['python_v10']}],
+    }
+
+    def test_no_section_without_startup(self):
+        assert startup_lines(None) == []
+        assert startup_lines({'dropped_peers': {}}) == []
+
+    def test_lists_dropped_trimmed_and_skipped(self):
+        text = '\n'.join(startup_lines(self._STARTUP))
+        assert 'python_v10: build: uv sync --locked failed' in text
+        assert 'trio (without python_v10)' in text
+        assert 'pair (needs python_v10)' in text
+
+    def test_dropped_peer_does_not_change_a_passing_verdict(self):
+        """A peer that failed to start is reported, but the run is still green
+        on the scenarios that ran — the drop must not flip OVERALL STATUS."""
+        data = _response({'trio': {'passed': True, 'sdks': ['current', 'go_v10']}})
+        data['startup'] = self._STARTUP
+        report, all_passed = format_report(data, 'T')
+        assert all_passed is True
+        assert 'OVERALL STATUS: PASSED' in report
+        assert 'PEERS DROPPED' in report
+        assert 'python_v10' in report
+
+    def test_total_cluster_failure_banner(self):
+        """A total startup failure prints the reason plainly instead of the
+        per-peer breakdown."""
+        lines = startup_lines({
+            'dropped_peers': {'current': 'build: uv sync --locked failed'},
+            'cluster_error': "Cluster startup failed (the code under test "
+                             "('current') failed to start): current: build: ...",
+        })
+        text = '\n'.join(lines)
+        assert 'CLUSTER STARTUP FAILED' in text
+        assert 'code under test' in text
+        assert 'recorded as FAILED' in text
+        # The per-peer 'PEERS DROPPED' block is superseded by the banner.
+        assert 'PEERS DROPPED' not in text
+
+    def test_cluster_failure_run_is_failed_and_recordable(self):
+        """The all-failed placeholders make the verdict red (so the PR fails)
+        while remaining a non-empty, recordable result set (so the nightly
+        history gets an entry rather than a gap)."""
+        data = _response(
+            {'t': {'passed': False, 'sdks': ['current', 'python_v10']}},
+            all_passed=False,
+        )
+        data['startup'] = {
+            'dropped_peers': {'current': 'build: boom'},
+            'cluster_error': 'Cluster startup failed: current: build: boom',
+        }
+        report, all_passed = format_report(data, 'NIGHTLY ITK SUMMARY')
+        assert all_passed is False
+        assert 't: FAILED' in report
+        assert 'CLUSTER STARTUP FAILED' in report
 
 
 # ---------------------------------------------------------------------------

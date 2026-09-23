@@ -93,7 +93,7 @@ Within these transport scenarios, the following A2A features can be tested:
 - `test_suite/scenarios/`: The scenario schemas, and the resolver that binds a role-based scenario to concrete agents via `matrix.yaml`.
 - `test_suite/`: The Eulerian traversal logic that turns a scenario into a nested instruction.
 - `scenarios/`: The shared scenario sets — `traversal/pr.yaml`, `traversal/nightly.yaml`, and `traversal/smoke.yaml`, plus the legacy `smoke.json` kept as a compatibility pin.
-- `dashboard/`: Static web assets (HTML, JS, CSS) for rendering compatibility matrix test results.
+- `dashboard/`: Single-page app that renders the compatibility matrix test results; built to static files and published to GitHub Pages.
 - `scripts/`: Auxiliary utilities — the shared `run_itk.sh` driver, result reporting, nightly metrics, and the scenario coverage diff. See [`scripts/README.md`](scripts/README.md).
 - `itk_runner.py`: The scenario execution pipeline — plan, start a cluster, run, tear down. Shared by both front ends below.
 - `itk_service_v2.py`: HTTP `/run` handler, for CI. A thin wrapper over `itk_runner`.
@@ -337,6 +337,7 @@ When integrating automated nightly matrix runs for a newly onboarded language li
 
 1. Ensure the new SDK's nightly continuous integration workflow publishes its final output JSON artifacts to a rolling release tag named `nightly-metrics`.
 2. Modify the automated dashboard deployment workflow within this repository ([.github/workflows/deploy_dashboard.yml](https://github.com/a2aproject/a2a-itk/blob/main/.github/workflows/deploy_dashboard.yml)) to fetch the metric payload from the new target SDK's release space alongside existing baseline configurations.
+3. Add the SDK to [`dashboard/src/shared/sdks.ts`](dashboard/src/shared/sdks.ts) and add its metrics artifacts to [`dashboard/scripts/fetch-metrics.sh`](dashboard/scripts/fetch-metrics.sh).
 
 ---
 
@@ -358,3 +359,12 @@ Incorporate traversal test strategies evaluating additional native client API co
 - [ ] `get_task` / `list_tasks`
 - [ ] `create_task_push_notification_config` / `delete_task_push_notification_config`
 - [ ] `get_extended_agent_card`
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please see the [CONTRIBUTING.md](CONTRIBUTING.md) file for guidelines on how to get involved.
+
+## 📄 License
+
+This project is licensed under the Apache 2.0 License. See the [LICENSE](LICENSE) file for more details.

@@ -7,9 +7,11 @@ Layout under :func:`test_suite.launcher.config.cache_root`::
     locks/<key>.lock        per-key flock; build AND evict take it
     pins/<key>/<pid>        one file per live run holding the tree
 
-Cache key = ``slug(repo)@sha@image_digest``. SHA immutable so cross-run hits
-are correct; ``image_digest`` folded in so a Dockerfile bump busts every key
-(exactly what you want when Go/Rust get upgraded in the fat image).
+Cache key = ``slug(repo)@sha@image_digest@proto_digest``. SHA immutable so
+cross-run hits are correct; ``image_digest`` folded in so a Dockerfile bump
+busts every key (exactly what you want when Go/Rust get upgraded in the fat
+image); ``proto_digest`` folded in so an ``instruction.proto`` change
+regenerates stubs even when the image is unchanged.
 
 Concurrency invariants:
 
@@ -61,8 +63,8 @@ def _slug(repo: str) -> str:
 
 
 def cache_key(repo: str, sha: str) -> str:
-    """Cache key including the current image digest."""
-    return f'{_slug(repo)}@{sha}@{config.image_digest()}'
+    """Cache key including the current image and proto digests."""
+    return f'{_slug(repo)}@{sha}@{config.image_digest()}@{config.proto_digest()}'
 
 
 def _root() -> Path:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from test_suite.launcher import cache
+from test_suite.launcher import cache, config
 from test_suite.launcher.errors import InfraFailure, PermanentError, Stage
 
 
@@ -39,7 +39,25 @@ class TestKeys:
 
     def test_slug_shape(self, cache_dir):  # noqa: ARG002
         k = cache.cache_key(_REPO, _SHA_A)
-        assert k == 'a2aproject_a2a-python@' + _SHA_A + '@test-digest'
+        assert k == (
+            'a2aproject_a2a-python@'
+            + _SHA_A
+            + '@test-digest@'
+            + config.proto_digest()
+        )
+
+    def test_key_includes_proto_digest(self, cache_dir, tmp_path, monkeypatch):  # noqa: ARG002
+        proto = tmp_path / 'protos' / 'instruction.proto'
+        proto.parent.mkdir()
+        proto.write_text('syntax = "proto3"; message A {}\n', encoding='utf-8')
+        monkeypatch.setattr(config, '_repo_root', lambda: tmp_path)
+        k1 = cache.cache_key(_REPO, _SHA_A)
+        proto.write_text(
+            'syntax = "proto3"; message A { string extra = 1; }\n',
+            encoding='utf-8',
+        )
+        k2 = cache.cache_key(_REPO, _SHA_A)
+        assert k1 != k2, 'proto content change must bust the key'
 
 
 class TestCheckoutAndBuild:
@@ -98,6 +116,30 @@ class TestCheckoutAndBuild:
         cache.checkout_and_build(_REPO, _SHA_A, _fetcher=fetch, _builder=_fake_build_ok)
         cache.release(_REPO, _SHA_A)
         assert n['n'] == 2, 'digest change must refetch'
+
+    def test_proto_digest_bust(self, cache_dir, tmp_path, monkeypatch):  # noqa: ARG002
+        proto = tmp_path / 'protos' / 'instruction.proto'
+        proto.parent.mkdir()
+        proto.write_text(
+            'syntax = "proto3"; message Instruction {}\n',
+            encoding='utf-8',
+        )
+        monkeypatch.setattr(config, '_repo_root', lambda: tmp_path)
+        n = {'n': 0}
+
+        def fetch(repo, sha, dst):
+            n['n'] += 1
+            _fake_fetch_ok(repo, sha, dst)
+
+        cache.checkout_and_build(_REPO, _SHA_A, _fetcher=fetch, _builder=_fake_build_ok)
+        cache.release(_REPO, _SHA_A)
+        proto.write_text(
+            'syntax = "proto3"; message Instruction { string extra = 1; }\n',
+            encoding='utf-8',
+        )
+        cache.checkout_and_build(_REPO, _SHA_A, _fetcher=fetch, _builder=_fake_build_ok)
+        cache.release(_REPO, _SHA_A)
+        assert n['n'] == 2, 'proto change must refetch'
 
 
 class TestFailureCleanup:

@@ -35,6 +35,12 @@ def spawn_from_dir(
 ) -> subprocess.Popen:
     """Detect the agent's language and spawn it.
 
+    Detection is first-match against the markers below, so a directory must
+    carry the marker for the language it is actually written in. Dropping a
+    foreign marker in to influence how the agent starts (a ``main.py`` next to
+    a ``.csproj``, say) silently reroutes it through the wrong spawner and
+    breaks the guarantee in the module docstring.
+
     Args:
         agent_dir: The directory that contains the agent's entrypoint
             (``main.py``, ``main.go``, ``Cargo.toml``, ...).
@@ -82,9 +88,9 @@ def spawn_from_dir(
     if (agent_dir.parent / 'package.json').exists():
         return _spawn_ts(agent_dir, http_port, grpc_port, popen)
 
-    csproj = list(agent_dir.glob('*.csproj'))
-    if csproj:
-        return _spawn_dotnet(agent_dir, csproj[0], http_port, grpc_port, popen)
+    csproj = dotnet_csproj(agent_dir)
+    if csproj is not None:
+        return _spawn_dotnet(agent_dir, csproj, http_port, grpc_port, popen)
 
     if (agent_dir / 'pom.xml').exists():
         return _spawn_java(agent_dir, http_port, grpc_port, popen)
@@ -111,7 +117,7 @@ def _spawn_go(
 ) -> subprocess.Popen:
     # -mod=readonly: never mutate go.mod/go.sum; fail loudly on drift.
     args = [  # noqa: S607
-        'go', 'run', '-mod=readonly', 'main.go',
+        'go', 'run', '-mod=readonly', '.',
         '--httpPort', str(http_port),
         '--grpcPort', str(grpc_port),
     ]
@@ -143,6 +149,37 @@ def _spawn_ts(
     return popen(args, agent_dir)
 
 
+def dotnet_csproj(agent_dir: Path) -> Path | None:
+    """The project the build phase and spawn must both pick.
+
+    ``sorted`` rather than raw glob order: the two callers run at different
+    times, and on different machines for a cached tree, so filesystem order
+    is not a stable tiebreak. If they disagreed when a dir holds more than
+    one project, the build would publish one assembly and spawn would look
+    for the other — then republish inside the readiness window.
+    """
+    return next(iter(sorted(agent_dir.glob('*.csproj'))), None)
+
+
+def dotnet_publish_args(csproj: Path, publish_dir: Path) -> list[str]:
+    """The one publish recipe, shared by the build phase and spawn.
+
+    :func:`test_suite.launcher.builders._build_dotnet` runs it for a fetched
+    peer, inside the build budget and the cached tree; spawn runs it only if
+    nothing published the agent first, which is the SUT's case (a bind mount
+    never goes through the build phase).
+    """
+    return [
+        'dotnet', 'publish', str(csproj),
+        '-c', 'Release', '-o', str(publish_dir),
+    ]
+
+
+def dotnet_publish_dll(agent_dir: Path, csproj: Path) -> Path:
+    """Where the published entry assembly is expected to land."""
+    return agent_dir / 'publish' / f'{csproj.stem}.dll'
+
+
 def _spawn_dotnet(
     agent_dir: Path,
     csproj: Path,
@@ -150,8 +187,34 @@ def _spawn_dotnet(
     grpc_port: int,
     popen: _PopenFactory,
 ) -> subprocess.Popen:
+    """Exec the published DLL — never ``dotnet run``.
+
+    ``dotnet run`` restores and builds on every start, inside the readiness
+    window rather than the build one, and it defaults to Debug so it cannot
+    reuse a Release publish. Publishing first and exec'ing the result mirrors
+    what :func:`_spawn_rust` does with ``cargo build``.
+
+    Normally the build phase has already published and this is a bare exec.
+    The fallback covers the SUT, which is bind-mounted and so never built,
+    and anyone driving ``spawn_from_dir`` directly.
+    """
+    dll = dotnet_publish_dll(agent_dir, csproj)
+
+    if not dll.exists():
+        subprocess.run(  # noqa: S603
+            dotnet_publish_args(csproj, dll.parent),
+            cwd=str(agent_dir),
+            check=True,
+        )
+        if not dll.exists():
+            raise RuntimeError(
+                f'dotnet publish succeeded but {dll.name} is not in '
+                f'{dll.parent}. Expected the assembly to be named after the '
+                f'project ({csproj.name}); set <AssemblyName> to match.'
+            )
+
     args = [  # noqa: S607
-        'dotnet', 'run', '--project', str(csproj), '--',
+        'dotnet', str(dll),
         '--httpPort', str(http_port),
         '--grpcPort', str(grpc_port),
     ]
@@ -164,18 +227,69 @@ def _spawn_java(
     # The java itk agent is a Maven submodule; the parent pom needs -Pitk to
     # include it. Synchronously install SDK sibling deps into the local repo,
     # then exec the mock main class from inside the module directory.
+    local_repo = maven_repo_dir(agent_dir)
     compile_args = [  # noqa: S607
         'mvn', '-Pitk', '-pl', 'itk', '-am', 'install',
         '-DskipTests', '-Dmaven.javadoc.skip=true',
+        f'-Dmaven.repo.local={local_repo}',
     ]
-    subprocess.run(compile_args, cwd=str(agent_dir.parent), check=True)  # noqa: S603
+    subprocess.run(  # noqa: S603
+        compile_args,
+        cwd=str(agent_dir.parent),
+        check=True,
+        timeout=int(os.environ.get('ITK_BUILD_TIMEOUT', str(10 * 60))),
+    )
 
     args = [  # noqa: S607
         'mvn', 'exec:java',
         '-Dexec.mainClass=org.a2aproject.sdk.itk.Main',
         f'-Dexec.args=--httpPort {http_port} --grpcPort {grpc_port}',
+        f'-Dmaven.repo.local={local_repo}',
     ]
     return popen(args, agent_dir)
+
+
+def maven_repo_dir(agent_dir: Path) -> Path:
+    """Writable Maven local repo isolated per resolved ``agent_dir``.
+
+    ``current`` and ``java_v10`` both install the same
+    ``1.3.1.Final-SNAPSHOT`` coordinates. Sharing ``~/.m2`` lets the last
+    ``mvn install`` win, so one JVM can exec the other's jars.
+    """
+    root = Path(
+        os.environ.get(
+            'ITK_MAVEN_CURRENT_REPO_DIR',
+            str(Path(gettempdir()) / 'itk-maven-repos'),
+        )
+    )
+    digest = hashlib.sha1(  # noqa: S324
+        str(agent_dir.resolve()).encode('utf-8')
+    ).hexdigest()
+    repo = root / digest
+    repo.mkdir(parents=True, exist_ok=True)
+    return repo
+
+
+def rust_target_dir(agent_dir: Path) -> Path:
+    """Writable ``CARGO_TARGET_DIR`` isolated per resolved ``agent_dir``.
+
+    Every rust ITK tree emits the same binary name
+    (``itk-rust-current-agent``). A shared target dir lets parallel
+    ``current`` and ``rust_v10`` builds overwrite each other, so
+    ``Cluster.start_all`` can exec the last-written binary twice.
+    """
+    root = Path(
+        os.environ.get(
+            'ITK_RUST_CURRENT_TARGET_DIR',
+            str(Path(gettempdir()) / 'itk-rust-targets'),
+        )
+    )
+    digest = hashlib.sha1(  # noqa: S324
+        str(agent_dir.resolve()).encode('utf-8')
+    ).hexdigest()
+    target = root / digest
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 def _spawn_rust(
@@ -184,19 +298,14 @@ def _spawn_rust(
     # Always build for current Rust agent so local source changes are used and
     # stale itk-* binaries from previous runs cannot mask regressions.
     build_env = os.environ.copy()
-    rust_target_root = Path(
-        build_env.get(
-            'ITK_RUST_CURRENT_TARGET_DIR',
-            str(Path(gettempdir()) / 'itk-rust-current-target'),
-        )
-    )
-    rust_target_root.mkdir(parents=True, exist_ok=True)
+    rust_target_root = rust_target_dir(agent_dir)
     build_env['CARGO_TARGET_DIR'] = str(rust_target_root)
     subprocess.run(  # noqa: S603
         ['cargo', 'build', '--locked', '--release'],  # noqa: S607
         cwd=str(agent_dir),
         env=build_env,
         check=True,
+        timeout=int(os.environ.get('ITK_BUILD_TIMEOUT', str(10 * 60))),
     )
     binary = _find_rust_binary(rust_target_root / 'release')
     if binary is None:
@@ -212,17 +321,21 @@ def _spawn_rust(
     return popen(args, agent_dir)
 
 
+def _is_runnable_rust_binary(path: Path) -> bool:
+    return path.is_file() and path.suffix != '.d' and os.access(path, os.X_OK)
+
+
 def _find_rust_binary(release_dir: Path) -> Path | None:
     if not release_dir.exists():
         return None
     current_named = release_dir / 'itk-rust-current-agent'
-    if current_named.exists():
+    if _is_runnable_rust_binary(current_named):
         return current_named
     canonical = release_dir / 'itk-current-agent'
-    if canonical.exists():
+    if _is_runnable_rust_binary(canonical):
         return canonical
     for candidate in sorted(release_dir.glob('itk-*')):
-        if candidate.is_file():
+        if _is_runnable_rust_binary(candidate):
             return candidate
     return None
 

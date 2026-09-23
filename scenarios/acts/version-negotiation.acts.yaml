@@ -1,0 +1,79 @@
+acts_version: "1.0"
+spec_version: "1.0"
+spec_ref: "docs/specification.md"
+
+metadata:
+  title: "Version Negotiation ACTS"
+  description: "ACTS tests for A2A-Version negotiation behavior over JSON-RPC."
+
+suites:
+  - id: version-negotiation
+    name: "Version Negotiation"
+    description: "Coverage for unsupported and omitted A2A-Version header handling."
+    tests:
+      - id: VER-NEG-001
+        name: "Unsupported A2A-Version returns VersionNotSupportedError"
+        description: "Verifies that a JSON-RPC request with an unsupported A2A-Version header is rejected."
+        spec_ref: "docs/specification.md"
+        level: must
+        transport: [jsonrpc]
+        steps:
+          - id: send-unsupported-version
+            raw:
+              method: POST
+              path: "/"
+              headers:
+                Content-Type: application/json
+                A2A-Version: "99.0"
+              body:
+                jsonrpc: "2.0"
+                id: "ver-neg-001"
+                method: SendMessage
+                params:
+                  message:
+                    messageId: "ver-neg-001-msg"
+                    role: ROLE_USER
+                    parts:
+                      - text: "version negotiation unsupported"
+            expect:
+              status: 200
+              body:
+                error:
+                  code: -32009
+                  message:
+                    type: string
+
+      - id: VER-NEG-002
+        name: "Missing A2A-Version is treated as 0.3"
+        description: >
+          An absent A2A-Version header means 0.3, never the version the interface
+          happens to serve. A 1.0 interface must therefore refuse the request rather
+          than process it as 1.0: either with VersionNotSupportedError, or, if it also
+          serves 0.3 at this URL, by not recognising a 1.0 method name.
+        spec_ref: "docs/specification.md"
+        level: should
+        transport: [jsonrpc]
+        requires_behaviors: []
+        steps:
+          - id: send-without-version
+            raw:
+              method: POST
+              path: "/"
+              headers:
+                Content-Type: application/json
+              body:
+                jsonrpc: "2.0"
+                id: "ver-neg-002"
+                method: SendMessage
+                params:
+                  message:
+                    messageId: "ver-neg-002-msg"
+                    role: ROLE_USER
+                    parts:
+                      - text: "version default"
+            expect:
+              status: 200
+              body:
+                error:
+                  code:
+                    one_of: [-32009, -32601]

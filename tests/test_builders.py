@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from test_suite.current import maven_repo_dir, rust_target_dir
 from test_suite.launcher import builders
 from test_suite.launcher.builders import Language, detect_language
 from test_suite.launcher.errors import InfraFailure, Stage
@@ -29,10 +30,12 @@ class _Recorder:
 
     def __init__(self, returncode: int = 0):
         self.calls: list[tuple[list[str], Path]] = []
+        self.envs: list[dict | None] = []
         self.returncode = returncode
 
-    def __call__(self, args, *_, cwd=None, **__):
+    def __call__(self, args, *_, cwd=None, env=None, **__):
         self.calls.append((list(args), Path(cwd) if cwd else Path.cwd()))
+        self.envs.append(env)
         return subprocess.CompletedProcess(args, self.returncode, stdout='', stderr='')
 
 
@@ -136,6 +139,7 @@ class TestJavaBuilder:
         assert rec.calls[0][0] == [
             'mvn', '-Pitk', '-pl', 'itk', '-am', 'install',
             '-DskipTests', '-Dmaven.javadoc.skip=true',
+            f'-Dmaven.repo.local={maven_repo_dir(tmp_path)}',
         ]
         # Maven must run from the *parent* — itk is a submodule of the SDK repo.
         assert rec.calls[0][1] == tmp_path.parent
@@ -147,14 +151,35 @@ class TestRustBuilder:
         builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert rec.calls[0][0] == ['cargo', 'build', '--locked', '--release']
         assert rec.calls[0][1] == tmp_path
+        assert rec.envs[0] is not None
+        assert rec.envs[0]['CARGO_TARGET_DIR'] == str(rust_target_dir(tmp_path))
 
     def test_rust_skip_if_binary_exists(self, tmp_path, rec):
         (tmp_path / 'Cargo.toml').touch()
-        rel = tmp_path / 'target' / 'release'
+        rel = rust_target_dir(tmp_path) / 'release'
         rel.mkdir(parents=True)
-        (rel / 'itk-something').write_text('x', encoding='utf-8')
+        binary = rel / 'itk-something'
+        binary.write_text('x', encoding='utf-8')
+        binary.chmod(0o755)
         builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert rec.calls == []
+
+    def test_rust_isolates_target_dir_per_agent(self, tmp_path, rec, monkeypatch):
+        target_root = tmp_path / 'targets'
+        monkeypatch.setenv('ITK_RUST_CURRENT_TARGET_DIR', str(target_root))
+        current_dir = tmp_path / 'current'
+        rust_v10 = tmp_path / 'rust_v10'
+        current_dir.mkdir()
+        rust_v10.mkdir()
+        (current_dir / 'Cargo.toml').touch()
+        (rust_v10 / 'Cargo.toml').touch()
+        builders.build_in_place('x/y', 'a' * 40, current_dir, skip_codegen=True)
+        builders.build_in_place('x/y', 'b' * 40, rust_v10, skip_codegen=True)
+        env_current, env_v10 = rec.envs
+        assert env_current is not None and env_v10 is not None
+        assert env_current['CARGO_TARGET_DIR'] != env_v10['CARGO_TARGET_DIR']
+        assert Path(env_current['CARGO_TARGET_DIR']).parent == target_root
+        assert Path(env_v10['CARGO_TARGET_DIR']).parent == target_root
 
 
 class TestTsBuilder:
@@ -220,11 +245,52 @@ class TestTsBuilder:
 
 
 class TestDotnetBuilder:
-    def test_dotnet_is_noop(self, tmp_path, rec):
-        (tmp_path / 'Agent.csproj').touch()
+    def test_dotnet_publishes_release(self, tmp_path, rec):
+        """Publish in the build phase, not on spawn.
+
+        ``dotnet run`` would restore+build inside the readiness window and in
+        Debug; publishing here spends the build budget instead and leaves a
+        Release tree the spawn step can exec directly.
+        """
+        csproj = tmp_path / 'Agent.csproj'
+        csproj.touch()
         lang = builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert lang is Language.DOTNET
+        assert rec.calls == [
+            (
+                [
+                    'dotnet', 'publish', str(csproj),
+                    '-c', 'Release', '-o', str(tmp_path / 'publish'),
+                ],
+                tmp_path,
+            ),
+        ]
+
+    def test_dotnet_skips_an_existing_publish(self, tmp_path, rec):
+        """A warm cached tree at the same SHA must not republish."""
+        (tmp_path / 'Agent.csproj').touch()
+        pub = tmp_path / 'publish'
+        pub.mkdir()
+        (pub / 'Agent.dll').write_text('assembly', encoding='utf-8')
+        builders.build_in_place('x/y', 'a' * 40, tmp_path, skip_codegen=True)
         assert rec.calls == []
+
+    def test_dotnet_publish_honours_the_build_timeout(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The publish must be bounded by the build budget — the point of
+        doing it here is that it is *not* bounded by the readiness one.
+        """
+        (tmp_path / 'Agent.csproj').touch()
+        seen: list[dict[str, Any]] = []
+
+        def spy(args, *_a: Any, **kw: Any) -> Any:
+            seen.append(kw)
+            return subprocess.CompletedProcess(args, 0, stdout='', stderr='')
+
+        monkeypatch.setattr(builders.subprocess, 'run', spy)
+        builders._build_dotnet(tmp_path, timeout=600)
+        assert seen[0]['timeout'] == 600
 
 
 # ---------------------------------------------------------------------------
@@ -344,5 +410,6 @@ class TestCodegenOrdering:
     def test_dotnet_has_no_codegen(self, tmp_path, rec):
         (tmp_path / 'Agent.csproj').touch()
         builders.build_in_place('x/y', 'a' * 40, tmp_path)
-        assert rec.calls == []
+        # The publish is the whole build — no codegen step runs before it.
+        assert [argv[0] for argv, _cwd in rec.calls] == ['dotnet']
         assert not (tmp_path / 'a2a-itk').exists()

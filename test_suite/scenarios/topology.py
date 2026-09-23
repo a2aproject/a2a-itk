@@ -79,3 +79,50 @@ def normalize_edges(edges: list[str] | None, node_count: int) -> frozenset[str]:
             if u != v
         )
     return frozenset(e.replace(' ', '') for e in edges)
+
+
+def restrict_to_available(
+    sdks: list[str],
+    topology: Topology | None,
+    edges: list[str] | None,
+    usable: set[str] | frozenset[str],
+    *,
+    min_agents: int = _MIN_NODES,
+) -> tuple[list[str], list[str] | None] | None:
+    """Restrict a scenario's graph to the agents in ``usable``.
+
+    One answer to "can what's left still run?", shared by both callers that
+    ask it: the resolver, when a ``known_failures.yaml`` rule removes a peer,
+    and the runner, when a peer fails to build/start. Keeping it in one place
+    is the point — the two used to disagree on explicit-edge scenarios.
+
+    Args:
+        sdks: The scenario's agents.
+        topology: The shape to rebuild from when agents are missing, or
+            ``None`` when ``edges`` was an author-given explicit list.
+        edges: The scenario's edges, or ``None`` for the complete digraph.
+        usable: The agents actually available (peers a rule kept / that came
+            up).
+        min_agents: Smallest traversable graph; below it there's nothing to
+            walk.
+
+    Returns:
+        The ``(sdks, edges)`` to run — unchanged when nothing is missing, or
+        rebuilt for the smaller set — or ``None`` when the scenario can't
+        survive the loss:
+
+          * fewer than ``min_agents`` remain; or
+          * an agent is missing and the edges are an explicit author list
+            (``topology is None``): those indices are positional, so dropping
+            a node would silently rewire the graph. A named topology instead
+            carries its shape and is simply rebuilt for the smaller set, and
+            the complete digraph stays complete.
+    """
+    kept = [s for s in sdks if s in usable]
+    if len(kept) < min_agents:
+        return None
+    if len(kept) < len(sdks) and edges is not None and topology is None:
+        return None
+    if topology is not None:
+        return kept, topology_to_edges(topology, len(kept))
+    return kept, edges
