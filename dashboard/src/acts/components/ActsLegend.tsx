@@ -1,7 +1,8 @@
 const OUTCOMES: [string, string, string][] = [
   ["pass", "✓", "the SDK met the assertion"],
   ["fail", "fail", "the SDK did something the specification forbids"],
-  ["skip", "skip", "the harness could not run it — not evidence either way"],
+  ["skip", "skip", "the harness could not run it; not evidence either way"],
+  ["empty", "—", "out of scope: the test targets another transport"],
 ];
 
 const LEVELS: [string, string][] = [
@@ -17,8 +18,10 @@ export default function ActsLegend() {
         {OUTCOMES.map(([id, label, meaning]) => (
           <div key={id}>
             <dt>
-              {id === "pass" ? (
-                <span className="cell-pass">{label}</span>
+              {id === "pass" || id === "empty" ? (
+                <span className={id === "pass" ? "cell-pass" : "cell-empty"}>
+                  {label}
+                </span>
               ) : (
                 <span className={`chip chip-${id}`}>{label}</span>
               )}

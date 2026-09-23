@@ -117,8 +117,10 @@ test("a skip counts as a deviation but not as a failure", () => {
 
 test("a row that both fails and skips is counted as failing, not skipped", () => {
   const r = run({
-    jsonrpc: transport([fail("JSONRPC-ERR-002", "status 400")]),
-    grpc: transport([skip("JSONRPC-ERR-002", "targets jsonrpc")]),
+    jsonrpc: transport([fail("PUSH-CFG-002", "status 400")]),
+    grpc: transport([
+      skip("PUSH-CFG-002", "agent card capability pushNotifications=False, needs True"),
+    ]),
   });
   const rows = buildRows(r);
 
@@ -160,9 +162,9 @@ test("deviationsOf merges transports that failed for the same reason", () => {
 
 test("deviationsOf keeps reasons apart when they differ", () => {
   const r = run({
-    jsonrpc: transport([fail("JSONRPC-ERR-002", "status should equal 200")]),
-    grpc: transport([skip("JSONRPC-ERR-002", "targets jsonrpc; this runner speaks grpc")]),
-    rest: transport([skip("JSONRPC-ERR-002", "targets jsonrpc; this runner speaks rest")]),
+    jsonrpc: transport([fail("CORE-SEND-004", "status should equal 200")]),
+    grpc: transport([fail("CORE-SEND-004", "error.error_type is missing")]),
+    rest: transport([skip("CORE-SEND-004", "runner does not provide header_inspection")]),
   });
   const [row] = buildRows(r);
   const deviations = deviationsOf(row, runTransports(r));

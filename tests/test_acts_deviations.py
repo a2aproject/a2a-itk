@@ -133,8 +133,8 @@ class TestWhichSkipsTheAuthPassClaims:
         assert claimed(AUTH, results) == {}
 
     def test_a_transport_skip_is_not_claimed(self):
-        """`SEC-AUTH-001` is jsonrpc-only, so on the other two bindings it
-        skips on transport and no SUT start can change that."""
+        """A `Runner` handed the unnarrowed corpus still emits these, and no
+        SUT start can clear one."""
         results = [skipped('SEC-AUTH-001', 'targets jsonrpc; this runner speaks grpc')]
         assert claimed(AUTH, results) == {}
 
