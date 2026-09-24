@@ -343,8 +343,8 @@ class TestCorpus:
                 if step.expect_stream is not None:
                     yield loaded.test.id, step.id, step.expect_stream
 
-    def test_there_are_twelve(self, suite):
-        assert len(list(self._blocks(suite))) == 12
+    def test_there_are_thirteen(self, suite):
+        assert len(list(self._blocks(suite))) == 13
 
     @pytest.mark.parametrize(
         'events',

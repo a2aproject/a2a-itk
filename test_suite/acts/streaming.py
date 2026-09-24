@@ -41,7 +41,12 @@ from test_suite.acts.assertions import (
     Failure,
     evaluate,
 )
-from test_suite.acts.schema import EventAssertion, EventMatch, ExpectStream, Ordering
+from test_suite.acts.schema import (
+    EventAssertion,
+    EventMatch,
+    Ordering,
+    StreamAssertions,
+)
 
 
 #: Wire spelling -> canonical `StreamResponse` oneof arm.
@@ -223,12 +228,16 @@ def _evaluate_event_assertion(
 
 
 def evaluate_stream(
-    expect: ExpectStream,
+    expect: StreamAssertions,
     events: Sequence[StreamedEvent],
     *,
     timed_out: bool = False,
 ) -> AssertionResult:
-    """Evaluate an `expect_stream` block against the events that arrived.
+    """Evaluate one stream's assertions against the events that arrived.
+
+    Takes the assertion vocabulary rather than `ExpectStream` itself, so the
+    shared block of a step and the per-stream block of a `streams` entry are
+    evaluated by the same code against the same stream.
 
     ``timed_out`` reports that collection was cut short by `timeout_ms`. That
     is a failure in itself — §7 calls the field the maximum time to wait for

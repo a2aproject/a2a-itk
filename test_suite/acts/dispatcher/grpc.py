@@ -328,6 +328,11 @@ class GrpcDispatcher(Dispatcher):
                 f'stream failed after {index} event(s): '
                 f'{exc.code().name}: {exc.details()}'
             ) from exc
+        finally:
+            # Breaking out of the `async for` sends nothing on its own, so an
+            # ACTS `disconnect_after` would not reach the SUT until a garbage
+            # collection got to the call. A no-op once the call has finished.
+            call.cancel()
 
     # -- the agent card, over HTTP -----------------------------------------
 

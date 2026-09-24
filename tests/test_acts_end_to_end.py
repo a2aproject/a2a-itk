@@ -216,6 +216,9 @@ class JsonRpcError(Exception):
 #: rather than "whatever passes": the point is that a named set of real
 #: conformance tests goes green, so a regression shows up as a specific test
 #: rather than as a number quietly dropping.
+#:
+#: `STREAM-MULTI-001` sat here until the corpus declared `concurrent_streams`
+#: on it, and now skips. Nothing replaces it: this fixture drives one stream.
 EXPECTED_PASSES = [
     'CORE-SEND-001',
     'CORE-GET-001',
@@ -223,7 +226,6 @@ EXPECTED_PASSES = [
     'CORE-ERR-002',
     'STREAM-SSE-001',
     'STREAM-SSE-002',
-    'STREAM-MULTI-001',
 ]
 
 
@@ -364,8 +366,11 @@ class TestTheSuiteRunsAsAWhole:
                 dispatcher,
                 variables={
                     **suite.variables,
+                    # The §12.2 set the pipeline injects. No receiver runs
+                    # here, so the tests needing one skip and never read it.
                     'insufficientAuthToken': 'nope',
                     'otherUserTaskId': 'nope',
+                    'webhookUrl': 'http://webhook.test/notifications',
                 },
                 agent_card=AGENT_CARD,
                 sleep=lambda _: asyncio.sleep(0),

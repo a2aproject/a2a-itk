@@ -408,8 +408,8 @@ class EventAssertion(_Model):
     index: int | None = Field(default=None, ge=0)
 
 
-class ExpectStream(_Model):
-    """Assertions over a stream of events (spec §7)."""
+class StreamAssertions(_Model):
+    """What may be asserted about the events of one stream (spec §7)."""
 
     min_count: int | None = Field(default=None, ge=0)
     max_count: int | None = Field(default=None, ge=0)
@@ -420,7 +420,7 @@ class ExpectStream(_Model):
     each_event: dict[str, Assertion] | None = None
 
     @model_validator(mode='after')
-    def _counts_are_consistent(self) -> ExpectStream:
+    def _counts_are_consistent(self) -> StreamAssertions:
         if (
             self.min_count is not None
             and self.max_count is not None
@@ -433,12 +433,92 @@ class ExpectStream(_Model):
         return self
 
 
+class StreamPlan(StreamAssertions):
+    """One stream of a concurrent set (spec §7.3).
+
+    Assertions about *its* stream, on top of the shared ones in the enclosing
+    `expect_stream`.
+    """
+
+    description: str | None = None
+    #: Read this many events, then hang up. The one control that makes the
+    #: streams of a set differ from each other.
+    disconnect_after: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode='after')
+    def _is_about_its_own_stream(self) -> StreamPlan:
+        """Reject a step-level bound here, and a cut that frees the assertions."""
+        if self.timeout_ms is not None:
+            raise ValueError(
+                '`timeout_ms` bounds the step, not one stream of it; the '
+                'streams of a set are read under a single deadline'
+            )
+        if self.disconnect_after is None:
+            return self
+        if self.max_count is not None:
+            raise ValueError(
+                f'disconnect_after ({self.disconnect_after}) cuts the stream '
+                f'short, so max_count ({self.max_count}) can never be exceeded '
+                f'and asserts nothing'
+            )
+        if self.min_count is not None and self.min_count > self.disconnect_after:
+            raise ValueError(
+                f'min_count ({self.min_count}) exceeds disconnect_after '
+                f'({self.disconnect_after}); the runner stops reading before '
+                f'that many events can arrive'
+            )
+        return self
+
+
+class ExpectStream(StreamAssertions):
+    """Assertions over a stream of events (spec §7).
+
+    Its own assertions apply to every stream the step opens. `streams` opens
+    more than one at a time and says what is additionally true of each.
+    """
+
+    streams: list[StreamPlan] | None = Field(
+        default=None,
+        min_length=1,
+        description='Open one stream per entry, concurrently, all with this '
+                    'step\'s request. Omit for a single stream.',
+    )
+
+
+class ExpectWebhook(_Model):
+    """Assertions over what the SUT pushed to the runner's webhook.
+
+    The only assertion in ACTS whose subject is a request the *SUT* made: a
+    push notification appears in no response, so without this a delivery test
+    can only register a config and hope.
+
+    The runner polls its receiver until `min_count` notifications for
+    `task_id` arrive or `timeout_ms` elapses.
+    """
+
+    task_id: str
+    min_count: int = Field(default=1, ge=1)
+    timeout_ms: int = Field(default=10_000, ge=0)
+    #: Asserted against every delivered notification's payload.
+    each_event: dict[str, Assertion] | None = None
+    #: Asserted against the most recent delivery only.
+    final_event: dict[str, Assertion] | None = None
+    #: Headers on the delivery, matched case-insensitively. Where A2A §4.3.3's
+    #: `authentication` credentials are visible, and the only place they are.
+    headers: dict[str, Assertion] | None = None
+    #: The `X-A2A-Notification-Token` echoed from the config's `token`. A2A
+    #: defines that field but no header to carry it, so this is a convention
+    #: the SDKs implement differently and a conformance test must not require.
+    token: Assertion | None = None
+
+
 class StepKind(str, enum.Enum):
-    """Which of the four step forms a step is (spec §4)."""
+    """Which of the five step forms a step is (spec §4)."""
 
     OPERATION = 'operation'
     RAW = 'raw'
     CLIENT = 'client'
+    WEBHOOK = 'webhook'
     ASSERTION = 'assertion'
 
 
@@ -462,6 +542,7 @@ class Step(_Model):
     operation: Operation | None = None
     raw: RawBlock | None = None
     client_response: ClientResponseBlock | None = None
+    expect_webhook: ExpectWebhook | None = None
     assertion: InlineAssertion | None = None
 
     # -- operation-step payload -----------------------------------------
@@ -491,18 +572,21 @@ class Step(_Model):
             return StepKind.RAW
         if self.client_response is not None:
             return StepKind.CLIENT
+        if self.expect_webhook is not None:
+            return StepKind.WEBHOOK
         return StepKind.ASSERTION
 
     @model_validator(mode='after')
     def _exactly_one_kind(self) -> Step:
         present = [
-            n for n in ('operation', 'raw', 'client_response', 'assertion')
+            n for n in
+            ('operation', 'raw', 'client_response', 'expect_webhook', 'assertion')
             if getattr(self, n) is not None
         ]
         if not present:
             raise ValueError(
-                'a step needs one of `operation`, `raw`, `client_response` '
-                'or `assertion`'
+                'a step needs one of `operation`, `raw`, `client_response`, '
+                '`expect_webhook` or `assertion`'
             )
         if len(present) > 1:
             raise ValueError(
@@ -541,6 +625,15 @@ class Step(_Model):
                         f'client_response step sends nothing'
                     )
 
+        if kind is StepKind.WEBHOOK:
+            for name in ('expect', 'expect_error', 'expect_stream', 'capture', 'repeat'):
+                if getattr(self, name) is not None:
+                    raise ValueError(
+                        f'`{name}` asserts on a reply to a request the runner '
+                        f'made; a webhook step reads what the SUT delivered '
+                        f'out of band and has no reply to assert on'
+                    )
+
         if kind is StepKind.ASSERTION:
             for name in ('expect', 'expect_error', 'expect_stream', 'capture', 'repeat'):
                 if getattr(self, name) is not None:
@@ -567,6 +660,14 @@ class Step(_Model):
             )
         if self.expect_error is not None and self.expect_stream is not None:
             raise ValueError('set either `expect_error` or `expect_stream`, not both')
+
+        streams = self.expect_stream.streams if self.expect_stream else None
+        if self.capture and streams and len(streams) > 1:
+            raise ValueError(
+                f'`capture` reads one response, and this step opens '
+                f'{len(streams)} streams; which of them a value came from '
+                f'would be decided by arrival order'
+            )
 
         if self.repeat is not None and kind is not StepKind.OPERATION:
             raise ValueError(f'`repeat` re-dispatches an operation; not valid on a {kind.value} step')
@@ -649,6 +750,38 @@ class Test(_Model):
                 'a test whose steps are all raw must declare `transport`; raw '
                 'requests are binding-specific and would fail against the others'
             )
+        return self
+
+    @model_validator(mode='after')
+    def _declares_the_runner_features_it_uses(self) -> Test:
+        """Spec §7.2 and §7.3: these three MUST be declared, not left implied.
+
+        §3.2 leaves `runner_requirements` optional in general; these are its
+        exceptions, because here the alternative is silent. Declared in prose
+        only, `STREAM-MULTI-001/002` and `STREAM-RESUB-001` demanded
+        concurrency and a disconnect no runner had, ran a single undisturbed
+        stream instead, and passed.
+        """
+        declared = set(self.runner_requirements or ())
+        for step in self.steps:
+            stream = step.expect_stream
+            plans = (stream.streams if stream else None) or ()
+            for requirement, used, feature in (
+                (RunnerRequirement.WEBHOOK_ENDPOINT,
+                 step.kind() is StepKind.WEBHOOK,
+                 'reads what the SUT delivered out of band'),
+                (RunnerRequirement.CONCURRENT_STREAMS, len(plans) > 1,
+                 f'opens {len(plans)} streams at once'),
+                (RunnerRequirement.STREAM_DISCONNECT,
+                 any(plan.disconnect_after is not None for plan in plans),
+                 'disconnects mid-stream'),
+            ):
+                if used and requirement not in declared:
+                    raise ValueError(
+                        f'step {step.id!r} {feature}, so the test must declare '
+                        f'`runner_requirements: [{requirement.value}]` — a runner '
+                        f'without it has to skip rather than run something weaker'
+                    )
         return self
 
     def behaviors(self) -> frozenset[str]:
@@ -751,6 +884,7 @@ __all__ = [
     'ExpectBlock',
     'ExpectError',
     'ExpectStream',
+    'ExpectWebhook',
     'HttpMethod',
     'InlineAssertion',
     'Level',
@@ -764,6 +898,8 @@ __all__ = [
     'RunnerRequirement',
     'Step',
     'StepKind',
+    'StreamAssertions',
+    'StreamPlan',
     'Suite',
     'Test',
     'TransportBinding',

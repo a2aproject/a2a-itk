@@ -42,6 +42,7 @@ from test_suite.acts.schema import RunnerRequirement, TransportBinding
 from test_suite.acts.wire_map import WELL_KNOWN_AGENT_CARD_PATH
 from test_suite.launcher import Cluster, TargetSpec
 from test_suite.launcher.config import mount_dir
+from test_suite.launcher.ports import free_port, release
 from test_suite.launcher.spec import Kind
 
 
@@ -49,6 +50,10 @@ logger = logging.getLogger(__name__)
 
 #: Default corpus, shipped in the image under `scenarios/acts/`.
 DEFAULT_SUITE = Path(__file__).resolve().parent / 'scenarios' / 'acts' / 'suite.acts.yaml'
+
+#: Tries at /health before giving up on the receiver and letting the tests
+#: that need one skip.
+_WEBHOOK_STARTUP_ATTEMPTS = 40
 
 #: The identifier the SUT goes by, matching `itk_runner.SUT_ID`.
 SUT_ID = 'current'
@@ -132,15 +137,28 @@ RUNNER_VARIABLES: dict[str, Any] = {
     'otherUserTaskId': '00000000-0000-0000-0000-0000000000ff',
 }
 
-#: Capabilities (spec §12.1) this harness has by construction, as against ones
-#: a caller has to arrange — a webhook receiver, real credentials.
+#: Capabilities (spec §12.1) this harness has by construction, as against
+#: `webhook_endpoint`, which depends on a receiver a caller has to arrange and
+#: so is granted per run in `_webhook_receiver`.
 #:
 #: The dispatchers put response headers on every `WireResponse` that has any:
 #: both HTTP bindings on their normal path, and `fetch_agent_card` on all
 #: three, the card being plain HTTP even under gRPC. A gRPC unary reply
 #: carries none, but no test gated on this asks a gRPC RPC for one.
+#:
+#: `auth_credentials` is what §12.2 defines it as — supplying
+#: `insufficientAuthToken` and `otherUserTaskId` — and `RUNNER_VARIABLES`
+#: above supplies both to every front end. Not declaring it would skip
+#: `SEC-AUTH-002`, `SEC-AUTH-003` and `SEC-EXTCARD-002` while claiming the
+#: harness cannot do something it demonstrably does.
+#:
+#: `concurrent_streams` and `stream_disconnect` are `expect_stream.streams`
+#: and `disconnect_after`, which the runner implements on all three bindings.
 RUNNER_CAPABILITIES: tuple[RunnerRequirement, ...] = (
     RunnerRequirement.HEADER_INSPECTION,
+    RunnerRequirement.AUTH_CREDENTIALS,
+    RunnerRequirement.CONCURRENT_STREAMS,
+    RunnerRequirement.STREAM_DISCONNECT,
 )
 
 #: Protocol bindings as the agent card spells them, mapped to ACTS's names.
@@ -399,15 +417,77 @@ async def _run_pass(
         card = await fetch_agent_card(base_url)
         dispatcher = build_dispatcher(card, transport, base_url)
 
-        async with dispatcher:
+        async with dispatcher, _webhook_receiver() as (webhook_url, read_webhook):
+            # `webhookUrl` is runner-provided by nature: the address the
+            # runner listens on is no property of the SUT.
+            resolved = dict(variables or {})
+            if webhook_url is not None:
+                resolved.setdefault('webhookUrl', f'{webhook_url}/notifications')
+            granted = list(capabilities or ())
+            if read_webhook is not None:
+                granted.append(RunnerRequirement.WEBHOOK_ENDPOINT)
+
             runner = Runner(
                 dispatcher,
-                variables=variables or {},
+                variables=resolved,
                 agent_card=card,
                 sut_behaviors=declared,
-                capabilities=capabilities or (),
+                capabilities=granted,
+                read_webhook=read_webhook,
             )
             return await runner.run_suite(suite), card
+
+
+@contextlib.asynccontextmanager
+async def _webhook_receiver() -> Any:
+    """Run `notifications_app` for the length of one pass.
+
+    The receiver `webhook_endpoint` names, and the one the traversal suite
+    already uses.
+
+    Yields `(base_url, read)`, where `read(task_id)` returns that task's
+    notifications so far, oldest first — or `(None, None)` if it will not
+    start, so the tests needing it skip rather than losing the whole run.
+    """
+    port = free_port()
+    root = Path(__file__).resolve().parent
+    process = await asyncio.create_subprocess_exec(
+        'uv', 'run', 'uvicorn', 'notifications_app:create_notifications_app',
+        '--factory', '--host', '127.0.0.1', '--port', str(port),
+        cwd=str(root),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    base_url = f'http://127.0.0.1:{port}'
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for _ in range(_WEBHOOK_STARTUP_ATTEMPTS):
+                with contextlib.suppress(httpx.HTTPError):
+                    if (await client.get(f'{base_url}/health')).status_code == 200:
+                        break
+                await asyncio.sleep(0.25)
+            else:
+                logger.warning(
+                    'Webhook receiver did not come up on %s; tests needing '
+                    '%s will skip', base_url, RunnerRequirement.WEBHOOK_ENDPOINT.value,
+                )
+                yield None, None
+                return
+
+            async def read(task_id: str) -> list[dict[str, Any]]:
+                response = await client.get(f'{base_url}/{task_id}/notifications')
+                if response.status_code != 200:
+                    return []
+                return response.json().get('notifications') or []
+
+            logger.info('Webhook receiver listening on %s', base_url)
+            yield base_url, read
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            process.terminate()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(process.wait(), timeout=10)
+        release(port)
 
 
 @contextlib.contextmanager
