@@ -27,7 +27,7 @@ from test_suite.acts import (
     TransportBinding,
     load_suite,
 )
-from acts_runner import RUNNER_CAPABILITIES
+from acts_runner import RUNNER_CAPABILITIES, NoApplicableTests, _in_scope, _subset
 from test_suite.acts.runner import KNOWN_CAPABILITIES
 from test_suite.acts.schema import RunnerRequirement
 
@@ -138,6 +138,16 @@ class TestCorpusShape:
         assert len(corpus.for_transport(TransportBinding.GRPC)) == 88
         assert len(corpus.for_transport(TransportBinding.REST)) == 92
 
+    def test_the_bindings_between_them_cover_the_whole_corpus(self, corpus):
+        """101 + 88 + 92 overlaps, but nothing falls through the gaps: every
+        test targets at least one binding, so scoping loses none of them."""
+        covered = {
+            entry.id
+            for binding in TransportBinding
+            for entry in corpus.for_transport(binding)
+        }
+        assert covered == {entry.id for entry in corpus}
+
     def test_every_step_reference_names_a_real_step(self, corpus):
         """A dotted `{{step.var}}` is a capture reference.
 
@@ -175,6 +185,42 @@ class TestCorpusShape:
             'otherUserTaskId',
             'webhookUrl',
         ]
+
+
+class TestWhatEachBindingIsScoredOn:
+    """`acts_runner._in_scope` — what a report for one binding contains.
+
+    A report covers one binding (§13.1), so a test declaring `transport:` for
+    a different one is outside that report rather than skipped inside it.
+    Getting this wrong is not cosmetic: it put twenty-three phantom skips in
+    the gRPC report and scored a clean run 88/111.
+    """
+
+    def test_a_binding_is_scored_only_on_the_tests_that_target_it(self, corpus):
+        assert [
+            len(_in_scope(corpus, binding).tests) for binding in TransportBinding
+        ] == [101, 88, 92]
+
+    def test_an_out_of_scope_test_is_absent_rather_than_skipped(self, corpus):
+        ids = {entry.id for entry in _in_scope(corpus, TransportBinding.JSONRPC)}
+        assert 'GRPC-STATUS-001' not in ids
+        assert 'JSONRPC-ERR-002' in ids
+
+    def test_scoping_keeps_the_variables_the_run_resolves_against(self, corpus):
+        """Dropping these would leave every `{{...}}` in the corpus unresolved
+        — a run-wide error that reads as the SUT's fault."""
+        scoped = _in_scope(corpus, TransportBinding.REST)
+        assert scoped.variables == corpus.variables
+        assert scoped.sources == corpus.sources
+
+    def test_a_selection_no_binding_can_run_is_refused(self, corpus):
+        """`-t GRPC-STATUS-001 --transport all` asks two bindings to grade a
+        test neither offers. Erroring beats a vacuous 0/0 CONFORMANT."""
+        grpc_only = _subset(
+            corpus, [entry for entry in corpus if entry.id == 'GRPC-STATUS-001']
+        )
+        with pytest.raises(NoApplicableTests, match='jsonrpc.*GRPC-STATUS-001'):
+            _in_scope(grpc_only, TransportBinding.JSONRPC)
 
 
 class TestBehaviorContract:

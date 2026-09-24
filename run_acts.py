@@ -49,13 +49,26 @@ def _render_combined(reports: list, report_writer) -> None:
     print('=' * 56)
     print(f"ACROSS {len(reports)} BINDING(S)")
     print('=' * 56)
+    # Each binding is scored on its own subset, so the three denominators
+    # differ. Naming the union spares the reader working out where the tests
+    # missing from any one line went.
+    covered = {
+        test['id']
+        for report in reports
+        for suite in report.get('suites', ())
+        for test in suite.get('tests', ())
+    }
+    print(f'  {len(covered)} test(s) in all, each scored on the binding(s) it targets')
     for report in reports:
         summary = report['summary']
         must = summary['by_level']['must']
         graded = must['total'] - must['skipped']
         verdict = 'ok' if report_writer.is_conformant(report) else 'NOT CONFORMANT'
+        # The whole fraction is padded, not just its numerator: the bindings no
+        # longer share a denominator, so padding one side alone unaligns the rest.
+        tally = f"{summary['passed']}/{summary['total']}"
         print(
-            f"  {report['transport']:8} {summary['passed']:3}/{summary['total']} passed"
+            f"  {report['transport']:8} {tally:>7} passed"
             f"   must {must['passed']}/{graded}"
             f"   {summary['failed']} failed, {summary['errors']} error(s)   {verdict}"
         )
@@ -198,6 +211,12 @@ def main() -> int:
                     gate_on_behaviors=not args.no_gate,
                 )
             )
+        except acts_runner.NoApplicableTests as exc:
+            # `-t JSONRPC-ERR-002 --transport all` asks for two bindings the
+            # test does not target. Saying so and moving on beats failing the
+            # run, and beats starting a SUT to grade nothing.
+            print(f'skipped ({binding}): {exc}', file=sys.stderr)
+            continue
         except acts_runner.ActsRunError as exc:
             print(f'error ({binding}): {exc}', file=sys.stderr)
             return 2
@@ -211,6 +230,12 @@ def main() -> int:
                 repository=args.repository,
             )
         )
+
+    if not reports:
+        # Every binding was skipped above, so `all([])` would report a vacuous
+        # CONFORMANT and exit 0.
+        print('nothing ran on any requested binding', file=sys.stderr)
+        return 2
 
     if args.json:
         print(json.dumps(reports if len(reports) > 1 else reports[0], indent=2))

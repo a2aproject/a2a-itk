@@ -731,9 +731,11 @@ a:hover {
 }
 
 /* Status reads as a discrete pill on an unfilled row, so neighbouring results
-   stay separate instead of fusing into one block of colour. */
+   stay separate instead of fusing into one block of colour.
+
+   Alignment is left, from `.matrix td` above — a `text-align` here would look
+   like it won and would not, being a class short of that rule's specificity. */
 .cell {
-  text-align: center;
   width: 1%;
 }
 
@@ -921,11 +923,20 @@ a:hover {
   gap: 10px;
 }
 
+/* The tracks live on the list, not the row, so all three rows share them.
+   Sized per row, the counts column is only as wide as its own text, and
+   "101 passed" then leaves a shorter bar than "88 passed" — which makes the
+   one thing the bars are for, comparing them by length, a lie. */
+.transport-list {
+  grid-template-columns: minmax(9rem, auto) minmax(80px, 1fr) minmax(auto, max-content);
+  column-gap: 16px;
+}
+
 .transport-row {
   display: grid;
-  grid-template-columns: minmax(9rem, auto) minmax(80px, 1fr) minmax(auto, max-content);
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: center;
-  gap: 8px 16px;
 }
 
 .transport-name {
@@ -979,6 +990,12 @@ a:hover {
   font-size: 12.5px;
   color: var(--text-muted);
   white-space: nowrap;
+}
+
+/* The shared track is as wide as the busiest row, so a row with less to say
+   would otherwise leave its percentage stranded mid-column. */
+.transport-counts {
+  justify-content: flex-end;
 }
 
 .count-pass {
@@ -1125,11 +1142,6 @@ a:hover {
   top: var(--topbar-h);
   z-index: 2;
   background: var(--bg-raised);
-  text-align: center;
-}
-
-.conformance thead th:first-child {
-  text-align: left;
 }
 
 .conformance td.cell {
@@ -1310,6 +1322,14 @@ a:hover {
   gap: 10px;
 }
 
+/* The conformance legend leads with a bare ✓, so padding its dash out to chip
+   width leaves one entry sitting visibly looser than the rest. Both bare
+   glyphs hug their description instead. The matrix legend keeps the padding:
+   every other entry there is a chip. */
+.legend-group .cell-empty {
+  min-width: 0;
+}
+
 /* Placed after the .history, .matrix and .chip base rules on purpose: a media
    query adds no specificity, so an earlier block would lose to them. */
 @media (max-width: 900px) {
@@ -1468,8 +1488,13 @@ a:hover {
 
 /* Conformance table, narrow viewports */
 @media (max-width: 900px) {
+  /* Stacked, so the shared tracks come off both the list and the row. */
+  .transport-list,
   .transport-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .transport-row {
     gap: 4px;
   }
 

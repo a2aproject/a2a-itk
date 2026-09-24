@@ -489,6 +489,11 @@ class Runner:
 
     def _skip_reason(self, test: Test) -> str | None:
         """Why this test should not run at all — never why it failed."""
+        # A backstop for a caller that hands `run_suite` the whole corpus: the
+        # pipeline narrows to the binding first (`acts_runner._in_scope`), so
+        # a report never carries one of these. Left in because the alternative
+        # is firing a jsonrpc raw step at a gRPC dispatcher and reporting the
+        # wreckage as non-conformance.
         if not test.applies_to(self.binding):
             targets = ', '.join(t.value for t in test.transport or ())
             return f'targets {targets}; this runner speaks {self.binding.value}'

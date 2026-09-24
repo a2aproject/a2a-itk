@@ -36,7 +36,7 @@ from test_suite.acts import behaviors as sut_behaviors
 from test_suite.acts import report as report_writer
 from test_suite.acts.dispatcher import Dispatcher, for_binding
 from test_suite.acts.dispatcher.http_base import FOLLOW_REDIRECTS
-from test_suite.acts.loader import LoadedSuite, load_suite
+from test_suite.acts.loader import LoadedSuite, LoadedTest, load_suite
 from test_suite.acts.runner import VERSION_HEADER, Runner, TestResult
 from test_suite.acts.schema import RunnerRequirement, TransportBinding
 from test_suite.acts.wire_map import WELL_KNOWN_AGENT_CARD_PATH
@@ -178,6 +178,15 @@ class ActsRunError(RuntimeError):
     """The conformance run could not be set up or completed."""
 
 
+class NoApplicableTests(ActsRunError):
+    """Nothing in the selection targets the requested binding.
+
+    Only reachable from an explicit `-t`/`--suite` selection: the full corpus
+    has tests for all three. Its own type so a caller running several bindings
+    can move on to the next instead of losing the run.
+    """
+
+
 @dataclass(frozen=True)
 class ActsRun:
     """One conformance run's outcome."""
@@ -188,6 +197,40 @@ class ActsRun:
     duration_ms: int
     agent_card: dict[str, Any] = field(default_factory=dict)
     declared_behaviors: frozenset[str] | None = None
+
+
+def _subset(suite: LoadedSuite, tests: list[LoadedTest]) -> LoadedSuite:
+    """``suite`` narrowed to ``tests``.
+
+    ``variables`` comes along because without it every ``{{...}}`` the corpus
+    writes goes unresolved, which surfaces as a run-wide error about the SUT.
+    """
+    return LoadedSuite(
+        tests=tests, variables=suite.variables, sources=suite.sources
+    )
+
+
+def _in_scope(suite: LoadedSuite, transport: TransportBinding) -> LoadedSuite:
+    """The tests this binding is actually graded on (spec §12.3).
+
+    A report covers **one** binding, so a test that declares `transport:` for
+    a different one is out of that report's scope — not a skip. Dropping it
+    here rather than letting `Runner._skip_reason` mark it means it never
+    reaches the denominator: gRPC is scored 88/88 rather than 88/111 with
+    twenty-three phantom skips, and `MUST 47/47 passed (18 skipped)` loses a
+    parenthetical that said nothing about the SUT.
+
+    §12.3's "MUST skip" is about a runner that cannot speak a binding at all.
+    This one speaks all three and runs them as separate reports, so it has no
+    binding to skip *for*.
+    """
+    scoped = suite.for_transport(transport)
+    if not scoped:
+        raise NoApplicableTests(
+            f'no selected test targets {transport.value}: '
+            f'{", ".join(t.id for t in suite.tests)}'
+        )
+    return _subset(suite, scoped)
 
 
 async def fetch_agent_card(base_url: str, *, timeout: float = 30.0) -> dict[str, Any]:
@@ -315,7 +358,10 @@ async def run(
     gate_on_behaviors: bool = True,
     log_dir: Path | None = None,
 ) -> ActsRun:
-    """Start the SUT, run the corpus against it, and collect the results."""
+    """Start the SUT, run the corpus against it, and collect the results.
+
+    Only the tests ``transport`` is graded on take part; see :func:`_in_scope`.
+    """
     # Merged here rather than by the caller, so every front end gets them. The
     # CLI used to pass them and `POST /run-acts` did not, which left
     # `{{insufficientAuthToken}}` unresolved on the service path and turned
@@ -336,11 +382,9 @@ async def run(
         missing = set(test_ids) - {t.id for t in selected}
         if missing:
             raise ActsRunError(f'no such test(s) in the corpus: {sorted(missing)}')
-        suite = LoadedSuite(
-            tests=selected,
-            variables=suite.variables,
-            sources=suite.sources,
-        )
+        suite = _subset(suite, selected)
+
+    suite = _in_scope(suite, transport)
 
     declared = None
     if gate_on_behaviors:
@@ -639,11 +683,7 @@ async def _rerun_deviation(
         len(blocked), deviation.description, deviation.env_var,
         ', '.join(sorted(blocked)),
     )
-    narrowed = LoadedSuite(
-        tests=[t for t in suite.tests if t.id in blocked],
-        variables=suite.variables,
-        sources=suite.sources,
-    )
+    narrowed = _subset(suite, [t for t in suite.tests if t.id in blocked])
 
     try:
         with _sut_env(deviation.env_var):
@@ -716,6 +756,7 @@ __all__ = [
     'ActsRun',
     'ActsRunError',
     'Deviation',
+    'NoApplicableTests',
     'build_dispatcher',
     'fetch_agent_card',
     'interface_for',

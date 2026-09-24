@@ -9,7 +9,7 @@ export default function ResultCell({ test }: { test: TestResult | undefined }) {
   if (!test) {
     return (
       <span className="cell-empty">
-        <span aria-hidden="true">·</span>
+        <span aria-hidden="true">—</span>
         <span className="sr-only">not run</span>
       </span>
     );
