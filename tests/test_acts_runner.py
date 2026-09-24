@@ -1574,7 +1574,10 @@ class TestWebhookSteps:
 
     def a_webhook_test(self, **block):
         block.setdefault('task_id', 'T1')
-        return a_test(Step(id='delivered', expect_webhook=block))
+        return a_test(
+            Step(id='delivered', expect_webhook=block),
+            runner_requirements=[RunnerRequirement.WEBHOOK_ENDPOINT],
+        )
 
     def receiver(self, notifications):
         async def read(task_id):
@@ -1582,9 +1585,18 @@ class TestWebhookSteps:
             return notifications
         return read
 
-    def test_a_delivery_that_arrived_passes(self):
-        runner = runner_for(
+    def runner(self, **kwargs):
+        """Offers `webhook_endpoint`, which spec §7.2 obliges every test here
+        to declare — without it they would skip on the gate rather than run.
+        """
+        return runner_for(
             FakeDispatcher(),
+            capabilities=[RunnerRequirement.WEBHOOK_ENDPOINT],
+            **kwargs,
+        )
+
+    def test_a_delivery_that_arrived_passes(self):
+        runner = self.runner(
             read_webhook=self.receiver([{'event': {'task': {'id': 'T1'}}}]),
         )
         result = run(runner, self.a_webhook_test(each_event={'task': {'id': 'T1'}}))
@@ -1592,15 +1604,14 @@ class TestWebhookSteps:
 
     def test_no_delivery_fails_and_says_how_many_arrived(self):
         """The whole point: silence has to be a failure, not a pass."""
-        runner = runner_for(FakeDispatcher(), read_webhook=self.receiver([]))
+        runner = self.runner(read_webhook=self.receiver([]))
         result = run(runner, self.a_webhook_test(timeout_ms=0))
         assert result.result is Outcome.FAIL
         assert 'delivered 0 notification' in result.failure.message
         assert result.failure.assertion_path == 'webhook.min_count'
 
     def test_a_wrong_payload_fails_and_locates_itself(self):
-        runner = runner_for(
-            FakeDispatcher(),
+        runner = self.runner(
             read_webhook=self.receiver([{'event': {'task': {'id': 'OTHER'}}}]),
         )
         result = run(runner, self.a_webhook_test(each_event={'task': {'id': 'T1'}}))
@@ -1611,8 +1622,7 @@ class TestWebhookSteps:
         """A2A §4.3.3 makes the `authentication` credentials a MUST on the
         push request, and an anonymous delivery is what SEC-PUSH-001 exists
         to catch."""
-        runner = runner_for(
-            FakeDispatcher(),
+        runner = self.runner(
             read_webhook=self.receiver([{'event': {'task': {}}, 'headers': {}}]),
         )
         result = run(runner, self.a_webhook_test(headers={'Authorization': 'Bearer t'}))
@@ -1622,8 +1632,7 @@ class TestWebhookSteps:
     def test_the_credential_header_passes_and_folds_case(self):
         """HTTP header names are case-insensitive, and the receiver
         lowercases what it captured."""
-        runner = runner_for(
-            FakeDispatcher(),
+        runner = self.runner(
             read_webhook=self.receiver([
                 {'event': {'task': {}}, 'headers': {'authorization': 'Bearer t'}},
             ]),
@@ -1637,16 +1646,16 @@ class TestWebhookSteps:
         it only when `authentication` is absent, and neither is wrong. The
         assertion stays available for a runner that knows its SUT's
         convention; no corpus test may require it."""
-        runner = runner_for(
-            FakeDispatcher(),
+        runner = self.runner(
             read_webhook=self.receiver([{'event': {'task': {}}, 'token': 'expected'}]),
         )
         assert run(runner, self.a_webhook_test(token='expected')).result is Outcome.PASS
 
     def test_without_a_receiver_the_run_errors_rather_than_blaming_the_sut(self):
-        """A missing receiver is the runner's gap. `webhook_endpoint` is what
-        keeps such a test from reaching here, and if one does the verdict must
-        not read as a SUT defect."""
-        result = run(runner_for(FakeDispatcher()), self.a_webhook_test())
+        """Now reachable only by a runner offering `webhook_endpoint` with no
+        receiver behind it: the schema rejects an undeclared test, and the gate
+        skips a runner that lacks the capability. A runner's own inconsistency
+        must not read as a SUT defect."""
+        result = run(self.runner(), self.a_webhook_test())
         assert result.result is Outcome.ERROR
         assert 'webhook_endpoint' in (result.failure.message or '')

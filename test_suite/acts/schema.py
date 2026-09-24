@@ -754,18 +754,22 @@ class Test(_Model):
 
     @model_validator(mode='after')
     def _declares_the_runner_features_it_uses(self) -> Test:
-        """Spec §3.2: a test MUST declare the capabilities its steps exercise.
+        """Spec §7.2 and §7.3: these three MUST be declared, not left implied.
 
-        Declared only in prose, the two drift: `STREAM-MULTI-001/002` and
-        `STREAM-RESUB-001` demanded concurrency and a disconnect no runner had,
-        ran a single undisturbed stream instead, and passed.
+        §3.2 leaves `runner_requirements` optional in general; these are its
+        exceptions, because here the alternative is silent. Declared in prose
+        only, `STREAM-MULTI-001/002` and `STREAM-RESUB-001` demanded
+        concurrency and a disconnect no runner had, ran a single undisturbed
+        stream instead, and passed.
         """
         declared = set(self.runner_requirements or ())
         for step in self.steps:
-            plans = step.expect_stream.streams if step.expect_stream else None
-            if not plans:
-                continue
+            stream = step.expect_stream
+            plans = (stream.streams if stream else None) or ()
             for requirement, used, feature in (
+                (RunnerRequirement.WEBHOOK_ENDPOINT,
+                 step.kind() is StepKind.WEBHOOK,
+                 'reads what the SUT delivered out of band'),
                 (RunnerRequirement.CONCURRENT_STREAMS, len(plans) > 1,
                  f'opens {len(plans)} streams at once'),
                 (RunnerRequirement.STREAM_DISCONNECT,

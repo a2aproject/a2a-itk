@@ -290,6 +290,56 @@ class TestRawOnlyTestsNeedATransport:
         assert t.transport is None
 
 
+class TestDeclaresTheRunnerFeaturesItUses:
+    """Spec §7.2 and §7.3.
+
+    §3.2 leaves `runner_requirements` optional, so nothing but this validator
+    stops a test naming a capability in its prose and quietly running without
+    it — which is what `STREAM-MULTI-001/002` and `STREAM-RESUB-001` did.
+    """
+
+    WEBHOOK_STEP = {'id': 'push', 'expect_webhook': {'task_id': 't-1'}}
+
+    @staticmethod
+    def _streaming(streams):
+        return {
+            'id': 'sub',
+            'operation': 'send_streaming_message',
+            'params': {'message': {'role': 'ROLE_USER', 'parts': [{'text': 'hi'}]}},
+            'expect_stream': {'streams': streams},
+        }
+
+    def test_webhook_step_without_the_requirement_is_rejected(self):
+        with pytest.raises(ValidationError, match='webhook_endpoint'):
+            Test.model_validate(_test(steps=[self.WEBHOOK_STEP]))
+
+    def test_webhook_step_with_the_requirement_is_accepted(self):
+        t = Test.model_validate(_test(
+            steps=[self.WEBHOOK_STEP],
+            runner_requirements=['webhook_endpoint'],
+        ))
+        assert t.steps[0].kind() is StepKind.WEBHOOK
+
+    def test_a_second_stream_without_the_requirement_is_rejected(self):
+        with pytest.raises(ValidationError, match='concurrent_streams'):
+            Test.model_validate(_test(
+                steps=[self._streaming([{'min_count': 1}, {'min_count': 1}])]
+            ))
+
+    def test_a_disconnect_without_the_requirement_is_rejected(self):
+        with pytest.raises(ValidationError, match='stream_disconnect'):
+            Test.model_validate(_test(
+                steps=[self._streaming([{'disconnect_after': 2}])]
+            ))
+
+    def test_one_undisturbed_stream_declares_nothing(self):
+        """The boundary the rule turns on: a single plan needs no capability,
+        and this is exactly what `STREAM-MULTI-001` ran while its description
+        claimed two streams."""
+        t = Test.model_validate(_test(steps=[self._streaming([{'min_count': 1}])]))
+        assert t.runner_requirements is None
+
+
 class TestAssertionTreesArePreserved:
     """The schema must not touch assertion subtrees.
 

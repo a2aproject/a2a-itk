@@ -635,8 +635,9 @@ class Runner:
                 step, Outcome.ERROR, started,
                 message=(
                     f'{step.id} reads delivered notifications but no webhook '
-                    f'receiver is configured; the test should have declared '
-                    f'`runner_requirements: [webhook_endpoint]`'
+                    f'receiver is wired; this runner offers `webhook_endpoint` '
+                    f'without one, so the gate that should have skipped the '
+                    f'test passed it through'
                 ),
             )
 
