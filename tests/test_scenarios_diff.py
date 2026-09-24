@@ -183,13 +183,13 @@ class TestSharedSetIsValid:
         """From three declarations.
 
         Transports split, and each peer only gets the ones it speaks:
-        6 unrestricted lines x 3 transports, plus go_v03 x 2, plus ts_v03 x 1
-        = 21 (peer, transport) pairs. Times four behaviour/streaming
+        7 unrestricted lines x 3 transports, plus go_v03 x 2, plus ts_v03 x 1
+        = 24 (peer, transport) pairs. Times four behaviour/streaming
         combinations — send_message non-streaming and streaming, push
-        notification, resubscribe — gives 84.
+        notification, resubscribe — gives 96.
         """
         out = resolve(load_file(SHARED_NIGHTLY), Matrix.from_default())
-        assert len(out) == 21 * 4
+        assert len(out) == 24 * 4
 
     def test_every_nightly_scenario_is_single_transport(self):
         """One transport per scenario is what makes a failure name itself."""

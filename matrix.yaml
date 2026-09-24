@@ -43,3 +43,5 @@ sdks:
     v10: {repo: a2aproject/a2a-java, ref: main}
   rust:
     v10: {repo: a2aproject/a2a-rs, ref: main}
+  dotnet:
+    v10: {repo: a2aproject/a2a-dotnet, ref: main}
