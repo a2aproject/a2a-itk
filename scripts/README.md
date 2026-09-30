@@ -35,6 +35,8 @@ sources the script as its last statement.
 | `ITK_CONTAINER_RT` | autodetect | Force `docker` or `podman` |
 | `ITK_SCENARIO_SET` | `local` | `local` = the SDK's own `scenarios*.json`; `shared` = the role-based sets in a2a-itk |
 | `SCENARIO_FILE` | see below | An explicit file, overriding both |
+| `ITK_SCENARIO_TIMEOUT` | `60` | Seconds one scenario (or subtest) may run before it is recorded as failed. The default lives in `test_suite/launcher/config.py`; this is passed into the container only when set |
+| `ITK_RUN_TIMEOUT` | `1800` | Seconds the whole `/run` request may take, peer builds included, before the driver gives up and dumps the service log |
 | `ITK_ACTS_RUN` | `0` | Run the ACTS conformance suite **instead of** the traversal suite |
 | `ITK_ACTS_TRANSPORTS` | `jsonrpc` | Comma-separated bindings to run ACTS over, e.g. `jsonrpc,grpc,rest` |
 | `ITK_ACTS_LANGUAGE` | `$ITK_SDK_NAME` | Language string for the report's `sdk-info` (spec §13.1) |
@@ -136,6 +138,12 @@ mix.
 Unchanged and still honoured: `A2A_ITK_REVISION`, `ITK_ENTRYPOINT`,
 `ITK_LOG_LEVEL`, `ITK_NIGHTLY_RUN`, `ITK_SKIP_BUILD`, `ITK_READINESS_TIMEOUT`,
 `ITK_MAX_WORKERS`.
+
+Two timeouts keep a stuck hop from holding a run open until CI kills the job.
+The httpx read timeout cannot do it on its own, because an SSE keep-alive
+resets it. `ITK_SCENARIO_TIMEOUT` fails the one scenario and lets the run go
+on; `ITK_RUN_TIMEOUT` is the backstop for everything else, cold builds
+included.
 
 ### Hooks
 
