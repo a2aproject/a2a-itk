@@ -16,6 +16,7 @@ import test_suite
 
 from pyproto import instruction_pb2
 from test_suite.agent_table import AgentTable
+from test_suite.launcher import config as itk_config
 
 
 logger = logging.getLogger(__name__)
@@ -464,7 +465,6 @@ async def _execute_single_itk_test(  # noqa: PLR0913
 
         base_uri = agents.card_uri(first_sdk)
         target_url = f'{base_uri.rstrip("/")}/jsonrpc'
-        from test_suite.launcher import config as itk_config
 
         mount = itk_config.mount_dir()
         is_go_env = (mount / 'go.mod').is_file() or os.path.exists(
@@ -570,6 +570,25 @@ async def _execute_single_itk_test(  # noqa: PLR0913
     return test_result
 
 
+async def _execute_with_deadline(**kwargs: Any) -> bool:
+    """Runs one traversal, failing it if it outlives ``ITK_SCENARIO_TIMEOUT``."""
+    timeout_s = itk_config.scenario_timeout()
+    deadline = asyncio.timeout(timeout_s)
+    try:
+        async with deadline:
+            return await _execute_single_itk_test(**kwargs)
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        logger.error(
+            '--- INTEGRATION TEST FAILED: %s did not finish within %ss '
+            '(ITK_SCENARIO_TIMEOUT) ---',
+            kwargs.get('scenario_name'),
+            timeout_s,
+        )
+        return False
+
+
 async def execute_itk_test(  # noqa: PLR0913
     sdks: list[str],
     behavior: str,
@@ -585,7 +604,7 @@ async def execute_itk_test(  # noqa: PLR0913
 
     if not build_subtests:
         try:
-            res = await _execute_single_itk_test(
+            res = await _execute_with_deadline(
                 sdks=sdks,
                 behavior=behavior,
                 agents=agents,
@@ -630,7 +649,7 @@ async def execute_itk_test(  # noqa: PLR0913
         subtest_edges.append(sub_edges)
 
         try:
-            passed = await _execute_single_itk_test(
+            passed = await _execute_with_deadline(
                 sdks=sub_sdks,
                 behavior=behavior,
                 agents=agents,
