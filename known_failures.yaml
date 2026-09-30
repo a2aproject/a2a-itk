@@ -30,6 +30,40 @@ exclusions:
       a2a-rs does not support v0.3 agents.
 
   # ---------------------------------------------------------------------
+  # a2a-rs as SUT: REST SubscribeToTask is GET, some servers route only POST
+  # ---------------------------------------------------------------------
+  - sut_sdk: [rust]
+    agents: [dotnet_v10]
+    behaviors: [resubscribe]
+    transports: [http_json]
+    reason: >
+      a2a-rs's REST client sends SubscribeToTask as GET /tasks/{id}:subscribe,
+      the binding a2a.proto declares, and a2a-dotnet routes only POST for it.
+      The GET matches dotnet's MapGet("/tasks/{id}") instead and becomes a
+      GetTask for "<id>:subscribe", which 404s with TASK_NOT_FOUND. The Rust
+      itk agent reads that 404 as the task having already completed and falls
+      back to draining the original stream, but dotnet's itk agent holds a
+      resubscribe task open until it is cancelled, so the stream never ends.
+      The Rust SUT's SSE keep-alive stops the harness's read timeout from
+      firing, so this one scenario ran a2a-rs's nightly into the 6h job limit
+      every night from 2026-09-25. Over jsonrpc the same pair passes.
+
+  - sut_sdk: [rust]
+    agents: [java_v10]
+    behaviors: [resubscribe]
+    transports: [http_json]
+    reason: >
+      Same GET-versus-POST mismatch as the dotnet entry above, except that it
+      fails silently instead of hanging. a2a-java's REST server routes only
+      POST for /tasks/{id}:subscribe (A2AServerRoutes), so the GET gets 405;
+      a2a-rs's client then retries the legacy /tasks/{id}/subscribe path,
+      which java answers with 404. The Rust itk agent takes that 404 as the
+      task having already completed and drains the original stream, and
+      java's held task completes on its own after about 10s, so the scenario
+      reports PASSED although no subscribe ever succeeded. Excluded so that
+      green is not read as working resubscribe interop.
+
+  # ---------------------------------------------------------------------
   # a2a-js as SUT: v0.3 peers over JSON-RPC only, unless the peer is also TS
   # ---------------------------------------------------------------------
   - sut_sdk: [ts]
