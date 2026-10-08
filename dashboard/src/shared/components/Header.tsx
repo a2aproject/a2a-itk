@@ -15,7 +15,7 @@ export default function Header() {
           </span>
         </a>
         <nav className="topbar-links" aria-label="Resources">
-          <a href="https://github.com/a2aproject/a2a-itk#readme">Documentation</a>
+          <a href="https://github.com/a2aproject/a2a-itk/tree/main/docs">Documentation</a>
           <a href="https://goo.gle/a2a">Specification</a>
           <a href="https://github.com/a2aproject/a2a-itk">GitHub</a>
           <ThemeToggle />
