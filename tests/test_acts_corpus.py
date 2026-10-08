@@ -28,6 +28,7 @@ from test_suite.acts import (
     load_suite,
 )
 from acts_runner import RUNNER_CAPABILITIES, NoApplicableTests, _in_scope, _subset
+from test_suite.acts.assertions import evaluate_headers
 from test_suite.acts.runner import KNOWN_CAPABILITIES
 from test_suite.acts.schema import RunnerRequirement
 
@@ -51,9 +52,9 @@ class TestCorpusLoads:
         assert corpus.errors == []
 
     def test_expected_test_count(self, corpus):
-        """111 tests, per the PR description. A change here means the corpus
-        moved; update the pin in PROVENANCE.md deliberately."""
-        assert len(corpus) == 111
+        """111 tests plus the two REST subscribe tests. A change here means
+        the corpus moved; update the pin in PROVENANCE.md deliberately."""
+        assert len(corpus) == 113
 
     def test_every_included_file_is_read(self, corpus):
         """14 suite files plus the manifest itself."""
@@ -78,7 +79,7 @@ class TestCorpusLoads:
     def test_level_breakdown(self, corpus):
         """Feeds the report's `by_level` summary (spec §13.2)."""
         assert {lv.value: len(corpus.by_level(lv)) for lv in Level} == {
-            'must': 65, 'should': 33, 'may': 13,
+            'must': 65, 'should': 35, 'may': 13,
         }
 
     def test_variables_come_from_the_manifest_and_suites(self, corpus):
@@ -120,8 +121,10 @@ class TestCorpusShape:
             # CORE-ERR-009, a positive control on each SEC-EXTCARD test, and
             # two on REST-STATUS-001. Three more when the streaming tests were
             # given the long-running task their concurrency needs a subject.
-            StepKind.OPERATION: 151,
-            StepKind.RAW: 22,
+            # Then one of each kind per REST subscribe test: a send to start
+            # the task, and the raw GET or POST under test.
+            StepKind.OPERATION: 153,
+            StepKind.RAW: 24,
             StepKind.CLIENT: 9,
             # The five push tests that used to register a config and assert
             # nothing about what the SUT then delivered.
@@ -133,13 +136,13 @@ class TestCorpusShape:
         """Most tests are transport-agnostic; that is what makes one corpus
         runnable against all three bindings."""
         restricted = [e for e in corpus if e.test.transport]
-        assert len(restricted) == 26
+        assert len(restricted) == 28
         assert len(corpus.for_transport(TransportBinding.JSONRPC)) == 101
         assert len(corpus.for_transport(TransportBinding.GRPC)) == 88
-        assert len(corpus.for_transport(TransportBinding.REST)) == 92
+        assert len(corpus.for_transport(TransportBinding.REST)) == 94
 
     def test_the_bindings_between_them_cover_the_whole_corpus(self, corpus):
-        """101 + 88 + 92 overlaps, but nothing falls through the gaps: every
+        """101 + 88 + 94 overlaps, but nothing falls through the gaps: every
         test targets at least one binding, so scoping loses none of them."""
         covered = {
             entry.id
@@ -199,7 +202,7 @@ class TestWhatEachBindingIsScoredOn:
     def test_a_binding_is_scored_only_on_the_tests_that_target_it(self, corpus):
         assert [
             len(_in_scope(corpus, binding).tests) for binding in TransportBinding
-        ] == [101, 88, 92]
+        ] == [101, 88, 94]
 
     def test_an_out_of_scope_test_is_absent_rather_than_skipped(self, corpus):
         ids = {entry.id for entry in _in_scope(corpus, TransportBinding.JSONRPC)}
@@ -251,12 +254,13 @@ class TestBehaviorContract:
         that does needs the SUT to recognise the `tck-*` prefix and play along.
 
         Note the corpus also writes `requires_behaviors: []` explicitly on
-        some tests, so "declares the key" (81) is not "needs a behavior" (70).
+        some tests, so "declares the key" (83) is not "needs a behavior" (72).
         """
         # 69/80 before REST-STATUS-001 gained a positive control, which needs
-        # a real task and so a behaviour to produce one.
-        assert len([e for e in corpus if e.test.behaviors()]) == 70
-        assert len([e for e in corpus if e.test.requires_behaviors is not None]) == 81
+        # a real task and so a behaviour to produce one. The two REST
+        # subscribe tests each need `tck-long-running`.
+        assert len([e for e in corpus if e.test.behaviors()]) == 72
+        assert len([e for e in corpus if e.test.requires_behaviors is not None]) == 83
 
 
 class TestCorpusNeedsNoRewriting:
@@ -268,7 +272,7 @@ class TestCorpusNeedsNoRewriting:
     """
 
     def test_strict_load_of_the_shipped_corpus_succeeds(self):
-        assert len(load_suite(MANIFEST).tests) == 111
+        assert len(load_suite(MANIFEST).tests) == 113
 
     def test_push_operations_use_the_abstract_enum_names(self, corpus):
         """The enum has no `*_push_notification_config` member, so a surviving
@@ -444,6 +448,23 @@ class TestUpstreamFixesArePinned:
         special = [e for e in corpus if 'runner-special' in (e.test.tags or [])]
         assert len(special) == 20
 
+    def test_agent_card_caching_needs_both_headers(self, corpus):
+        """§8.6.1 makes `Cache-Control` and `ETag` two separate SHOULDs.
+
+        `CARD-CACHE-001` once accepted either, so a card served with only one
+        of them passed. Evaluated against real header sets rather than by
+        shape, so this also proves the runner's `all_of` can fail.
+        """
+        block = corpus.by_id('CARD-CACHE-001').test.steps[0].expect.headers
+        full = {'Cache-Control': 'public, max-age=3600', 'ETag': '"v1"'}
+        assert evaluate_headers(block, full).ok
+        for partial in (
+            {'Cache-Control': 'public, max-age=3600'},
+            {'ETag': '"v1"'},
+            {'Cache-Control': 'no-cache', 'ETag': '"v1"'},
+        ):
+            assert not evaluate_headers(block, partial).ok, partial
+
     def test_extended_card_is_its_own_operation(self, corpus):
         """A2A §5.3 gives it a method of its own; it is not a flag on
         `get_agent_card`."""
@@ -483,6 +504,26 @@ class TestKnownDivergencesStillPresent:
             ('CORE-MULTI-003', 'mismatch'),
             ('CORE-MULTI-006', 'turn2'),
         ]
+
+    def test_subscribe_method_divergence_is_covered_for_both_methods(self, corpus):
+        """The proto binds REST SubscribeToTask to GET, the spec's tables to POST.
+
+        Neither source wins in the corpus: one SHOULD test per method, REST
+        only, each sending its method as a raw request. The abstract
+        `subscribe_to_task` operation cannot test this, because it lets the
+        dispatcher pick the method.
+        """
+        for test_id, method in (
+            ('REST-SUB-GET-001', 'GET'),
+            ('REST-SUB-POST-001', 'POST'),
+        ):
+            test = corpus.by_id(test_id).test
+            assert test.level is Level.SHOULD
+            assert test.transport == [TransportBinding.REST]
+            subscribe = test.steps[-1]
+            assert subscribe.kind() is StepKind.RAW
+            assert subscribe.raw.method.value == method
+            assert subscribe.raw.path.endswith(':subscribe')
 
     def test_every_named_error_type_is_a_literal(self, corpus):
         """No test needs an assertion object for `error_type` any more."""

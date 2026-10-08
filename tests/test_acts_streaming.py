@@ -343,8 +343,9 @@ class TestCorpus:
                 if step.expect_stream is not None:
                     yield loaded.test.id, step.id, step.expect_stream
 
-    def test_there_are_thirteen(self, suite):
-        assert len(list(self._blocks(suite))) == 13
+    def test_there_are_fifteen(self, suite):
+        """Thirteen before the two raw REST subscribe tests."""
+        assert len(list(self._blocks(suite))) == 15
 
     @pytest.mark.parametrize(
         'events',
@@ -395,3 +396,20 @@ class TestCorpus:
         assert evaluate_stream(expect, envelopes).ok
         unwrapped = [status('TASK_STATE_WORKING', 0), status('TASK_STATE_COMPLETED', 1)]
         assert not evaluate_stream(expect, unwrapped).ok
+
+    def test_the_raw_rest_subscribe_tests_read_through_the_discriminator(self, suite):
+        """`REST-SUB-*` send SubscribeToTask as raw HTTP, so their events are
+        not unwrapped and arrive as REST serializes them, `{"statusUpdate":
+        ...}`. `final_event: {status: ...}` still has to reach the inner event.
+        """
+        wire = [
+            normalize({'task': {'id': 't', 'status': {'state': 'TASK_STATE_WORKING'}}}, 0),
+            normalize(
+                {'statusUpdate': {'taskId': 't', 'status': {'state': 'TASK_STATE_COMPLETED'}}},
+                1,
+            ),
+        ]
+        for test_id in ('REST-SUB-GET-001', 'REST-SUB-POST-001'):
+            expect = suite.by_id(test_id).test.steps[-1].expect_stream
+            assert evaluate_stream(expect, wire).ok, test_id
+            assert not evaluate_stream(expect, wire[:1]).ok, test_id
