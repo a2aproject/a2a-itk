@@ -186,6 +186,7 @@ Everything the launcher does can be tuned without code changes. The ones you are
 | `ITK_MOUNT_DIR` | `/app/agents/repo/itk` | Where `current` is served from. `--mount` sets this |
 | `ITK_LOG_LEVEL` | `INFO` | `DEBUG` also makes the service capture agent logs under `/app/logs` |
 | `ITK_READINESS_TIMEOUT` | `35` s | How long to wait for an agent's card after spawn. The CI driver sets 180 |
+| `ITK_SCENARIO_TIMEOUT` | `60` s | How long one scenario (or one subtest) may run before it is recorded as failed and the run moves on. Needed because an SSE keep-alive resets the HTTP read timeout, so a stuck hop would otherwise hold the run open |
 | `ITK_MAX_WORKERS` | `max(4, n)` | Parallel builds/spawns. Set 2-3 on small CI runners to avoid OOM |
 | `ITK_BUILD_TIMEOUT` | 10 min | Per-peer build budget |
 | `ITK_CHECKOUT_TIMEOUT` | 5 min | Per-peer fetch budget |

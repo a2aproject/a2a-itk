@@ -106,7 +106,7 @@ sdks:
   go:
     v03: {repo: a2aproject/a2a-go, ref: "v0.3.15+itk", transports: [jsonrpc, grpc]}
   dotnet:
-    v10: {repo: a2aproject/a2a-dotnet, ref: main, transports: [jsonrpc, http_json]}
+    v10: {repo: a2aproject/a2a-dotnet, ref: main}
 ```
 
 - `ref` is resolved to a commit SHA when a run is planned. `main` means "whatever main is tonight", which is what the nightly wants; a tag pins the peer.
@@ -114,7 +114,7 @@ sdks:
 - `transports` is a **capability ceiling**: the line cannot speak anything not listed, to anyone. A peer drops out of a transport it cannot speak rather than failing the scenario. Omitted means all three.
 - `current` is not in this file. It is always the mounted checkout.
 
-Use `transports` here only when a line genuinely cannot serve a transport at all (`go_v03` has no HTTP+JSON server; `dotnet` has no gRPC server). A pair that fails over some transport while other pairs pass belongs in `known_failures.yaml` instead, because a ceiling here would also hide the pairings that do work.
+Use `transports` here only when a line genuinely cannot serve a transport at all (`go_v03` has no HTTP+JSON server, and is the only line with a ceiling today). A pair that fails over some transport while other pairs pass belongs in `known_failures.yaml` instead, because a ceiling here would also hide the pairings that do work.
 
 ## `known_failures.yaml`
 
@@ -146,11 +146,11 @@ What happens on a match:
 
 - If the exclusion names `agents`, those peers are **removed from the graph** and the scenario still runs. A star with one arm gone still tests the others. This is reported as "trimmed", separately from skips, because the scenario now covers less than its file says.
 - If removing them would leave fewer than two agents, or the scenario has an explicit `edges` list that cannot be re-indexed, the scenario is skipped.
-- If the exclusion names no `agents` (for example "dotnet as SUT over gRPC"), the whole scenario is skipped.
+- If the exclusion names no `agents` (for example "dotnet as SUT with `push_notification`"), the whole scenario is skipped.
 
 Why exclusions exist rather than per-scenario markers: with `peers: all` there is no line in any file to annotate. And why every one is logged: an exclusion nobody sees is the same thing as coverage that silently vanished.
 
-Most entries are about 0.3 interoperability, where the compatibility layer lives in whichever SDK drives the hop. That makes the limit a property of the (SUT, peer) **pair**, which `sut_sdk` and `unless_sut_sdk` can express and a per-line ceiling in `matrix.yaml` cannot. The file itself is the list; every entry carries a `reason`, and [06_status.md](06_status.md#known-failures) describes the kinds of entry.
+About half the entries are about 0.3 interoperability, where the compatibility layer lives in whichever SDK drives the hop. That makes the limit a property of the (SUT, peer) **pair**, which `sut_sdk` and `unless_sut_sdk` can express and a per-line ceiling in `matrix.yaml` cannot. The file itself is the list; every entry carries a `reason`, and [06_status.md](06_status.md#known-failures) describes the kinds of entry.
 
 ## Tooling
 

@@ -48,7 +48,7 @@ Every test has a level - `must`, `should` or `may`. An SDK is **conformant** on 
 | --- | --- |
 | SUT | System under test: the one agent an ACTS run talks to. Always the mounted `current` checkout |
 | binding, transport | `jsonrpc`, `grpc` or `rest` (ACTS's name for HTTP+JSON) |
-| corpus | The set of `*.acts.yaml` files. 111 tests in 14 files plus a manifest |
+| corpus | The set of `*.acts.yaml` files. 113 tests in 14 files plus a manifest |
 | suite | A named group of tests inside one file (`core-operations`, `streaming`, ...) |
 | level | `must`, `should`, `may` - the RFC 2119 weight of what the test checks |
 | behavior, `tck-*` prefix | A text prefix the SUT recognises and reacts to in a defined way |

@@ -11,7 +11,7 @@ A snapshot of what the interoperability suite covers, what it deliberately leave
 | TypeScript | `ts` | `main` | `v0.3.14+itk` | all | PR + nightly |
 | Java | `java` | `main` | - | all | PR + nightly |
 | Rust | `rust` | `main` | - | all | PR + nightly |
-| .NET | `dotnet` | `main` | - | `jsonrpc`, `http_json` | PR + nightly |
+| .NET | `dotnet` | `main` | - | all | PR + nightly |
 
 All six repositories use the shared driver (`scripts/run_itk_shared.sh`) and the shared scenario sets (`ITK_SCENARIO_SET=shared`). None carries a `scenarios.json` of its own any more, though the legacy format is still accepted.
 
@@ -33,7 +33,7 @@ Pairs that are known not to work are excluded in [`known_failures.yaml`](../../k
 
 The entries fall into three kinds:
 
-- **The 0.3 compatibility layer lives on one side of the hop.** Most entries. Whether a `v10 <-> v03` pair works depends on which SDK drives the hop and over which transport, so the limit is a property of the (SUT, peer) pair rather than of either agent alone.
+- **The 0.3 compatibility layer lives on one side of the hop.** About half the entries. Whether a `v10 <-> v03` pair works depends on which SDK drives the hop and over which transport, so the limit is a property of the (SUT, peer) pair rather than of either agent alone.
 - **Features an SDK does not implement.** A missing transport or behaviour. As a peer such a limit is a `transports` ceiling in `matrix.yaml`; as SUT it has to be an exclusion, because `current` does not go through the matrix.
 - **Real interoperability defects.** A bug in one SDK, or two SDKs reading the specification differently. This is the group that should shrink: an exclusion is removed when the fix lands and the pair goes green.
 

@@ -4,7 +4,7 @@ A snapshot of where conformance testing stands: which SDKs run it, what gates an
 
 ## Who runs it
 
-All six SDKs run ACTS on pull requests and nightly through the shared driver, declare the full set of fifteen standard `tck-*` prefixes in `acts/sut-behaviors.yaml`, and implement both deviation modes and `tck-client-parse`. Five run all three bindings; .NET runs JSON-RPC and REST only, because the SDK has no gRPC server, and its agent advertises `pushNotifications: false`, so the push-notification tests are skipped there rather than failed. Workflow names, schedules and asset names per SDK are in [04_ci.md](04_ci.md#where-each-sdk-stands).
+All six SDKs run ACTS on pull requests and nightly through the shared driver, over all three bindings, declare the full set of fifteen standard `tck-*` prefixes in `acts/sut-behaviors.yaml`, and implement both deviation modes and `tck-client-parse`. One narrowing: the .NET agent advertises `pushNotifications: false`, because the SDK's server does not support push configs, so the push-notification tests are skipped there rather than failed. Workflow names, schedules and asset names per SDK are in [04_ci.md](04_ci.md#where-each-sdk-stands).
 
 A `must` failure on the dashboard is an SDK defect or a spec disagreement to resolve in that SDK's repository, not a runner problem, as long as the same corpus passes elsewhere. How to read one is in [04_ci.md](04_ci.md#reading-a-failed-run).
 
@@ -16,7 +16,7 @@ A `must` failure on the dashboard is an SDK defect or a spec disagreement to res
 
 ## What the corpus is pinned to
 
-The mirrored corpus is a byte-identical copy of `tests/acts/*.acts.yaml` from the A2A repository at commit `82c277f3...` on branch `conformance-spec-adjustments` - PR [#2227](https://github.com/a2aproject/A2A/pull/2227), which targets the branch of [#1882](https://github.com/a2aproject/A2A/pull/1882), where the ACTS specification itself is proposed. Neither is merged into A2A `main`. Both the specification and the test files can still change under review, and the `1.0` in `acts_version` is the draft's own number, not a published release. The pin, and the procedure for moving it, are in [03_corpus.md](03_corpus.md#refreshing-the-mirror).
+The mirrored corpus is a byte-identical copy of `tests/acts/*.acts.yaml` from the A2A repository at commit `a8c99376...` on branch `conformance-spec-adjustments` - PR [#2227](https://github.com/a2aproject/A2A/pull/2227), which targets the branch of [#1882](https://github.com/a2aproject/A2A/pull/1882), where the ACTS specification itself is proposed. Neither is merged into A2A `main`. Both the specification and the test files can still change under review, and the `1.0` in `acts_version` is the draft's own number, not a published release. The pin, and the procedure for moving it, are in [03_corpus.md](03_corpus.md#refreshing-the-mirror).
 
 An earlier pin contained tests whose preconditions no agent could meet (a capability the protocol does not define). The runner reports such tests separately, as `PRECONDITION CANNOT BE SATISFIED`, so a corpus problem can never read as an SDK's skip. The current pin has none.
 

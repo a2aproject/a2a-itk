@@ -39,7 +39,7 @@ Two test suites for the SDKs of the [A2A protocol](https://github.com/a2aproject
 | --- | --- |
 | *Every SDK against its peers.* | *Each SDK against the specification.* |
 | Can this SDK talk to the other SDKs, in both directions, over every transport? | Does this SDK, on its own, do what the specification says? |
-| Starts a cluster of agents built from several SDKs and versions, sends one nested instruction through all of them over JSON-RPC, gRPC or HTTP+JSON, and checks the trace that comes back | Starts one agent and runs the ACTS corpus from the A2A repository against it - 111 tests, one report per binding |
+| Starts a cluster of agents built from several SDKs and versions, sends one nested instruction through all of them over JSON-RPC, gRPC or HTTP+JSON, and checks the trace that comes back | Starts one agent and runs the ACTS corpus from the A2A repository against it, one report per binding |
 
 - 🧱 **One agent, both suites.** Each SDK repository carries a small agent under `itk/`; ITK walks it as a peer, ACTS interrogates it as the system under test.
 - 🔌 **Three transports.** JSON-RPC, gRPC and HTTP+JSON, with streaming, push notifications and resubscription covered on the ITK side and every binding reported separately on the ACTS side.
@@ -61,7 +61,7 @@ Two test suites for the SDKs of the [A2A protocol](https://github.com/a2aproject
 | TypeScript | 1.0, 0.3 | JSON-RPC, gRPC, REST | [ITK](https://a2aproject.github.io/a2a-itk/dashboard/#/itk/ts) / [ACTS](https://a2aproject.github.io/a2a-itk/dashboard/#/acts/ts) |
 | Java | 1.0 | JSON-RPC, gRPC, REST | [ITK](https://a2aproject.github.io/a2a-itk/dashboard/#/itk/java) / [ACTS](https://a2aproject.github.io/a2a-itk/dashboard/#/acts/java) |
 | Rust | 1.0 | JSON-RPC, gRPC, REST | [ITK](https://a2aproject.github.io/a2a-itk/dashboard/#/itk/rust) / [ACTS](https://a2aproject.github.io/a2a-itk/dashboard/#/acts/rust) |
-| .NET | 1.0 | JSON-RPC, REST | [ITK](https://a2aproject.github.io/a2a-itk/dashboard/#/itk/dotnet) / [ACTS](https://a2aproject.github.io/a2a-itk/dashboard/#/acts/dotnet) |
+| .NET | 1.0 | JSON-RPC, gRPC, REST | [ITK](https://a2aproject.github.io/a2a-itk/dashboard/#/itk/dotnet) / [ACTS](https://a2aproject.github.io/a2a-itk/dashboard/#/acts/dotnet) |
 
 Which repository and ref each peer line means is in [`matrix.yaml`](matrix.yaml). Last night's results are on the dashboard; what each suite covers, what is frozen and what is still open is in [ITK status](docs/interoperability/06_status.md) and [ACTS status](docs/conformance/06_status.md).
 

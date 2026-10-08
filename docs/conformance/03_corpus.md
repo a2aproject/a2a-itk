@@ -11,13 +11,13 @@ The tests ACTS runs are not written in this repository. They are authored, revie
 | The PR that introduced both | [#1882](https://github.com/a2aproject/A2A/pull/1882) |
 | The PR that aligned the corpus with the normative spec | [#2227](https://github.com/a2aproject/A2A/pull/2227) |
 
-The copy here is pinned to one commit, named in [`scenarios/acts/PROVENANCE.md`](../../scenarios/acts/PROVENANCE.md) together with the branch and the PRs. At the time of writing that is `82c277f342a2fd7ea47548e2de94f97ea578a7ed` on the branch `conformance-spec-adjustments` - a branch, not a release, because the corpus has not been merged to A2A's `main` yet.
+The copy here is pinned to one commit, named in [`scenarios/acts/PROVENANCE.md`](../../scenarios/acts/PROVENANCE.md) together with the branch and the PRs.
 
 Changes go **upstream first**. A test that is wrong, missing or ambiguous is fixed in A2A and then copied here; the runner never rewrites a document on the way in, and a corpus that does not satisfy the schema is a defect to raise upstream, not to paper over. That keeps the mirror refreshable and keeps the runner a description of the format rather than of one snapshot.
 
 ## What is in it
 
-Fifteen files: a manifest and fourteen suite files, 111 tests in all.
+Fifteen files: a manifest and fourteen suite files, 113 tests in all.
 
 | File | Test ids | Tests | What it covers |
 | --- | --- | --- | --- |
@@ -34,12 +34,12 @@ Fifteen files: a manifest and fourteen suite files, 111 tests in all.
 | `wire-format.acts.yaml` | `DM-FMT` | 3 | Field naming and formats on the wire |
 | `data-types.acts.yaml` | `DM-ART`, `DM-SERIAL`, `DM-EXTRA` | 7 | Text, data, file and file-URL artifacts; serialisation; unknown fields |
 | `push-notifications.acts.yaml` | `PUSH-CFG`, `PUSH-LIST`, `PUSH-IDEM`, `PUSH-ERR`, `PUSH-DELIV` | 10 | Config CRUD, idempotency, errors, delivery to a webhook |
-| `transport-bindings.acts.yaml` | `JSONRPC-ENV/CT/SSE`, `REST-CT/PD/STATUS`, `GRPC-STATUS/STREAM` | 9 | Envelope rules, content types, problem details, status codes per binding |
+| `transport-bindings.acts.yaml` | `JSONRPC-ENV/CT/SSE`, `REST-CT/PD/STATUS/SUB-GET/SUB-POST`, `GRPC-STATUS/STREAM` | 11 | Envelope rules, content types, problem details, status codes per binding; `SubscribeToTask` over REST by `GET` and by `POST`, since the proto binds one and the spec's tables list the other |
 | `client-parsing.acts.yaml` | `CLIENT-PARSE`, `CLIENT-CAP`, `CLIENT-AUTH` | 8 | The SDK's own client parsing canonical payloads (section 10) |
 
-By level: 65 `must`, 33 `should`, 13 `may`. Only `must` decides conformance.
+By level: 65 `must`, 35 `should`, 13 `may`. Only `must` decides conformance.
 
-Twenty-six tests declare a `transport:` and are graded only on that binding. The rest run on all three. That gives 101 tests on JSON-RPC, 88 on gRPC and 92 on REST.
+Twenty-eight tests declare a `transport:` and are graded only on that binding. The rest run on all three. That gives 101 tests on JSON-RPC, 88 on gRPC and 94 on REST.
 
 ### Test ids
 
@@ -69,7 +69,7 @@ Three kinds of requirement appear on tests, and they are handled differently:
 | `preconditions` | `capabilities: {streaming: true}`, `authentication: true` | skip - not applicable to this SUT (or re-run under a [deviation](02_architecture.md#deviations)) |
 | `runner_requirements` | `[webhook_endpoint]` | skip - the runner cannot do it |
 
-The behaviour prefixes the corpus uses, by frequency: `tck-complete-task` (72 tests), `tck-long-running` (24), `tck-multi-turn` (19), `tck-stream-basic` (10), `tck-message-response` (8), `tck-cancel` (4), and two each of `tck-task-failure`, `tck-stream-chunked`, `tck-auth-required`, `tck-artifact-text`, `tck-artifact-data`, `tck-artifact-file`, `tck-artifact-file-url`. Their meanings are in section 11.2 of the spec and in [05_sdk-integration.md](05_sdk-integration.md#2-behaviors).
+Seventy-two tests require a behaviour (one of them, `DM-FMT-002`, requires two). By prefix: `tck-complete-task` (35 tests), `tck-long-running` (14), `tck-multi-turn` (6), `tck-stream-basic` (5), `tck-message-response` (4), `tck-cancel` (2), and one each of `tck-task-failure`, `tck-stream-chunked`, `tck-auth-required`, `tck-artifact-text`, `tck-artifact-data`, `tck-artifact-file`, `tck-artifact-file-url`. Their meanings are in section 11.2 of the spec and in [05_sdk-integration.md](05_sdk-integration.md#2-behaviors).
 
 ### Variables
 

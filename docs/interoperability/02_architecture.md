@@ -109,7 +109,7 @@ The request dialect is chosen from the first agent's identifier: an id containin
 | `push_notification` | Same, but every agent also registers a push notification config pointing at ITK's mock receiver and pushes its status updates there | ITK starts [`notifications_app.py`](../../notifications_app.py) on a free port for the scenario, then reads `GET /notifications` and checks both the final text and that every intermediate state was pushed - proof that each hop pushed, not just the last one |
 | `resubscribe` | Streaming only. The caller starts a stream, reads the task id, disconnects, resubscribes to the task, then cancels it. `hold_task` keeps every task in `WORKING` so there is something to resubscribe to | Same token check as `send_message` on the aggregated stream |
 
-Streaming reads use SSE and stop as soon as every expected token has been seen, so a stream the agent keeps open after completing does not stall the run. The HTTP read timeout is 120 s.
+Streaming reads use SSE and stop as soon as every expected token has been seen, so a stream the agent keeps open after completing does not stall the run. The HTTP read timeout is 120 s, but an SSE keep-alive resets it, so on its own it cannot end a hop that is stuck. Each traversal (a scenario, or one subtest) therefore also runs under a deadline, `ITK_SCENARIO_TIMEOUT` (60 s by default): when it expires the scenario is logged as `did not finish within Ns (ITK_SCENARIO_TIMEOUT)`, recorded as failed, and the run moves on to the next one.
 
 ### Subtests
 

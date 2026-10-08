@@ -76,7 +76,7 @@ ACTS a2a-go / jsonrpc — 101 tests in 43850ms
 
 Three SUTs are started in sequence per binding: the default one for the bulk of the corpus, then two more in **deviation modes** for the tests the default one has to skip (an agent cannot both advertise streaming and refuse it; nor both require a credential and serve the raw steps that must go unauthenticated). The log says which tests were re-run and why. See [02_architecture.md](02_architecture.md#deviations) for the mechanism.
 
-The denominator differs per binding. Tests that declare a `transport:` are graded only on that binding and are left out of the others entirely, not counted as skipped. With the current corpus that is 101 tests on JSON-RPC, 88 on gRPC and 92 on REST, out of 111.
+The denominator differs per binding. Tests that declare a `transport:` are graded only on that binding and are left out of the others entirely, not counted as skipped. With the current corpus that is 101 tests on JSON-RPC, 88 on gRPC and 94 on REST, out of 113.
 
 With `--transport all` a combined block follows:
 
@@ -84,10 +84,10 @@ With `--transport all` a combined block follows:
 ========================================================
 ACROSS 3 BINDING(S)
 ========================================================
-  111 test(s) in all, each scored on the binding(s) it targets
+  113 test(s) in all, each scored on the binding(s) it targets
   jsonrpc   92/101 passed   must 56/59   9 failed, 0 error(s)   NOT CONFORMANT
   grpc       83/88 passed   must 46/47   5 failed, 0 error(s)   NOT CONFORMANT
-  rest       84/92 passed   must 47/49   8 failed, 0 error(s)   NOT CONFORMANT
+  rest       86/94 passed   must 47/49   8 failed, 0 error(s)   NOT CONFORMANT
   => NOT CONFORMANT overall
 ```
 

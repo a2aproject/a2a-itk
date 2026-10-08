@@ -22,19 +22,19 @@ The standard prefixes (section 11.2) and what the runner's tests expect of each:
 
 | Prefix | Expected outcome | Corpus uses it |
 | --- | --- | --- |
-| `tck-complete-task` | Task reaches `TASK_STATE_COMPLETED` with a text status message | 72 tests |
-| `tck-long-running` | Task stays in `TASK_STATE_WORKING` for a moment, then completes. The Python agent waits 1 s; the corpus polls every 2 s, so it must be observable as non-terminal at least once | 24 |
-| `tck-multi-turn` | `TASK_STATE_INPUT_REQUIRED` after each turn until the user sends a message starting with `done`, then `COMPLETED`. Continuation messages carry no prefix - recover the behaviour from the task's history | 19 |
-| `tck-stream-basic` | On a streaming call: status `WORKING` -> one artifact -> status `COMPLETED` (final) | 10 |
-| `tck-message-response` | A `Message` in the response, not a `Task` | 8 |
-| `tck-cancel` | Stays in `WORKING`; `cancel_task` moves it to `TASK_STATE_CANCELED` | 4 |
-| `tck-task-failure` | `TASK_STATE_FAILED` with an error message in the status | 2 |
-| `tck-stream-chunked` | On a streaming call: one artifact delivered as several appended chunks, then `COMPLETED` | 2 |
-| `tck-auth-required` | `TASK_STATE_AUTH_REQUIRED` with a status message describing what is needed | 2 |
-| `tck-artifact-text` | Completes with a text artifact | 2 |
-| `tck-artifact-data` | Completes with a structured data artifact | 2 |
-| `tck-artifact-file` | Completes with a file artifact carrying inline bytes | 2 |
-| `tck-artifact-file-url` | Completes with a file artifact carrying a URL | 2 |
+| `tck-complete-task` | Task reaches `TASK_STATE_COMPLETED` with a text status message | 35 tests |
+| `tck-long-running` | Task stays in `TASK_STATE_WORKING` for a moment, then completes. The Python agent waits 1 s; the corpus polls every 2 s, so it must be observable as non-terminal at least once | 14 |
+| `tck-multi-turn` | `TASK_STATE_INPUT_REQUIRED` after each turn until the user sends a message starting with `done`, then `COMPLETED`. Continuation messages carry no prefix - recover the behaviour from the task's history | 6 |
+| `tck-stream-basic` | On a streaming call: status `WORKING` -> one artifact -> status `COMPLETED` (final) | 5 |
+| `tck-message-response` | A `Message` in the response, not a `Task` | 4 |
+| `tck-cancel` | Stays in `WORKING`; `cancel_task` moves it to `TASK_STATE_CANCELED` | 2 |
+| `tck-task-failure` | `TASK_STATE_FAILED` with an error message in the status | 1 |
+| `tck-stream-chunked` | On a streaming call: one artifact delivered as several appended chunks, then `COMPLETED` | 1 |
+| `tck-auth-required` | `TASK_STATE_AUTH_REQUIRED` with a status message describing what is needed | 1 |
+| `tck-artifact-text` | Completes with a text artifact | 1 |
+| `tck-artifact-data` | Completes with a structured data artifact | 1 |
+| `tck-artifact-file` | Completes with a file artifact carrying inline bytes | 1 |
+| `tck-artifact-file-url` | Completes with a file artifact carrying a URL | 1 |
 | `tck-input-required` | `TASK_STATE_INPUT_REQUIRED` | 0 |
 | `tck-reject-task` | `TASK_STATE_REJECTED` | 0 |
 
