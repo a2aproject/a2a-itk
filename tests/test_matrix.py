@@ -312,9 +312,8 @@ class TestTransports:
 
     def test_only_lines_that_cannot_serve_a_transport_are_restricted_here(self):
         """`transports` is only for a line that cannot speak one from
-        anywhere: go_v03 has no http_json, and a2a-dotnet ships no gRPC server.
-        ts_v03's grpc/http_json limit is pairwise, so it lives in
-        known_failures.yaml instead.
+        anywhere: go_v03 has no http_json. ts_v03's grpc/http_json limit is
+        pairwise, so it lives in known_failures.yaml instead.
         """
         m = Matrix.from_default()
         restricted = {
@@ -322,7 +321,6 @@ class TestTransports:
             for e in m.entries() if e.transports != ALL_TRANSPORTS
         }
         assert restricted == {
-            'dotnet_v10': ['http_json', 'jsonrpc'],
             'go_v03': ['grpc', 'jsonrpc'],
         }
 

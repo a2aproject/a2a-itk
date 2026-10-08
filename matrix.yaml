@@ -19,34 +19,21 @@
 # over transports the line supports. This holds whether the peer is named
 # explicitly or selected by the `peers: all` macro — a peer that cannot speak
 # a requested transport drops out of that transport's graph rather than
-# failing the traversal, which is what reproduces the hand-written
-# "No Go v03 - HTTP_JSON" legacy scenarios. Omitted means all three.
+# failing the traversal. Omitted means all three.
 
 sdks:
   python:
     v10: {repo: a2aproject/a2a-python, ref: main}
-    # a2a-python and a2a-go both drive this line over all three transports;
-    # a2a-js only ever drives it over jsonrpc. The permissive reading is
-    # recorded because two independent SUTs exercise it green today.
     v03: {repo: a2aproject/a2a-python, ref: "v0.3.24+itk"}
   go:
     v10: {repo: a2aproject/a2a-go, ref: main}
-    # No SDK runs go_v03 over http_json, and a2a-python and a2a-java both
-    # carry an explicit "No Go v03 - HTTP_JSON" scenario to route around it.
     v03: {repo: a2aproject/a2a-go, ref: "v0.3.15+itk", transports: [jsonrpc, grpc]}
   ts:
     v10: {repo: a2aproject/a2a-js, ref: main}
-    # All three. grpc and http_json only work against a TypeScript
-    # counterpart, but that is a property of the pair — see
-    # known_failures.yaml.
     v03: {repo: a2aproject/a2a-js, ref: "v0.3.14+itk"}
   java:
     v10: {repo: a2aproject/a2a-java, ref: main}
   rust:
     v10: {repo: a2aproject/a2a-rs, ref: main}
   dotnet:
-    # No grpc: the SDK names the GRPC binding but ships no gRPC server, so this
-    # line cannot serve that transport to anyone. That is a capability ceiling
-    # rather than a broken pair, which is why it belongs here and not in
-    # known_failures.yaml.
-    v10: {repo: a2aproject/a2a-dotnet, ref: main, transports: [jsonrpc, http_json]}
+    v10: {repo: a2aproject/a2a-dotnet, ref: main}
