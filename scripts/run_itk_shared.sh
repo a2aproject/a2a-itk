@@ -129,6 +129,9 @@ RUN_ARGS+=(-e ITK_LOG_LEVEL="$ITK_LOG_LEVEL")
 RUN_ARGS+=(-e ITK_ENTRYPOINT="${ITK_ENTRYPOINT:-itk_service_v2.py}")
 RUN_ARGS+=(-e ITK_READINESS_TIMEOUT="${ITK_READINESS_TIMEOUT:-180}")
 RUN_ARGS+=(-e ITK_MAX_WORKERS="${ITK_MAX_WORKERS:-2}")
+if [ -n "${ITK_SCENARIO_TIMEOUT:-}" ]; then
+  RUN_ARGS+=(-e ITK_SCENARIO_TIMEOUT="$ITK_SCENARIO_TIMEOUT")
+fi
 RUN_ARGS+=("${ITK_EXTRA_DOCKER_ARGS[@]}")
 RUN_ARGS+=(-p 8000:8000 itk_service)
 
@@ -277,15 +280,24 @@ PY
   exit $RESULT
 fi
 
-curl -s -X POST http://127.0.0.1:8000/run \
+ITK_RUN_TIMEOUT="${ITK_RUN_TIMEOUT:-1800}"
+rm -f raw_results.json
+curl -s --max-time "$ITK_RUN_TIMEOUT" -X POST http://127.0.0.1:8000/run \
   -H "Content-Type: application/json" \
   -d @run_request.json \
   -o raw_results.json
+CURL_STATUS=$?
 
 # 7. Report. itk_report.py validates the response shape before anything
 # consumes it, so a FastAPI error envelope can't reach process_results.py and
 # land an empty entry in the published history.
-if [ "${ITK_NIGHTLY_RUN^^}" = "TRUE" ]; then
+if [ $CURL_STATUS -eq 28 ]; then
+  echo "Error: /run did not finish within ${ITK_RUN_TIMEOUT}s (ITK_RUN_TIMEOUT)" >&2
+  RESULT=1
+elif [ $CURL_STATUS -ne 0 ]; then
+  echo "Error: POST /run failed (curl exit $CURL_STATUS)" >&2
+  RESULT=1
+elif [ "${ITK_NIGHTLY_RUN^^}" = "TRUE" ]; then
   echo "Nightly run detected. Saving raw results and running process_results.py..."
   python3 "$ITK_REPO_DIR/scripts/itk_report.py" \
     --response-file raw_results.json \

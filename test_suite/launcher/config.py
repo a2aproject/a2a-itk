@@ -77,6 +77,11 @@ def readiness_timeout() -> int:
     return _env_int('ITK_READINESS_TIMEOUT', 35)
 
 
+def scenario_timeout() -> int:
+    """Max seconds one traversal (a scenario, or one of its subtests) may run."""
+    return _env_int('ITK_SCENARIO_TIMEOUT', 60)
+
+
 def teardown_grace() -> int:
     """Seconds between SIGTERM and SIGKILL when tearing down an agent.
 

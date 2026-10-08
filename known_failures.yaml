@@ -103,17 +103,38 @@ exclusions:
       already excluded for non-TS SUTs.
 
   # ---------------------------------------------------------------------
-  # a2a-dotnet as SUT: no gRPC server at all
+  # gRPC between a2a-dotnet and every other SDK: interface URL format
   # ---------------------------------------------------------------------
   - sut_sdk: [dotnet]
+    agents: [python_v10, go_v10, ts_v10, java_v10, rust_v10]
     transports: [grpc]
     reason: >
-      The .NET SDK defines the GRPC protocol-binding name but implements no
-      gRPC server or client — there is no Grpc.* package reference anywhere in
-      src/. The itk agent parses --grpcPort and never listens on it. Recorded
-      here as well as in matrix.yaml because the ceiling there only governs
-      dotnet_v10 as a peer; as SUT the agent is `current`, which the matrix
-      deliberately does not resolve.
+      .NET cannot dial any other SDK's gRPC endpoint, because every other SDK
+      advertises it as a bare 127.0.0.1:<port> rather than an absolute URL.
+      The v1.0.0 a2a.proto defines AgentInterface.url as an absolute URL,
+      with "https://grpc.example.com/a2a" as its gRPC example, and the .NET
+      itk agent follows it with http://127.0.0.1:<port>. python, go, ts and
+      java advertise the bare address, and a2a-rs strips http:// from GRPC
+      URLs on purpose. A2AClientFactory parses every interface URL with
+      new Uri(...), which rejects a bare IP address with "Invalid URI: The
+      URI scheme is not valid". The .NET gRPC binding itself works:
+      current <-> dotnet_v10 passes send_message (both streaming modes) and
+      resubscribe.
+
+  - agents: [dotnet_v10]
+    transports: [grpc]
+    unless_sut_sdk: [dotnet]
+    reason: >
+      python, go, ts and java cannot dial dotnet_v10's gRPC endpoint, because
+      their clients pass the advertised URL to the gRPC library as a raw dial
+      target and cannot handle an absolute URL. dotnet_v10 advertises
+      http://127.0.0.1:<port>, the form the v1.0.0 a2a.proto describes. The
+      errors are "too many colons in address" (go), "Could not find a
+      NameResolverProvider" (java), "Name resolution failed for target
+      dns:http://..." (ts) and "Misformatted domain name" (python). a2a-rs's
+      client accepts the scheme, so rust's outbound hop succeeds, but the
+      return hop is .NET dialing rust's bare address, which fails as
+      described above.
 
   # ---------------------------------------------------------------------
   # a2a-dotnet as SUT: push notifications are unimplemented
@@ -132,12 +153,15 @@ exclusions:
   # ---------------------------------------------------------------------
   - sut_sdk: [dotnet]
     agents: [python_v03, go_v03, ts_v03]
-    transports: [http_json]
+    transports: [grpc, http_json]
     reason: >
       A2A.V0_3Compat ships a JSON-RPC server (MapA2AWithV03Compat) and a
       JSON-RPC client (V03CompatClientFactory, which wraps A2A.V0_3.A2AClient)
-      and no REST counterpart for either, so the itk agent advertises a v0.3
-      interface for JSONRPC only. Over jsonrpc the same peers pass.
+      and no REST or gRPC counterpart for either, so the itk agent advertises
+      a v0.3 interface for JSONRPC only and throws NotSupportedException when
+      told to call a v0.3 peer over anything else. The gRPC server implements
+      only the v1.0 service and rejects an a2a-version of 0.3. Over jsonrpc
+      the same peers pass.
 
   # ---------------------------------------------------------------------
   # a2a-dotnet as SUT: go_v03's send configuration omits acceptedOutputModes
@@ -154,20 +178,35 @@ exclusions:
       passes over jsonrpc, so this is the go pairing specifically.
 
   # ---------------------------------------------------------------------
-  # a2a-java calling a2a-dotnet over JSON-RPC
+  # a2a-java calling a2a-dotnet over JSON-RPC: empty taskId/contextId
   # ---------------------------------------------------------------------
   - sut_sdk: [dotnet]
     agents: [java_v10]
     transports: [jsonrpc]
     reason: >
-      Return hop only, and JSON-RPC only — the same pair passes over
-      http_json. java's itk agent reports "Streaming error calling <dotnet>
-      via jsonrpc: org.a2aproject.sdk.spec.InvalidParamsError: Parameter 'id'
-      may not be null" and yields no result for the leg, so the traversal ends
-      with the outbound token and neither the return token nor
-      traversal-completed. The dotnet side logs a GetTask for
-      "<taskId>:subscribe", which is not an id it ever issued. Root cause not
-      established: the frames dotnet emits do carry a JSON-RPC `id`, so the
-      null is something java derives rather than reads. First surfaced when
-      a2a-dotnet moved to the shared scenario set — the pair had never run
-      before, since its old local set only named python_v10 and go_v10.
+      java's JSON-RPC client sends message.taskId and message.contextId as
+      empty strings, and a2a-dotnet adopts "" as the id of the task it
+      creates, which java then rejects. JSONRPCUtils.toJsonRPCRequest prints
+      the request with alwaysPrintFieldsWithNoPresence(), so unset fields go
+      out as "". In a2a.proto task_id and context_id are plain strings with
+      no presence, so "" means unset and the request is valid ProtoJSON.
+      A2AServer.ResolveContextAsync checks IsNullOrEmpty only before looking
+      up an existing task and otherwise falls through to `taskId ?? Guid...`,
+      so the task comes back with id "" and contextId "", and java's
+      ProtoUtils.FromProto.task fails with "Parameter 'id' may not be null".
+      Here that is the return hop; dotnet -> java passes. http_json passes
+      because java's REST client uses the plain JsonFormat.printer(), which
+      omits unset fields. Treating an empty taskId/contextId as absent in
+      ResolveContextAsync makes current <-> java_v10 pass over jsonrpc
+      (send_message both modes, resubscribe).
+
+  - sut_sdk: [java]
+    agents: [dotnet_v10]
+    transports: [jsonrpc]
+    reason: >
+      The same empty taskId/contextId defect as the entry above, on java's
+      outbound hop: dotnet_v10 creates a task with id "" and java rejects it
+      with "Parameter 'id' may not be null". All four jsonrpc variants
+      (send_message both modes, push_notification, resubscribe) have failed
+      in every a2a-java nightly since dotnet_v10 joined the matrix on
+      2026-09-25; http_json passes.
