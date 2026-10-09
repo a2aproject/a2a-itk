@@ -904,9 +904,9 @@ async def scenario_h12(httpx_client: httpx.AsyncClient) -> None:
         record(
             sid,
             expected=(
-                "While the out-of-band approval channel is simulated down, the task stays observably "
-                "AUTH_REQUIRED (no fabricated state) and the protected tool never fires; after the channel "
-                "is restored, a normal approval executes exactly once"
+                "While the A2A resume/decision-check path is simulated down after approval was "
+                "recorded, the task stays observably AUTH_REQUIRED and the protected tool does not "
+                "fire; after the path recovers, the recorded approval executes exactly once"
             ),
             actual=(
                 f"state1={state1}, state_during_outage={state_during_outage}, state_confirmed={state_confirmed}, "

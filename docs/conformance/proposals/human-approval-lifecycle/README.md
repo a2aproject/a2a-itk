@@ -1,9 +1,9 @@
 # Proposal: human-approval lifecycle on `AUTH_REQUIRED`
 
-A2A's `AUTH_REQUIRED` task state is the protocol's only built-in hook for
-"this task needs a human (or other out-of-band authority) to do something
-before the agent may proceed." The protocol spec defines the state and its
-entry transition — already covered by `SEC-AUTH-005` in
+A2A's `AUTH_REQUIRED` task state marks an authorization interruption,
+including human approval; `INPUT_REQUIRED` separately supports requests for
+additional user input. The protocol spec defines the authorization state and
+its entry transition — already covered by `SEC-AUTH-005` in
 [`scenarios/acts/auth-security.acts.yaml`](../../../../scenarios/acts/auth-security.acts.yaml)
 — but says nothing about what a human-in-the-loop (HIL) authorization step
 built on top of it must guarantee, because that is, correctly, an

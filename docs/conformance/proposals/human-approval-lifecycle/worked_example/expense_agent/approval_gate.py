@@ -9,10 +9,10 @@ This module is DELIBERATELY NOT an A2A protocol concept. It models:
 Architectural separation from A2A:
   - Nothing here imports a2a.types or a2a.server.* for its authorization
     decision. The approval gate's invariants (challenge validity, single use,
-    exact action-digest match, correct principal, non-expired, and the
-    expected PROTOCOL task state observed independently via the task store)
-    are checked using plain Python data, not A2A TaskState bookkeeping used
-    for convenience.
+    exact action-digest match, correct principal, non-expired, and a
+    simulator-supplied canceled-at-decision-time flag) are checked using
+    plain Python data. This gate does NOT independently query A2A task state
+    from the task store; the fixture tests SDK task-state handling separately.
   - The expense agent's AgentExecutor calls into this module, but this
     module does not call back into A2A machinery. This keeps "the task is in
     AUTH_REQUIRED" (protocol state) separate from "this specific challenge
@@ -108,12 +108,11 @@ class ApprovalGate:
         # A pluggable clock lets tests simulate "late approval after expiry"
         # deterministically instead of racing real wall-clock time.
         self._clock = time.time
-        # H12 fault injection: models the OUT-OF-BAND human-approval channel
-        # itself being unreachable/erroring, distinct from H03 (silence /
-        # no response at all). When True, the executor's resume handler
-        # refuses to even record a decision -- the task is left exactly as
-        # it was (AUTH_REQUIRED), because the channel never actually
-        # delivered anything, rather than fabricating a new protocol state.
+        # H12 fault injection: models an outage in the A2A resumption /
+        # recorded-decision check path AFTER an out-of-band decision exists.
+        # When True, the executor cannot act on the recorded decision and
+        # leaves the task AUTH_REQUIRED. The separate /__human__/decision
+        # endpoint is not blocked by this synthetic fault flag.
         self._channel_down = False
 
     def set_clock(self, clock) -> None:

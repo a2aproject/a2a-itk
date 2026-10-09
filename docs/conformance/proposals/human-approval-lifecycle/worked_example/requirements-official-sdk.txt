@@ -3,8 +3,8 @@
 # `../py_venv/bin/pip freeze` against the venv actually used to execute all
 # 12 scenarios in TEST_RESULTS.md. Install with:
 #
-#   python3 -m venv py_venv
-#   ./py_venv/bin/pip install -r requirements-official-sdk.txt
+#   python3 -m venv ../py_venv
+#   ../py_venv/bin/pip install -r requirements-official-sdk.txt
 #
 # The core pin is a2a-sdk==1.2.2 (the real, official A2A Python SDK used
 # throughout -- not a synthetic/hand-rolled stand-in). Everything else below

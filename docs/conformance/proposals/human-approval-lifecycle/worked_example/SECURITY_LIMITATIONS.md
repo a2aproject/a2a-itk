@@ -13,6 +13,11 @@ as one. Specifically:
   in `expense_agent/approval_gate.py` is the entire "trust" mechanism: a
   Python `==` string comparison. There is no notion of multiple principals,
   roles, or revocation.
+- **Cancellation flag is simulated, not authenticated.** The `taskIsCanceled`
+  field supplied to `/__human__/decision` is caller-provided test data, not an
+  independent authoritative task-state lookup. H04's full-stack terminal
+  protection is exercised separately at the SDK layer. A production gate
+  must derive cancellation from trusted state, not this boolean.
 - **In-memory, non-durable state.** `ApprovalGate` keeps all challenges and
   the mock ledger in process memory (`dict`/`list` behind a `threading.RLock`).
   A process restart loses everything. There is no persistence, no

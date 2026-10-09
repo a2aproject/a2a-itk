@@ -63,5 +63,5 @@ Every test has a level - `must`, `should` or `may`. An SDK is **conformant** on 
 Candidate additions that are not (yet) part of the corpus or the runner live
 under [`proposals/`](proposals/). See
 [`proposals/human-approval-lifecycle/README.md`](proposals/human-approval-lifecycle/README.md)
-for a worked example of human-approval (`AUTH_REQUIRED`) semantics and one
-proposed portable reconnection-observability test.
+for a non-normative human-approval (`AUTH_REQUIRED`) worked example and
+a conceptual reconnection-observability follow-up (not a ready ACTS test).

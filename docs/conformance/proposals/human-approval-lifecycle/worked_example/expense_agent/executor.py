@@ -298,21 +298,18 @@ class ExpenseAgentExecutor(AgentExecutor):
             )
             return
 
-        # H12: the out-of-band human-approval channel itself is simulated as
-        # down/unreachable (set via GATE.set_channel_down(True) from the
-        # test-only /__test__/channel endpoint). A decision therefore never
-        # actually arrives from that channel. We must NOT fabricate any
-        # protocol state here -- returning from execute() without calling any
-        # TaskUpdater method leaves the task exactly as it already was
-        # (AUTH_REQUIRED), which is the truthful observable outcome: the
-        # task is still waiting on a human, not failed/completed/canceled,
-        # because nothing about the A2A protocol state actually changed.
+        # H12: the human decision was ALREADY recorded out-of-band. The
+        # synthetic outage (GATE.set_channel_down(True) via /__test__/channel)
+        # prevents this A2A resume/check-in path from acting on that decision.
+        # We MUST NOT fabricate a protocol transition: returning without
+        # calling TaskUpdater leaves the task in AUTH_REQUIRED. The recorded
+        # decision is preserved for a subsequent check-in after recovery.
         # This applies to genuine decision tokens only (APPROVED/DENIED and
         # their H05/H07/H11 variants) -- RESUME_LATE's own terminal-state
         # short-circuit above-and-below is unaffected.
         if GATE.is_channel_down() and not resume_token.startswith(RESUME_LATE):
             logger.warning(
-                "task=%s human-approval channel simulated DOWN; decision discarded, task state unchanged",
+                "task=%s A2A decision-check path simulated DOWN; recorded decision deferred, task state unchanged",
                 context.task_id,
             )
             return
