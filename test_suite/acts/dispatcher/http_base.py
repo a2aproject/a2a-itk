@@ -349,6 +349,9 @@ class HttpDispatcher(Dispatcher):
                         f'instead of opening a stream',
                         self._refusal(response),
                     )
+                # The SSE parser compares the media type as written. RFC 9110
+                # says that comparison is case-insensitive, so fold it first.
+                response.headers['content-type'] = response.headers['content-type'].lower()
                 index = 0
                 async for sse in EventSource(response).aiter_sse():
                     try:
@@ -373,7 +376,13 @@ class HttpDispatcher(Dispatcher):
 
     @staticmethod
     def _is_sse(response: httpx.Response) -> bool:
-        return SSE_CONTENT_TYPE in response.headers.get('content-type', '').partition(';')[0]
+        # RFC 9110: the type and subtype are case-insensitive, and parameters
+        # such as charset are not part of the media type. A substring check
+        # accepts text/event-streamextra and nottext/event-stream.
+        media_type = (
+            response.headers.get('content-type', '').partition(';')[0].strip().lower()
+        )
+        return media_type == SSE_CONTENT_TYPE
 
     def _refusal(self, response: httpx.Response) -> WireResponse:
         """A non-SSE reply to a streaming call, parsed as an ordinary one."""
