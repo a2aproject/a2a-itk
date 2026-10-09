@@ -41,8 +41,8 @@ session, immediately before drafting this proposal:
 [PASS] H03: APPLICATION-POLICY test, not an A2A protocol one.
 [PASS] H04: Caller-visible check via get_task + ledger size, through full real-SDK stack.
 [PASS] H05: Approval itself was for different content than requested.
-[PASS] H06: Exercises ApprovalChallenge.used single-use flag.
-[PASS] H07: Requested action changed AFTER a genuine approval was already recorded.
+[PASS] H06: Duplicate approval did not execute a second time (blocked by the SDK's own terminal-task guard in this full-HTTP run; see note below).
+[PASS] H07: Post-approval resubmission with changed terms did not execute (same SDK-layer guard as H06; see note below).
 [PASS] H08: Verifies parent/child correlation + faithful AUTH_REQUIRED propagation.
 [PASS] H09: New A2A client/connection queries same task_id while pending.
 [PASS] H10: AUTH_REQUIRED means blocked-on-human-input; a client retry must not be treated as a decision.
@@ -53,6 +53,27 @@ session, immediately before drafting this proposal:
 
 EVIDENCE VERIFICATION SUMMARY: RESULT: PASS (all checks satisfied)
 ```
+
+**Note on H06/H07's actual mechanism:** in this full-HTTP run, the SECOND
+request in each scenario (the duplicate approval for H06, the tampered
+resubmission for H07) was rejected by the real SDK's own request-handler
+layer (`ActiveTask.start()`'s terminal-state guard, raising
+`UnsupportedOperationError: task is in a terminal state`) before the
+request ever reached `approval_gate.py`'s own `used`/digest-mismatch
+checks a second time. That is a real, valid, caller-visible outcome, but it
+is the **SDK's** guard that was actually exercised here, not the
+application's. Direct evidence that `approval_gate.py`'s own single-use and
+digest-mismatch invariants independently hold — with no SDK/task/HTTP layer
+anywhere in the call path to "help" — comes instead from the two focused,
+mutation-tested unit tests above
+(`approval_policy_focused_tests.py`): `APPROVAL-POLICY-01-replay-safety`
+races two concurrent calls against the same challenge purely through
+`approval_gate.py`'s own lock/flag, and
+`APPROVAL-POLICY-02-action-binding-tamper` submits a tampered action
+against a freshly-approved challenge with zero task/executor/HTTP
+involvement. Treat H06/H07 (full-stack) and the two focused tests
+(in-process) as two separately-useful, separately-attributed pieces of
+evidence, not one.
 
 Raw evidence (`scenario-results.jsonl`, wire-level HTTP traffic) for the H09
 row specifically, from this session's run:
@@ -75,10 +96,10 @@ fixture's `TEST_RESULTS.md`. Condensed here:
 | H03 | TTL/expiry is application policy, not a protocol timeout | No — worked example only |
 | H04 | Late-approval-after-expiry is caller-invisible due to an SDK-layer guard; informs classification only | No — informational, ties to upstream `a2a-python` PR #1182 |
 | H05 | Action tampering detected via digest mismatch (approval-content side) | No — worked example only |
-| H06 | Single-use replay protection | No — worked example only |
-| H07 | Action tampering detected via digest mismatch (post-approval-change side) | No — worked example only |
+| H06 | Duplicate approval does not execute twice in the full HTTP stack — but attributed to the SDK's own terminal-task guard, not `approval_gate.py`'s single-use check specifically (see note above); the focused in-process test proves the app-layer check independently | No — worked example only |
+| H07 | Same SDK-layer attribution note as H06, for a post-approval-tampering resubmission; the focused in-process test proves the app-layer digest check independently | No — worked example only |
 | H08 | Parent/child `AUTH_REQUIRED` correlation in a delegating multi-agent topology | No — fixture-specific convention (`coordinator.childTaskId`), no standard A2A mechanism exists; framed as opt-in, not `level: must` |
-| **H09** | **Fresh client/connection observes current (non-stale) `AUTH_REQUIRED` state via `GetTask`** | **Yes — see `acts-draft/README.md`** |
+| **H09** | **Fresh client/connection observes current (non-stale) `AUTH_REQUIRED` state via `GetTask`** | **Conceptual follow-up candidate only — not a ready test; see `acts-draft/README.md` for why the draft YAML does not yet exercise a real fresh connection** |
 | H10 | Naive retry of the original message must not bypass the gate | No — depends on this fixture's application policy, not protocol normativity |
 | H11 | Untrusted-principal claim rejected (mock allowlist, not real auth) | No — worked example only |
 | H12 | Out-of-band decision recording vs. in-band resumption-channel outage, kept observably distinct | No — worked example only |

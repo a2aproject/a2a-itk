@@ -11,10 +11,14 @@ application-level concern, not a protocol-level one.
 
 This proposal is in two parts, scoped very differently on purpose:
 
-1. **One small, genuinely portable ACTS test** — observable reconnection on
-   a pending `AUTH_REQUIRED` task — drafted in
-   [`acts-draft/README.md`](acts-draft/README.md) for upstream submission to
-   `a2aproject/A2A` (not to this repository; see that file for why).
+1. **One conceptual follow-up candidate, not a ready test** — observable
+   reconnection on a pending `AUTH_REQUIRED` task — sketched in
+   [`acts-draft/README.md`](acts-draft/README.md). As currently written it
+   does **not** actually exercise a fresh connection (this runner's
+   `HttpDispatcher` shares one client across a scenario's steps, and the
+   ACTS schema has no fresh-connection directive) — see that file for the
+   full gap analysis. It is included so the idea and its rationale travel
+   with this PR, not as something ready to propose to `a2aproject/A2A` as-is.
 2. **A worked, runnable reference example** —
    [`worked_example/`](worked_example/README.md) — showing one way to build
    the rest of a HIL approval lifecycle (action binding, replay protection,
@@ -31,14 +35,17 @@ to get lost if only the code or only the YAML is skimmed.
 | # | Behavior | Classification | Where it is tested/shown |
 | --- | --- | --- | --- |
 | 1 | A task enters `AUTH_REQUIRED` with a status message when authorization is needed | Normative A2A protocol (already covered) | `SEC-AUTH-005` |
-| 2 | A fresh client/connection querying `GetTask` on a pending task observes the *current* state, not a stale/cached/default one | Normative A2A protocol, **currently uncovered** | `acts-draft/README.md` (proposed `SEC-AUTH-007`, for upstream `a2aproject/A2A`) |
+| 2 | A fresh client/connection querying `GetTask` on a pending task observes the *current* state, not a stale/cached/default one | Likely-normative A2A protocol property, **currently uncovered as an executable test** — but not yet expressible as one in this runner's ACTS schema (no fresh-connection directive exists) | `acts-draft/README.md` — a conceptual candidate only, demonstrated instead via the worked example's `scenario_h09` |
 | 3 | A delegating parent's task faithfully propagates a child task's `AUTH_REQUIRED`, correlated so an outer caller can observe both | Fixture-specific worked-example design, not a protocol requirement (A2A defines no standard child/delegated-task-id mechanism) | `worked_example/` (H08) |
 | 4 | A naive client that retries the original message while `AUTH_REQUIRED` must not have that retry treated as a human decision | Depends on application policy, not protocol normativity | `worked_example/` (H10) |
 | 5 | The approved decision must bind to the exact action requested, come from a trusted principal, be single-use, expire, and survive an out-of-band channel outage without the protocol state being misrepresented | Application-policy responsibility — A2A is silent here by design | `worked_example/` (H03, H05-H07, H11, H12) |
 
-Row 2 is the only row proposed as a new conformance requirement. Everything
-else is demonstrated as "one correct way to build this," explicitly **not**
-as a claim about what A2A or ITK/ACTS requires of an arbitrary SDK or agent.
+Row 2 is the only row identified as a plausible future conformance
+requirement — but it is a conceptual candidate, not a ready test (see
+`acts-draft/README.md`); it is not being proposed for merge anywhere in its
+current form. Everything else is demonstrated as "one correct way to build
+this," explicitly **not** as a claim about what A2A or ITK/ACTS requires of
+an arbitrary SDK or agent.
 
 ## Why existing coverage does not already address this
 
@@ -68,7 +75,7 @@ for the one paragraph of context this proposal gives it.
 | Path | What it is |
 | --- | --- |
 | `README.md` | This file |
-| `acts-draft/README.md` | The one proposed portable ACTS test, as a draft for `a2aproject/A2A` (not this repo) |
+| `acts-draft/README.md` | The one conceptual ACTS test candidate, with a gap analysis of why it's not executable as written and what would need to change before it could be proposed to `a2aproject/A2A` |
 | `worked_example/` | The runnable reference example (code + its own README + security limitations) |
 | `TEST_RESULTS_SUMMARY.md` | What was actually run, where, and why the ACTS test itself could not be run through this repo's own harness |
 

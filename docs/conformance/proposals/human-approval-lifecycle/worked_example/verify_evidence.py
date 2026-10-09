@@ -124,15 +124,18 @@ def main() -> int:
     h04_direct_rows = read_jsonl(h04_direct_path)
     if h04_cross_sdk_rows or h04_direct_rows:
         notes.append(
-            f"H04 separate evidence files (optional --with-pr1182-comparison mode only): "
+            f"H04 separate cross-SDK-version evidence files found (not produced by this "
+            f"worked example's own bundled run.sh, which does not include that comparison "
+            f"mode -- see run.sh's header comment): "
             f"h04-cross-sdk-comparison.jsonl={len(h04_cross_sdk_rows)} rows, "
             f"h04-direct-child-probe.jsonl={len(h04_direct_rows)} rows "
             f"(reported separately; not part of the 12/12 core count)"
         )
     else:
         notes.append(
-            "H04 separate cross-SDK evidence files not present "
-            "(expected unless run.sh was invoked with --with-pr1182-comparison)"
+            "H04 separate cross-SDK evidence files not present (expected: this worked "
+            "example's bundled run.sh does not include the H04 cross-SDK-version "
+            "comparison mode; see run.sh's header comment)"
         )
 
     # --- Check 2: pass/fail/blocked accounting (overall, across all rows

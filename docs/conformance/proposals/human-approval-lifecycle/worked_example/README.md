@@ -47,7 +47,7 @@ repeated in [`../README.md`](../README.md):
 | What | Source of the requirement |
 | --- | --- |
 | The task must enter `AUTH_REQUIRED` with a status message when something needs out-of-band authorization | **Normative A2A protocol** (already covered by `SEC-AUTH-005`) |
-| A fresh client/connection querying `GetTask` on a pending task observes the current state, not a stale or default one | **Normative A2A protocol**, currently untested by ITK/ACTS — this is the one piece of this example proposed as a portable ACTS test; see `../acts-draft/` |
+| A fresh client/connection querying `GetTask` on a pending task observes the current state, not a stale or default one | Likely-**normative A2A protocol** property, currently untested by ITK/ACTS and not yet expressible as an ACTS test in this runner (no fresh-connection directive exists) — a conceptual follow-up candidate only; see `../acts-draft/` for the full gap analysis |
 | A delegating parent's task faithfully propagates a child task's `AUTH_REQUIRED`, correlated so an outer caller can observe both | **This fixture's own convention** (`coordinator.childTaskId` metadata) — valuable worked-example design, not a protocol requirement, since A2A defines no standard way to expose a child/delegated task id |
 | The approved decision must bind to the *exact* action it was requested for, come from a trusted principal, be single-use, expire, and survive a naive retry or an out-of-band channel outage without the protocol state being misrepresented | **Application policy** (`approval_gate.py`'s own invariants) — A2A is silent here by design, because HIL authorization semantics are explicitly out of protocol scope |
 
@@ -66,9 +66,11 @@ fixture, along with two focused, mutation-tested unit tests of
 matrix and for exactly what was (and was not) re-verified as part of this
 proposal.
 
-Only H09 (reconnection-observability) is proposed as a portable ACTS
-candidate. The rest are included here, runnable, as supporting design for the
-worked example — not as new conformance requirements.
+Only H09 (reconnection-observability) is identified as a plausible future
+ACTS candidate, and even that is a conceptual sketch with a known execution
+gap (see `../acts-draft/README.md`), not something proposed for merge. The
+rest are included here, runnable, as supporting design for the worked
+example — not as new conformance requirements.
 
 ## Running it
 
@@ -76,15 +78,20 @@ This is the same code as the originating fixture, reproduced here for
 reference; it is not wired into `a2a-itk`'s own `uv run` / pytest flow. To run
 it standalone:
 
-```bash
-# from a directory ABOVE this one (the venv is created as a SIBLING of the
-# directory containing requirements-official-sdk.txt, matching the
-# convention the originating fixture's own scripts assume):
-python3 -m venv py_venv
-py_venv/bin/pip install -r requirements-official-sdk.txt
-cd coordinator && npm ci && cd ..
+```sh
+cd docs/conformance/proposals/human-approval-lifecycle/worked_example
+python3 -m venv ../py_venv
+../py_venv/bin/pip install -r requirements-official-sdk.txt
+(cd coordinator && npm ci)
 ./run.sh
 ```
+
+The venv is created as `../py_venv` — a **sibling** of this `worked_example/`
+directory, not inside it — because `run.sh` (reproduced unmodified from the
+originating fixture) resolves its Python interpreter at that fixed sibling
+path. Start every command above from inside `worked_example/` itself; do not
+run them from one level up, since `requirements-official-sdk.txt` and
+`coordinator/` are both relative to this directory.
 
 `run.sh` starts the Expense Agent (`:8201`) and Coordinator (`:8301`), runs
 all twelve scenarios plus the two focused policy tests, prints a PASS/FAIL
