@@ -57,3 +57,11 @@ Every test has a level - `must`, `should` or `may`. An SDK is **conformant** on 
 | runner requirement | A capability of the runner itself a test needs (a webhook receiver, header inspection, ...) |
 | deviation | A second SUT started in a different configuration to reach tests the default one cannot |
 | section N | Section N of the ACTS specification, `docs/acts-specification.md` in the A2A repo |
+
+## Proposals
+
+Candidate additions that are not (yet) part of the corpus or the runner live
+under [`proposals/`](proposals/). See
+[`proposals/human-approval-lifecycle/README.md`](proposals/human-approval-lifecycle/README.md)
+for a non-normative human-approval (`AUTH_REQUIRED`) worked example and
+a conceptual reconnection-observability follow-up (not a ready ACTS test).
