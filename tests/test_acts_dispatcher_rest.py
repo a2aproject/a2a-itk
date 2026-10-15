@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from test_suite.acts.dispatcher import DispatchError, RestDispatcher
+from test_suite.acts.dispatcher.base import StreamNotOpened
 from test_suite.acts.schema import (
     ErrorType,
     HttpMethod,
@@ -337,3 +338,20 @@ class TestStreaming:
         handler = replying({})
         with pytest.raises(DispatchError, match='not a streaming operation'):
             self._collect(make(handler), Operation.GET_TASK, {'id': 't1'})
+
+    def test_a_refusal_arrives_as_a_status_document_not_a_406(self):
+        """`CORE-CAP-002` and `STREAM-SUB-003`: the conformant answer is a
+        REST error, not a stream."""
+        def handler(request):
+            accepted = [t.split(';')[0].strip() for t in request.headers['accept'].split(',')]
+            if 'application/a2a+json' not in accepted:
+                return httpx.Response(406)
+            return httpx.Response(
+                400,
+                json=status_error(400, 'FAILED_PRECONDITION', reason='UNSUPPORTED_OPERATION'),
+                headers={'Content-Type': 'application/a2a+json'},
+            )
+
+        with pytest.raises(StreamNotOpened) as refused:
+            self._collect(make(handler), Operation.SUBSCRIBE_TO_TASK, {'id': 't1'})
+        assert refused.value.response.error.error_type is ErrorType.UNSUPPORTED_OPERATION

@@ -32,6 +32,8 @@ from test_suite.acts.schema import Operation, RawBlock
 from test_suite.acts.wire_map import (
     ERROR_INFO_TYPE,
     SSE_CONTENT_TYPE,
+    JSONRPC_CONTENT_TYPE,
+    REST_CONTENT_TYPE,
     WELL_KNOWN_AGENT_CARD_PATH,
     binding_for_operation,
 )
@@ -324,7 +326,10 @@ class HttpDispatcher(Dispatcher):
         merged = self._headers(
             headers,
             content_type=self.content_type,
-            accept=SSE_CONTENT_TYPE,
+            # A refusal (`CORE-CAP-002`, `STREAM-SUB-003`) is an ordinary error
+            # document, not a stream. Admitting the JSON types lets a SUT that
+            # honours Accept send it rather than a 406.
+            accept=SSE_CONTENT_TYPE+', '+JSONRPC_CONTENT_TYPE+', '+REST_CONTENT_TYPE,
             defaults=defaults,
         )
         if content is None and payload is not None:
