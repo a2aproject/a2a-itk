@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from test_suite.acts.dispatcher import DispatchError, JsonRpcDispatcher
+from test_suite.acts.dispatcher.base import StreamNotOpened
 from test_suite.acts.schema import (
     ErrorType,
     HttpMethod,
@@ -401,6 +402,26 @@ class TestStreaming:
         handler = replying(result({}))
         with pytest.raises(DispatchError, match='not a streaming operation'):
             self._collect(make(handler), Operation.GET_TASK, {'id': 't1'})
+
+    def test_sse_media_type_is_exact_and_case_insensitive(self):
+        """RFC 9110 media types ignore case. A longer type that only contains
+        the SSE name is not a stream."""
+        def collect(content_type):
+            def handler(request):
+                return httpx.Response(
+                    200,
+                    text=sse(result({'task': {'id': 't1'}})),
+                    headers={'Content-Type': content_type},
+                )
+
+            return self._collect(
+                make(handler), Operation.SEND_STREAMING_MESSAGE, {'message': {}}
+            )
+
+        events = collect('Text/Event-Stream; charset=utf-8')
+        assert events[0].data == {'task': {'id': 't1'}}
+        with pytest.raises(StreamNotOpened):
+            collect('text/event-streamextra')
 
     def test_the_observed_http_status_rides_every_event(self):
         """A step may assert `expect.status` beside `expect_stream`; the value
