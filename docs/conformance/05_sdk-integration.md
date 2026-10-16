@@ -132,7 +132,7 @@ Tests under `push-notifications.acts.yaml` register a config whose `url` is the 
 - when the task changes state, `POST` the update to the configured URL;
 - put `PushNotificationConfig.token` in the `X-A2A-Notification-Token` header, and the `authentication.credentials` in `Authorization: Bearer ...` when a scheme was given.
 
-The delivery tests (`PUSH-DELIV-*`) are `may`-level and need the receiver, which `acts_runner` starts for every pass; a receiver that would not start makes them skip. An agent that advertises `pushNotifications: false` skips the whole file, which is the current state of a2a-dotnet.
+The delivery tests (`PUSH-DELIV-*`) are `may`-level and need the receiver, which `acts_runner` starts for every pass; a receiver that would not start makes them skip. An agent that advertises `pushNotifications: false` skips the whole file, so integrations should reserve that value for agents that cannot support push or for the reduced-capabilities pass.
 
 ## 7. Client tests
 

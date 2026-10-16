@@ -146,7 +146,7 @@ What happens on a match:
 
 - If the exclusion names `agents`, those peers are **removed from the graph** and the scenario still runs. A star with one arm gone still tests the others. This is reported as "trimmed", separately from skips, because the scenario now covers less than its file says.
 - If removing them would leave fewer than two agents, or the scenario has an explicit `edges` list that cannot be re-indexed, the scenario is skipped.
-- If the exclusion names no `agents` (for example "dotnet as SUT with `push_notification`"), the whole scenario is skipped.
+- If the exclusion names no `agents` (for example, a SUT-wide behavior exclusion), the whole scenario is skipped.
 
 Why exclusions exist rather than per-scenario markers: with `peers: all` there is no line in any file to annotate. And why every one is logged: an exclusion nobody sees is the same thing as coverage that silently vanished.
 

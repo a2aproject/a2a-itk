@@ -103,52 +103,6 @@ exclusions:
       already excluded for non-TS SUTs.
 
   # ---------------------------------------------------------------------
-  # gRPC between a2a-dotnet and every other SDK: interface URL format
-  # ---------------------------------------------------------------------
-  - sut_sdk: [dotnet]
-    agents: [python_v10, go_v10, ts_v10, java_v10, rust_v10]
-    transports: [grpc]
-    reason: >
-      .NET cannot dial any other SDK's gRPC endpoint, because every other SDK
-      advertises it as a bare 127.0.0.1:<port> rather than an absolute URL.
-      The v1.0.0 a2a.proto defines AgentInterface.url as an absolute URL,
-      with "https://grpc.example.com/a2a" as its gRPC example, and the .NET
-      itk agent follows it with http://127.0.0.1:<port>. python, go, ts and
-      java advertise the bare address, and a2a-rs strips http:// from GRPC
-      URLs on purpose. A2AClientFactory parses every interface URL with
-      new Uri(...), which rejects a bare IP address with "Invalid URI: The
-      URI scheme is not valid". The .NET gRPC binding itself works:
-      current <-> dotnet_v10 passes send_message (both streaming modes) and
-      resubscribe.
-
-  - agents: [dotnet_v10]
-    transports: [grpc]
-    unless_sut_sdk: [dotnet]
-    reason: >
-      python, go, ts and java cannot dial dotnet_v10's gRPC endpoint, because
-      their clients pass the advertised URL to the gRPC library as a raw dial
-      target and cannot handle an absolute URL. dotnet_v10 advertises
-      http://127.0.0.1:<port>, the form the v1.0.0 a2a.proto describes. The
-      errors are "too many colons in address" (go), "Could not find a
-      NameResolverProvider" (java), "Name resolution failed for target
-      dns:http://..." (ts) and "Misformatted domain name" (python). a2a-rs's
-      client accepts the scheme, so rust's outbound hop succeeds, but the
-      return hop is .NET dialing rust's bare address, which fails as
-      described above.
-
-  # ---------------------------------------------------------------------
-  # a2a-dotnet as SUT: push notifications are unimplemented
-  # ---------------------------------------------------------------------
-  - sut_sdk: [dotnet]
-    behaviors: [push_notification]
-    reason: >
-      A2AServer answers every push-notification config operation —
-      Create/Get/List/Delete — with PushNotificationNotSupported
-      unconditionally; there is no option to turn it on. The agent card
-      advertises pushNotifications=false to match, so ACTS skips its
-      PUSH-* tests for the same reason.
-
-  # ---------------------------------------------------------------------
   # a2a-dotnet as SUT: v0.3 peers over JSON-RPC only
   # ---------------------------------------------------------------------
   - sut_sdk: [dotnet]
