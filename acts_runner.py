@@ -351,14 +351,16 @@ def sut_repo_root() -> Path:
 async def run(
     *,
     transport: TransportBinding,
+    sut_url: str | None = None,
     suite_path: Path | None = None,
     test_ids: list[str] | None = None,
     variables: dict[str, Any] | None = None,
     capabilities: list[RunnerRequirement] | None = None,
     gate_on_behaviors: bool = True,
+    behaviors_path: Path | None = None,
     log_dir: Path | None = None,
 ) -> ActsRun:
-    """Start the SUT, run the corpus against it, and collect the results.
+    """Start the SUT (or dial ``sut_url``), run the corpus, and collect results.
 
     Only the tests ``transport`` is graded on take part; see :func:`_in_scope`.
     """
@@ -389,15 +391,18 @@ async def run(
     declared = None
     if gate_on_behaviors:
         try:
-            declared = sut_behaviors.declared_by(sut_repo_root())
+            if behaviors_path is not None:
+                declared = sut_behaviors.load(behaviors_path).prefixes()
+            elif sut_url is None:
+                declared = sut_behaviors.declared_by(sut_repo_root())
+                if declared is None:
+                    logger.warning(
+                        'No %s in the SUT checkout — behaviour gating is off. Tests '
+                        'needing a tck-* prefix will run and probably fail.',
+                        sut_behaviors.CONTRACT_PATH,
+                    )
         except sut_behaviors.BehaviorsFileError as exc:
             raise ActsRunError(str(exc)) from exc
-        if declared is None:
-            logger.warning(
-                'No %s in the SUT checkout — behaviour gating is off. Tests '
-                'needing a tck-* prefix will run and probably fail.',
-                sut_behaviors.CONTRACT_PATH,
-            )
 
     started = time.monotonic()
     results, card = await _run_pass(
@@ -408,19 +413,34 @@ async def run(
         declared=declared,
         log_dir=log_dir,
         log_name='acts_sut',
+        sut_url=sut_url,
     )
 
-    for deviation in DEVIATIONS:
-        results = await _rerun_deviation(
-            results,
-            suite,
-            deviation=deviation,
-            transport=transport,
-            variables=variables,
-            capabilities=capabilities,
-            declared=declared,
-            log_dir=log_dir,
-        )
+    if sut_url is not None:
+        for deviation in DEVIATIONS:
+            blocked = _skips_matching(results, deviation.skip_pattern)
+            if blocked:
+                logger.info(
+                    'External SUT at %s cannot be restarted with %s; '
+                    '%d %s test(s) stay skipped: %s',
+                    sut_url,
+                    deviation.env_var,
+                    len(blocked),
+                    deviation.description,
+                    ', '.join(sorted(blocked)),
+                )
+    else:
+        for deviation in DEVIATIONS:
+            results = await _rerun_deviation(
+                results,
+                suite,
+                deviation=deviation,
+                transport=transport,
+                variables=variables,
+                capabilities=capabilities,
+                declared=declared,
+                log_dir=log_dir,
+            )
 
     return ActsRun(
         results=results,
@@ -441,22 +461,29 @@ async def _run_pass(
     declared: frozenset[str] | None,
     log_dir: Path | None,
     log_name: str,
+    sut_url: str | None = None,
 ) -> tuple[list[TestResult], dict[str, Any]]:
-    """Start one SUT, run ``suite`` against it, and tear it down."""
-    with Cluster(log_dir=log_dir) as cluster:
-        outcomes = await asyncio.to_thread(
-            cluster.start_all, [TargetSpec(kind=Kind.MOUNT)], log_names=[log_name],
-        )
-        outcome = outcomes[0]
-        if not outcome.ok():
-            raise ActsRunError(
-                f'the code under test failed to start: '
-                f'{outcome.error.stage.value}: {outcome.error}'
+    """Start one SUT (or use ``sut_url``), run ``suite`` against it, and tear it down."""
+    with contextlib.ExitStack() as stack:
+        if sut_url is not None:
+            base_url = sut_url
+        else:
+            cluster = stack.enter_context(Cluster(log_dir=log_dir))
+            outcomes = await asyncio.to_thread(
+                cluster.start_all,
+                [TargetSpec(kind=Kind.MOUNT)],
+                log_names=[log_name],
             )
+            outcome = outcomes[0]
+            if not outcome.ok():
+                raise ActsRunError(
+                    f'the code under test failed to start: '
+                    f'{outcome.error.stage.value}: {outcome.error}'
+                )
 
-        handle = outcome.handle
-        base_url = f'http://127.0.0.1:{handle.http_port}'
-        logger.info('SUT up at %s (grpc :%s)', base_url, handle.grpc_port)
+            handle = outcome.handle
+            base_url = f'http://127.0.0.1:{handle.http_port}'
+            logger.info('SUT up at %s (grpc :%s)', base_url, handle.grpc_port)
 
         card = await fetch_agent_card(base_url)
         dispatcher = build_dispatcher(card, transport, base_url)

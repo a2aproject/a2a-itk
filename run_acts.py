@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Run the ACTS conformance corpus against a local SDK checkout.
+"""Run the ACTS conformance corpus against a local SDK checkout or running SUT.
 
 The dev counterpart of ``POST /run-acts``: same pipeline, no container.
 
     ./run_acts.py --mount ../a2a-python/itk --sdk a2a-python --language python
     ./run_acts.py --mount ../a2a-python/itk --sdk a2a-python --transport all
     ./run_acts.py --mount ../a2a-python/itk --sdk a2a-python -t CORE-SEND-001
+    ./run_acts.py --sut-url http://127.0.0.1:8080 --sdk my-sdk --language go
 
 Each binding gets its own fresh SUT, matching what the nightly does: one
 `POST /run-acts` per transport, so no run inherits another's task store.
 
 ``--mount`` points the SUT at a checkout's ``itk/`` directory, exactly as the
 container's bind mount does, by setting ``$ITK_MOUNT_DIR`` before the launcher
-reads it.
+reads it. ``--sut-url`` dials an already-running external SUT directly.
 """
 
 from __future__ import annotations
@@ -136,11 +137,16 @@ def _generate_protos(mount: Path) -> None:
     prepare(mount)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        '--mount', type=Path, required=True,
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument(
+        '--mount', type=Path,
         help="The SDK's itk/ directory to run as the SUT.",
+    )
+    target.add_argument(
+        '--sut-url', default=None, metavar='URL',
+        help='Base URL of an already-running SUT (skips launcher and codegen).',
     )
     parser.add_argument('--sdk', required=True, help='SDK name for the report.')
     parser.add_argument('--sdk-version', default='unknown')
@@ -170,6 +176,10 @@ def main() -> int:
         help='Directory to write the §13 report into.',
     )
     parser.add_argument(
+        '--behaviors', type=Path, default=None, metavar='PATH',
+        help="Path to the SUT's sut-behaviors.yaml contract file.",
+    )
+    parser.add_argument(
         '--no-gate', action='store_true',
         help="Ignore the SUT's acts/sut-behaviors.yaml contract.",
     )
@@ -179,25 +189,27 @@ def main() -> int:
     )
     parser.add_argument('--json', action='store_true', help='Print the report.')
     parser.add_argument('-v', '--verbose', action='store_true')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format='%(levelname)s %(name)s: %(message)s',
     )
 
-    mount = args.mount.resolve()
-    if not mount.is_dir():
-        parser.error(f'--mount {mount} is not a directory')
-    # Read by test_suite.launcher.config.mount_dir(); must be set before the
-    # launcher is imported anywhere that caches it.
-    os.environ['ITK_MOUNT_DIR'] = str(mount)
+    mount: Path | None = None
+    if args.mount is not None:
+        mount = args.mount.resolve()
+        if not mount.is_dir():
+            parser.error(f'--mount {mount} is not a directory')
+        # Read by test_suite.launcher.config.mount_dir(); must be set before the
+        # launcher is imported anywhere that caches it.
+        os.environ['ITK_MOUNT_DIR'] = str(mount)
 
     import acts_runner
     from test_suite.acts import report as report_writer
     from test_suite.acts.schema import TransportBinding
 
-    if not args.no_codegen:
+    if mount is not None and not args.no_codegen:
         _generate_protos(mount)
 
     reports = []
@@ -206,9 +218,11 @@ def main() -> int:
             result = asyncio.run(
                 acts_runner.run(
                     transport=TransportBinding(binding),
+                    sut_url=args.sut_url,
                     suite_path=args.suite,
                     test_ids=args.tests,
                     gate_on_behaviors=not args.no_gate,
+                    behaviors_path=args.behaviors,
                 )
             )
         except acts_runner.NoApplicableTests as exc:

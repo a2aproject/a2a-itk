@@ -694,3 +694,45 @@ class TestMatrixLoad:
         # Cleanup — restore real classmethod so other tests aren't affected.
         monkeypatch.setattr(itk_runner.Matrix, 'from_default',
                             staticmethod(real_from_default))
+
+
+class TestRunActsEndpoint:
+    def test_forwards_sut_url_to_acts_runner(self, monkeypatch, client):
+        import acts_runner
+        from test_suite.acts import load_suite
+        from test_suite.acts.runner import Outcome, TestResult
+        from test_suite.acts.schema import Level, TransportBinding
+
+        captured: dict[str, Any] = {}
+
+        async def fake_run(**kwargs):
+            captured.update(kwargs)
+            suite = load_suite(acts_runner.DEFAULT_SUITE)
+            return acts_runner.ActsRun(
+                results=[
+                    TestResult(
+                        id='CORE-SEND-001',
+                        name='x',
+                        level=Level.MUST,
+                        result=Outcome.PASS,
+                        duration_ms=1,
+                    )
+                ],
+                suite=suite,
+                transport=TransportBinding.JSONRPC,
+                duration_ms=1,
+            )
+
+        monkeypatch.setattr(acts_runner, 'run', fake_run)
+        response = client.post(
+            '/run-acts',
+            json={
+                'transport': 'jsonrpc',
+                'sdk': 'onea2a-esf',
+                'language': 'cpp',
+                'sut_url': 'http://external.sut:8788',
+            },
+        )
+        assert response.status_code == 200
+        assert captured['sut_url'] == 'http://external.sut:8788'
+        assert response.json()['sdk']['name'] == 'onea2a-esf'
