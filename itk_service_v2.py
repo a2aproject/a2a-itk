@@ -111,6 +111,8 @@ class RunActsRequest(BaseModel):
     sdk_version: str = 'unknown'
     language: str = 'unknown'
     repository: str | None = None
+    #: Base URL of an already-running SUT; when absent, starts the mounted SUT.
+    sut_url: str | None = None
     #: Restrict the run to these test ids. For iterating on one failure
     #: without paying for the whole corpus.
     tests: list[str] | None = None
@@ -234,6 +236,7 @@ async def run_acts(request: RunActsRequest) -> dict[str, Any]:
     try:
         result = await acts_runner.run(
             transport=request.transport,
+            sut_url=request.sut_url,
             test_ids=request.tests,
             variables=request.variables,
             capabilities=request.capabilities,

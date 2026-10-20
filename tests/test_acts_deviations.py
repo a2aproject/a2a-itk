@@ -394,3 +394,193 @@ class TestTheNarrowedSuiteIsBuildable:
                 f'{name!r} is dropped when acts_runner narrows a suite; either '
                 f'carry it at both call sites or confirm an empty default is right'
             )
+
+
+class TestExternalSutUrl:
+    """When `sut_url` is set, no `Cluster` is spawned and deviations are skipped."""
+
+    def test_run_pass_skips_cluster_when_sut_url_is_set(self, monkeypatch):
+        import contextlib
+
+        def no_cluster(*args, **kwargs):
+            raise AssertionError('Cluster must not be instantiated when sut_url is set')
+
+        async def fake_fetch_card(base_url, **kwargs):
+            assert base_url == 'http://external.sut:8788'
+            return {'supportedInterfaces': [{'protocolBinding': 'JSONRPC', 'url': base_url}]}
+
+        class _DummyDispatcher:
+            binding = TransportBinding.JSONRPC
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        @contextlib.asynccontextmanager
+        async def fake_webhook():
+            yield None, None
+
+        class _DummyRunner:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def run_suite(self, suite):
+                return [
+                    TestResult(
+                        id='CORE-SEND-001',
+                        name='x',
+                        level=Level.MUST,
+                        result=Outcome.PASS,
+                        duration_ms=1,
+                    )
+                ]
+
+        monkeypatch.setattr(acts_runner, 'Cluster', no_cluster)
+        monkeypatch.setattr(acts_runner, 'fetch_agent_card', fake_fetch_card)
+        monkeypatch.setattr(
+            acts_runner, 'build_dispatcher', lambda *a, **kw: _DummyDispatcher()
+        )
+        monkeypatch.setattr(acts_runner, '_webhook_receiver', fake_webhook)
+        monkeypatch.setattr(acts_runner, 'Runner', _DummyRunner)
+
+        suite = load_suite(MANIFEST)
+        results, card = asyncio.run(
+            acts_runner._run_pass(
+                suite,
+                transport=TransportBinding.JSONRPC,
+                variables=None,
+                capabilities=None,
+                declared=None,
+                log_dir=None,
+                log_name='acts_sut',
+                sut_url='http://external.sut:8788',
+            )
+        )
+        assert len(results) == 1
+        assert card['supportedInterfaces'][0]['url'] == 'http://external.sut:8788'
+
+    def test_run_skips_deviations_and_mount_dir_when_sut_url_is_set(
+        self, monkeypatch, caplog
+    ):
+        import logging
+
+        calls: list[str | None] = []
+
+        async def fake_pass(suite, *, sut_url=None, **kwargs):
+            calls.append(sut_url)
+            return [
+                skipped('CORE-CAP-002', 'agent card capability streaming=True, needs False'),
+                skipped('SEC-AUTH-001', 'agent card authentication=False, needs True'),
+            ], {}
+
+        def no_repo_root():
+            raise AssertionError('sut_repo_root must not be called when sut_url is set')
+
+        monkeypatch.setattr(acts_runner, '_run_pass', fake_pass)
+        monkeypatch.setattr(acts_runner, 'sut_repo_root', no_repo_root)
+
+        with caplog.at_level(logging.INFO, logger='acts_runner'):
+            outcome = asyncio.run(
+                acts_runner.run(
+                    transport=TransportBinding.JSONRPC,
+                    sut_url='http://external.sut:8788',
+                    test_ids=['CORE-SEND-001'],
+                )
+            )
+
+        assert calls == ['http://external.sut:8788']
+        assert outcome.declared_behaviors is None
+        assert 'CORE-CAP-002' in caplog.text
+        assert 'SEC-AUTH-001' in caplog.text
+
+    def test_run_reads_behaviors_path_directly(self, monkeypatch, tmp_path):
+        behaviors_file = tmp_path / 'sut-behaviors.yaml'
+        behaviors_file.write_text(
+            'acts_version: "1.0"\n'
+            'behaviors:\n'
+            '  - prefix: "tck-complete-task"\n'
+            '    description: "complete"\n',
+            encoding='utf-8',
+        )
+        seen_declared: list[frozenset[str] | None] = []
+
+        async def fake_pass(suite, *, declared=None, **kwargs):
+            seen_declared.append(declared)
+            return [], {}
+
+        monkeypatch.setattr(acts_runner, '_run_pass', fake_pass)
+
+        outcome = asyncio.run(
+            acts_runner.run(
+                transport=TransportBinding.JSONRPC,
+                sut_url='http://external.sut:8788',
+                test_ids=['CORE-SEND-001'],
+                behaviors_path=behaviors_file,
+            )
+        )
+        assert seen_declared == [frozenset({'tck-complete-task'})]
+        assert outcome.declared_behaviors == frozenset({'tck-complete-task'})
+
+    def test_run_acts_cli_sut_url_and_mount_are_mutually_exclusive(
+        self, monkeypatch, tmp_path
+    ):
+        import run_acts
+
+        with pytest.raises(SystemExit):
+            run_acts.main(['--sdk', 'x'])
+
+        with pytest.raises(SystemExit):
+            run_acts.main([
+                '--mount', str(tmp_path),
+                '--sut-url', 'http://external.sut:8788',
+                '--sdk', 'x',
+            ])
+
+    def test_run_acts_cli_forwards_sut_url_and_behaviors_without_codegen(
+        self, monkeypatch, tmp_path
+    ):
+        import run_acts
+
+        monkeypatch.delenv('ITK_MOUNT_DIR', raising=False)
+        monkeypatch.setattr(
+            run_acts,
+            '_generate_protos',
+            lambda *a: (_ for _ in ()).throw(AssertionError('codegen must not run')),
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_run(**kwargs):
+            captured.update(kwargs)
+            suite = load_suite(MANIFEST)
+            return acts_runner.ActsRun(
+                results=[
+                    TestResult(
+                        id='CORE-SEND-001',
+                        name='x',
+                        level=Level.MUST,
+                        result=Outcome.PASS,
+                        duration_ms=1,
+                    )
+                ],
+                suite=suite,
+                transport=kwargs['transport'],
+                duration_ms=1,
+            )
+
+        monkeypatch.setattr(acts_runner, 'run', fake_run)
+        behaviors_file = tmp_path / 'sut-behaviors.yaml'
+
+        rc = run_acts.main([
+            '--sut-url', 'http://external.sut:8788',
+            '--behaviors', str(behaviors_file),
+            '--sdk', 'onea2a-esf',
+            '--language', 'cpp',
+            '--json',
+        ])
+        assert rc == 0
+        assert 'ITK_MOUNT_DIR' not in os.environ
+        assert captured['sut_url'] == 'http://external.sut:8788'
+        assert captured['behaviors_path'] == behaviors_file
+        assert captured['gate_on_behaviors'] is True
