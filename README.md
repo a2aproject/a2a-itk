@@ -90,9 +90,12 @@ Peers are fetched and built on first use and cached under `~/.cache/a2a-itk`, so
 uv run run_acts.py --mount ~/Source/a2a-python/itk --sdk a2a-python                   # JSON-RPC
 uv run run_acts.py --mount ~/Source/a2a-python/itk --sdk a2a-python --transport all   # every binding
 uv run run_acts.py --mount ~/Source/a2a-python/itk --sdk a2a-python -t CORE-SEND-001 -v
+
+# an agent you started yourself, e.g. one the launcher cannot build
+uv run run_acts.py --sut-url http://127.0.0.1:9000 --sdk a2a-foo --behaviors ../a2a-foo/acts/sut-behaviors.yaml
 ```
 
-Exit code 0 means conformant: every `must` test passed on every binding that ran. Details: [running ACTS](docs/conformance/01_running.md).
+Exit code 0 means conformant: every `must` test passed on every binding that ran. Details: [running ACTS](docs/conformance/01_running.md), including the two extra instances an external agent needs for the deviation tests.
 
 ### In the container
 

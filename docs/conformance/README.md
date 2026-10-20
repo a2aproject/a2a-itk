@@ -35,10 +35,10 @@ Every test has a level - `must`, `should` or `may`. An SDK is **conformant** on 
 
 | Doc | Read it when you want to |
 | --- | --- |
-| [01_running.md](01_running.md) | Run the corpus against a local SDK checkout, in Docker, or through the service |
+| [01_running.md](01_running.md) | Run the corpus against a local SDK checkout or an agent that is already running, in Docker, or through the service |
 | [02_architecture.md](02_architecture.md) | Understand how a YAML test becomes wire calls and a verdict, and what the runner does that the spec leaves open |
 | [03_corpus.md](03_corpus.md) | Know where the tests come from, how they are organised, and how to refresh the mirror |
-| [04_ci.md](04_ci.md) | See how SDK repositories run ACTS on pull requests and nightly, and where reports go |
+| [04_ci.md](04_ci.md) | See how SDK repositories run ACTS on pull requests and nightly, how an agent the launcher cannot start runs it, and where reports go |
 | [05_sdk-integration.md](05_sdk-integration.md) | Make an SDK's test agent ACTS-ready: behaviors, contract file, auth, deviation modes |
 | [06_status.md](06_status.md) | Know which SDKs run it, how gating works today, and what is still open |
 
@@ -46,7 +46,7 @@ Every test has a level - `must`, `should` or `may`. An SDK is **conformant** on 
 
 | Term | Meaning |
 | --- | --- |
-| SUT | System under test: the one agent an ACTS run talks to. Always the mounted `current` checkout |
+| SUT | System under test: the one agent an ACTS run talks to. Either the mounted `current` checkout, which the harness starts, or an agent already running at `--sut-url` |
 | binding, transport | `jsonrpc`, `grpc` or `rest` (ACTS's name for HTTP+JSON) |
 | corpus | The set of `*.acts.yaml` files. 113 tests in 14 files plus a manifest |
 | suite | A named group of tests inside one file (`core-operations`, `streaming`, ...) |
@@ -55,5 +55,5 @@ Every test has a level - `must`, `should` or `may`. An SDK is **conformant** on 
 | contract, `sut-behaviors.yaml` | The file in which an SDK declares which prefixes its agent implements |
 | precondition | A condition on the SUT's agent card (a capability, a security scheme) a test needs; unmet means skip |
 | runner requirement | A capability of the runner itself a test needs (a webhook receiver, header inspection, ...) |
-| deviation | A second SUT started in a different configuration to reach tests the default one cannot |
+| deviation | A second SUT in a different configuration, to reach tests the default one cannot. Started by the harness, or for an external SUT supplied by the caller |
 | section N | Section N of the ACTS specification, `docs/acts-specification.md` in the A2A repo |

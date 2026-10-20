@@ -124,6 +124,8 @@ For most SDKs this is a few lines: the server already refuses operations the car
 
 Both deviation variables are read by the agent process; the runner sets them in its own environment before spawning, which the launcher passes through unchanged.
 
+An agent the launcher cannot start can still be tested in full: start the three instances yourself (default, `ITK_ACTS_REDUCED_CAPABILITIES=1`, `ITK_ACTS_AUTH=1`) and pass them as `--sut-url`, `--reduced-sut-url` and `--auth-sut-url`, with `--behaviors` pointing at the contract file. See [01_running.md](01_running.md#against-an-already-running-agent).
+
 ## 6. Push notifications
 
 Tests under `push-notifications.acts.yaml` register a config whose `url` is the runner's receiver - `{{webhookUrl}}`, resolved to `http://127.0.0.1:<port>/notifications` on the host the runner is on - and then watch the receiver. The agent has to:

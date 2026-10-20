@@ -6,14 +6,20 @@ The dev counterpart of ``POST /run-acts``: same pipeline, no container.
     ./run_acts.py --mount ../a2a-python/itk --sdk a2a-python --language python
     ./run_acts.py --mount ../a2a-python/itk --sdk a2a-python --transport all
     ./run_acts.py --mount ../a2a-python/itk --sdk a2a-python -t CORE-SEND-001
-    ./run_acts.py --sut-url http://127.0.0.1:8080 --sdk my-sdk --language go
-
-Each binding gets its own fresh SUT, matching what the nightly does: one
-`POST /run-acts` per transport, so no run inherits another's task store.
+    ./run_acts.py --sut-url http://127.0.0.1:8080 --sdk my-sdk --behaviors acts/sut-behaviors.yaml
 
 ``--mount`` points the SUT at a checkout's ``itk/`` directory, exactly as the
 container's bind mount does, by setting ``$ITK_MOUNT_DIR`` before the launcher
-reads it. ``--sut-url`` dials an already-running external SUT directly.
+reads it. Each binding then gets its own fresh SUT, matching what the nightly
+does: one `POST /run-acts` per transport, so no run inherits another's task
+store.
+
+``--sut-url`` dials an agent the caller already started, and every binding
+runs against that one instance. The harness cannot restart it, so the
+instances the reduced-capability and auth passes would otherwise spawn come
+from ``--reduced-sut-url`` and ``--auth-sut-url``; without them those tests
+stay skipped. ``--behaviors`` names the contract file the checkout would have
+held.
 """
 
 from __future__ import annotations
@@ -148,6 +154,16 @@ def main(argv: list[str] | None = None) -> int:
         '--sut-url', default=None, metavar='URL',
         help='Base URL of an already-running SUT (skips launcher and codegen).',
     )
+    parser.add_argument(
+        '--reduced-sut-url', default=None, metavar='URL',
+        help='With --sut-url: a second instance of the SUT, started with '
+             'ITK_ACTS_REDUCED_CAPABILITIES=1.',
+    )
+    parser.add_argument(
+        '--auth-sut-url', default=None, metavar='URL',
+        help='With --sut-url: a third instance of the SUT, started with '
+             'ITK_ACTS_AUTH=1.',
+    )
     parser.add_argument('--sdk', required=True, help='SDK name for the report.')
     parser.add_argument('--sdk-version', default='unknown')
     parser.add_argument(
@@ -160,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         '--transport', action='append', dest='transports', metavar='BINDING',
         choices=['jsonrpc', 'grpc', 'rest', 'all'],
         help='Binding to run against. Repeatable, or `all` for every one. '
-             'Each gets its own fresh SUT, as the nightly does. '
+             'With --mount each gets its own fresh SUT, as the nightly does. '
              'Default: jsonrpc.',
     )
     parser.add_argument(
@@ -190,6 +206,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--json', action='store_true', help='Print the report.')
     parser.add_argument('-v', '--verbose', action='store_true')
     args = parser.parse_args(argv)
+
+    if args.sut_url is None and (args.reduced_sut_url or args.auth_sut_url):
+        parser.error('--reduced-sut-url and --auth-sut-url need --sut-url')
+    for flag, url in (
+        ('--sut-url', args.sut_url),
+        ('--reduced-sut-url', args.reduced_sut_url),
+        ('--auth-sut-url', args.auth_sut_url),
+    ):
+        # Caught here rather than as a failed card fetch after the run starts.
+        if url is not None and not url.startswith(('http://', 'https://')):
+            parser.error(f'{flag} must be an http:// or https:// URL, got {url!r}')
+    if args.behaviors is not None and args.no_gate:
+        parser.error('--behaviors and --no-gate contradict each other')
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -223,6 +252,12 @@ def main(argv: list[str] | None = None) -> int:
                     test_ids=args.tests,
                     gate_on_behaviors=not args.no_gate,
                     behaviors_path=args.behaviors,
+                    deviation_urls={
+                        env: url for env, url in (
+                            (acts_runner.REDUCED_CAPABILITIES_ENV, args.reduced_sut_url),
+                            (acts_runner.AUTH_ENFORCED_ENV, args.auth_sut_url),
+                        ) if url
+                    },
                 )
             )
         except acts_runner.NoApplicableTests as exc:
