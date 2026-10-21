@@ -113,6 +113,11 @@ class RunActsRequest(BaseModel):
     repository: str | None = None
     #: Base URL of an already-running SUT; when absent, starts the mounted SUT.
     sut_url: str | None = None
+    #: With `sut_url`: instances the caller started with
+    #: `ITK_ACTS_REDUCED_CAPABILITIES=1` and `ITK_ACTS_AUTH=1`, which stand in
+    #: for the deviated SUTs the harness spawns for a mounted SDK.
+    reduced_sut_url: str | None = None
+    auth_sut_url: str | None = None
     #: Restrict the run to these test ids. For iterating on one failure
     #: without paying for the whole corpus.
     tests: list[str] | None = None
@@ -241,11 +246,18 @@ async def run_acts(request: RunActsRequest) -> dict[str, Any]:
             variables=request.variables,
             capabilities=request.capabilities,
             gate_on_behaviors=request.gate_on_behaviors,
+            deviation_urls={
+                env: url for env, url in (
+                    (acts_runner.REDUCED_CAPABILITIES_ENV, request.reduced_sut_url),
+                    (acts_runner.AUTH_ENFORCED_ENV, request.auth_sut_url),
+                ) if url
+            },
             log_dir=_agent_log_dir(),
         )
     except ActsRunError as e:
         # The SUT would not start, its card is unreadable, or the request
-        # names tests that do not exist. None of it is retryable.
+        # names tests that do not exist or deviation URLs without `sut_url`.
+        # None of it is retryable.
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.exception('ACTS run failed')

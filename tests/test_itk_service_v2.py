@@ -731,8 +731,14 @@ class TestRunActsEndpoint:
                 'sdk': 'onea2a-esf',
                 'language': 'cpp',
                 'sut_url': 'http://external.sut:8788',
+                'reduced_sut_url': 'http://external.sut:8789',
+                'auth_sut_url': 'http://external.sut:8790',
             },
         )
         assert response.status_code == 200
         assert captured['sut_url'] == 'http://external.sut:8788'
+        assert captured['deviation_urls'] == {
+            acts_runner.REDUCED_CAPABILITIES_ENV: 'http://external.sut:8789',
+            acts_runner.AUTH_ENFORCED_ENV: 'http://external.sut:8790',
+        }
         assert response.json()['sdk']['name'] == 'onea2a-esf'

@@ -197,6 +197,8 @@ class ActsRun:
     duration_ms: int
     agent_card: dict[str, Any] = field(default_factory=dict)
     declared_behaviors: frozenset[str] | None = None
+    #: The SUT was already running at a URL the caller gave, not started here.
+    external_sut: bool = False
 
 
 def _subset(suite: LoadedSuite, tests: list[LoadedTest]) -> LoadedSuite:
@@ -358,12 +360,27 @@ async def run(
     capabilities: list[RunnerRequirement] | None = None,
     gate_on_behaviors: bool = True,
     behaviors_path: Path | None = None,
+    deviation_urls: dict[str, str] | None = None,
     log_dir: Path | None = None,
 ) -> ActsRun:
     """Start the SUT (or dial ``sut_url``), run the corpus, and collect results.
 
     Only the tests ``transport`` is graded on take part; see :func:`_in_scope`.
+
+    An external SUT cannot be restarted with a deviation's environment
+    variable, so ``deviation_urls`` maps each variable (`REDUCED_CAPABILITIES_ENV`,
+    `AUTH_ENFORCED_ENV`) to a second instance the caller already started with
+    it set. A deviation with no entry leaves its tests skipped.
     """
+    deviation_urls = dict(deviation_urls or {})
+    if deviation_urls and sut_url is None:
+        raise ActsRunError(
+            'deviation URLs name instances of an external SUT; pass sut_url too'
+        )
+    unknown = set(deviation_urls) - {d.env_var for d in DEVIATIONS}
+    if unknown:
+        raise ActsRunError(f'no deviation is configured by {sorted(unknown)}')
+
     # Merged here rather than by the caller, so every front end gets them. The
     # CLI used to pass them and `POST /run-acts` did not, which left
     # `{{insufficientAuthToken}}` unresolved on the service path and turned
@@ -395,14 +412,22 @@ async def run(
                 declared = sut_behaviors.load(behaviors_path).prefixes()
             elif sut_url is None:
                 declared = sut_behaviors.declared_by(sut_repo_root())
-                if declared is None:
-                    logger.warning(
-                        'No %s in the SUT checkout — behaviour gating is off. Tests '
-                        'needing a tck-* prefix will run and probably fail.',
-                        sut_behaviors.CONTRACT_PATH,
-                    )
         except sut_behaviors.BehaviorsFileError as exc:
             raise ActsRunError(str(exc)) from exc
+        if declared is None:
+            # Said for both kinds of SUT: an external one has no checkout to
+            # find the file in, and ungated tck-* tests fail with messages
+            # that say nothing about the missing contract.
+            source = (
+                f'no {sut_behaviors.CONTRACT_PATH} in the SUT checkout'
+                if sut_url is None
+                else 'no behaviors file given for the external SUT'
+            )
+            logger.warning(
+                'Behaviour gating is off (%s). Tests needing a tck-* prefix '
+                'will run and probably fail.',
+                source,
+            )
 
     started = time.monotonic()
     results, card = await _run_pass(
@@ -416,31 +441,30 @@ async def run(
         sut_url=sut_url,
     )
 
-    if sut_url is not None:
-        for deviation in DEVIATIONS:
+    for deviation in DEVIATIONS:
+        deviated_url = deviation_urls.get(deviation.env_var)
+        if sut_url is not None and deviated_url is None:
+            # A warning, as when a spawned deviated SUT fails to start: either
+            # way the run covers less than it could, and should say so.
             blocked = _skips_matching(results, deviation.skip_pattern)
             if blocked:
-                logger.info(
-                    'External SUT at %s cannot be restarted with %s; '
-                    '%d %s test(s) stay skipped: %s',
-                    sut_url,
-                    deviation.env_var,
-                    len(blocked),
-                    deviation.description,
-                    ', '.join(sorted(blocked)),
+                logger.warning(
+                    'No %s instance was given for the external SUT, so %s stay '
+                    'skipped.',
+                    deviation.env_var, ', '.join(sorted(blocked)),
                 )
-    else:
-        for deviation in DEVIATIONS:
-            results = await _rerun_deviation(
-                results,
-                suite,
-                deviation=deviation,
-                transport=transport,
-                variables=variables,
-                capabilities=capabilities,
-                declared=declared,
-                log_dir=log_dir,
-            )
+            continue
+        results = await _rerun_deviation(
+            results,
+            suite,
+            deviation=deviation,
+            transport=transport,
+            variables=variables,
+            capabilities=capabilities,
+            declared=declared,
+            log_dir=log_dir,
+            sut_url=deviated_url,
+        )
 
     return ActsRun(
         results=results,
@@ -449,6 +473,7 @@ async def run(
         duration_ms=int((time.monotonic() - started) * 1000),
         agent_card=card,
         declared_behaviors=declared,
+        external_sut=sut_url is not None,
     )
 
 
@@ -692,6 +717,7 @@ async def _rerun_deviation(
     capabilities: list[RunnerRequirement] | None,
     declared: frozenset[str] | None,
     log_dir: Path | None,
+    sut_url: str | None = None,
 ) -> list[TestResult]:
     """Re-run the tests ``deviation`` can unblock against a second SUT.
 
@@ -700,6 +726,10 @@ async def _rerun_deviation(
     is to run the tests, not to report a verdict nobody produced. So does a SUT
     that fails to start: an agent that will not come up in a deviated mode is
     worth a warning, not the loss of the whole binding's report.
+
+    With ``sut_url`` the second SUT is an instance the caller already started
+    with the variable set, so nothing is spawned. Its card is checked exactly
+    as a spawned one's would be.
     """
     blocked = _skips_matching(results, deviation.skip_pattern)
     if not blocked:
@@ -712,8 +742,10 @@ async def _rerun_deviation(
     )
     narrowed = _subset(suite, [t for t in suite.tests if t.id in blocked])
 
+    # Only a spawned SUT reads the variable from this process's environment.
+    env = _sut_env(deviation.env_var) if sut_url is None else contextlib.nullcontext()
     try:
-        with _sut_env(deviation.env_var):
+        with env:
             rerun, card = await _run_pass(
                 narrowed,
                 transport=transport,
@@ -722,6 +754,7 @@ async def _rerun_deviation(
                 declared=declared,
                 log_name=deviation.log_name,
                 log_dir=log_dir,
+                sut_url=sut_url,
             )
     except ActsRunError as exc:
         logger.warning(
@@ -765,12 +798,19 @@ def to_report(
     }
     if repository:
         sdk['repository'] = repository
+    env = report_writer.environment()
+    if run_result.external_sut:
+        # The harness neither built nor started this agent, so a reader
+        # comparing SDKs can tell the two kinds of run apart. The URL itself
+        # stays out: it may be an internal hostname.
+        env['sut'] = 'external'
     return report_writer.build(
         run_result.results,
         run_result.suite,
         sdk=sdk,
         transport=run_result.transport,
         duration_ms=run_result.duration_ms,
+        env=env,
     )
 
 

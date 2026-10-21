@@ -481,7 +481,9 @@ class TestExternalSutUrl:
         monkeypatch.setattr(acts_runner, '_run_pass', fake_pass)
         monkeypatch.setattr(acts_runner, 'sut_repo_root', no_repo_root)
 
-        with caplog.at_level(logging.INFO, logger='acts_runner'):
+        # At WARNING, like a spawned deviated SUT that fails to start: the
+        # run covers less than it could either way.
+        with caplog.at_level(logging.WARNING, logger='acts_runner'):
             outcome = asyncio.run(
                 acts_runner.run(
                     transport=TransportBinding.JSONRPC,
@@ -523,64 +525,118 @@ class TestExternalSutUrl:
         assert seen_declared == [frozenset({'tck-complete-task'})]
         assert outcome.declared_behaviors == frozenset({'tck-complete-task'})
 
-    def test_run_acts_cli_sut_url_and_mount_are_mutually_exclusive(
-        self, monkeypatch, tmp_path
-    ):
-        import run_acts
+    def test_ungated_external_sut_is_announced(self, monkeypatch, caplog):
+        """Without --behaviors an external SUT runs ungated; say so, as the
+        mounted path does for a checkout with no contract file."""
+        import logging
 
-        with pytest.raises(SystemExit):
-            run_acts.main(['--sdk', 'x'])
+        async def fake_pass(suite, **kwargs):
+            return [], {}
 
-        with pytest.raises(SystemExit):
-            run_acts.main([
-                '--mount', str(tmp_path),
-                '--sut-url', 'http://external.sut:8788',
-                '--sdk', 'x',
-            ])
+        monkeypatch.setattr(acts_runner, '_run_pass', fake_pass)
 
-    def test_run_acts_cli_forwards_sut_url_and_behaviors_without_codegen(
-        self, monkeypatch, tmp_path
-    ):
-        import run_acts
+        with caplog.at_level(logging.WARNING, logger='acts_runner'):
+            asyncio.run(acts_runner.run(
+                transport=TransportBinding.JSONRPC,
+                sut_url='http://external.sut:8788',
+                test_ids=['CORE-SEND-001'],
+            ))
 
-        monkeypatch.delenv('ITK_MOUNT_DIR', raising=False)
-        monkeypatch.setattr(
-            run_acts,
-            '_generate_protos',
-            lambda *a: (_ for _ in ()).throw(AssertionError('codegen must not run')),
+        assert 'gating is off' in caplog.text
+        assert 'external SUT' in caplog.text
+
+
+class TestDeviationInstancesForAnExternalSut:
+    """An external SUT cannot be restarted, so the caller supplies the
+    deviated instances. They must be used exactly as a spawned one would be:
+    same claimed skips, same card check, same stamp on the verdict."""
+
+    MAIN = 'http://main.sut:1'
+    REDUCED_URL = 'http://reduced.sut:2'
+
+    def _run(self, monkeypatch, *, reduced_card, deviation_urls=None):
+        calls: list[tuple[str | None, str | None]] = []
+
+        async def fake_pass(suite, *, sut_url=None, **kwargs):
+            calls.append((sut_url, os.environ.get(REDUCED_CAPABILITIES_ENV)))
+            if sut_url == self.MAIN:
+                return [skipped(
+                    'CORE-CAP-002',
+                    'agent card capability streaming=True, needs False',
+                )], {}
+            return [TestResult(
+                id='CORE-CAP-002', name='x', level=Level.MUST,
+                result=Outcome.PASS, duration_ms=1,
+            )], reduced_card
+
+        monkeypatch.setattr(acts_runner, '_run_pass', fake_pass)
+        outcome = asyncio.run(acts_runner.run(
+            transport=TransportBinding.JSONRPC,
+            sut_url=self.MAIN,
+            test_ids=['CORE-CAP-002'],
+            gate_on_behaviors=False,
+            deviation_urls=(
+                {REDUCED_CAPABILITIES_ENV: self.REDUCED_URL}
+                if deviation_urls is None else deviation_urls
+            ),
+        ))
+        return outcome, calls
+
+    def test_the_given_instance_is_dialed_and_nothing_is_spawned(self, monkeypatch):
+        outcome, calls = self._run(
+            monkeypatch, reduced_card={'capabilities': {'streaming': False}},
         )
-        captured: dict[str, object] = {}
+        # The variable stays out of our environment: the caller set it on the
+        # instance, and setting it here would reach nothing.
+        assert calls == [(self.MAIN, None), (self.REDUCED_URL, None)]
+        (verdict,) = outcome.results
+        assert verdict.result is Outcome.PASS
+        assert verdict.configuration == REDUCED_CAPABILITIES_ENV
 
-        async def fake_run(**kwargs):
-            captured.update(kwargs)
-            suite = load_suite(MANIFEST)
-            return acts_runner.ActsRun(
-                results=[
-                    TestResult(
-                        id='CORE-SEND-001',
-                        name='x',
-                        level=Level.MUST,
-                        result=Outcome.PASS,
-                        duration_ms=1,
-                    )
-                ],
-                suite=suite,
-                transport=kwargs['transport'],
-                duration_ms=1,
-            )
+    def test_an_instance_that_did_not_deviate_keeps_the_skip(self, monkeypatch):
+        outcome, _ = self._run(
+            monkeypatch, reduced_card={'capabilities': {'streaming': True}},
+        )
+        (verdict,) = outcome.results
+        assert verdict.result is Outcome.SKIP
+        assert verdict.configuration is None
 
-        monkeypatch.setattr(acts_runner, 'run', fake_run)
-        behaviors_file = tmp_path / 'sut-behaviors.yaml'
+    def test_deviation_urls_need_an_external_sut(self, monkeypatch):
+        async def no_pass(*args, **kwargs):
+            raise AssertionError('no pass may start for an inconsistent request')
 
-        rc = run_acts.main([
-            '--sut-url', 'http://external.sut:8788',
-            '--behaviors', str(behaviors_file),
-            '--sdk', 'onea2a-esf',
-            '--language', 'cpp',
-            '--json',
-        ])
-        assert rc == 0
-        assert 'ITK_MOUNT_DIR' not in os.environ
-        assert captured['sut_url'] == 'http://external.sut:8788'
-        assert captured['behaviors_path'] == behaviors_file
-        assert captured['gate_on_behaviors'] is True
+        monkeypatch.setattr(acts_runner, '_run_pass', no_pass)
+        with pytest.raises(ActsRunError, match='pass sut_url too'):
+            asyncio.run(acts_runner.run(
+                transport=TransportBinding.JSONRPC,
+                deviation_urls={REDUCED_CAPABILITIES_ENV: self.REDUCED_URL},
+            ))
+
+    def test_an_unknown_deviation_is_refused(self, monkeypatch):
+        with pytest.raises(ActsRunError, match='ITK_NO_SUCH_MODE'):
+            asyncio.run(acts_runner.run(
+                transport=TransportBinding.JSONRPC,
+                sut_url=self.MAIN,
+                deviation_urls={'ITK_NO_SUCH_MODE': self.REDUCED_URL},
+            ))
+
+
+class TestAnExternalRunIsMarkedInTheReport:
+    def _report(self, *, external: bool) -> dict:
+        run = acts_runner.ActsRun(
+            results=[TestResult(
+                id='CORE-SEND-001', name='x', level=Level.MUST,
+                result=Outcome.PASS, duration_ms=1,
+            )],
+            suite=load_suite(MANIFEST),
+            transport=TransportBinding.JSONRPC,
+            duration_ms=1,
+            external_sut=external,
+        )
+        return acts_runner.to_report(run, sdk_name='a2a-x')
+
+    def test_an_external_sut_is_named_as_such(self):
+        assert self._report(external=True)['environment']['sut'] == 'external'
+
+    def test_a_spawned_sut_carries_no_marker(self):
+        assert 'sut' not in self._report(external=False)['environment']

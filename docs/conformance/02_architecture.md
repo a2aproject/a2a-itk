@@ -22,8 +22,8 @@ ACTS is kept apart from the traversal suite on purpose. They share the launcher 
 
 1. **Load the corpus.** `loader.load_suite` reads the manifest (`suite.acts.yaml`), follows its `include:` list, validates every file against the schema exactly as written - nothing is rewritten on the way in - and flattens the result into one ordered list of tests, each tagged with the suite it came from. Duplicate test ids across files are an error here, because they would overwrite each other in the report.
 2. **Scope to the binding.** Tests that declare `transport:` for a different binding are dropped, not skipped. A report covers one binding, and a test that cannot apply to it should not appear in the denominator - gRPC is scored out of 88, not out of 113 with 25 phantom skips. `-t` subsets are applied just before this.
-3. **Read the behavior contract.** `acts/sut-behaviors.yaml` from the SDK repository root (the parent of the mounted `itk/`). Present: the set of `tck-*` prefixes the SDK claims. Absent: gating is off, with a warning.
-4. **Start the SUT** through the same `Cluster` the traversal suite uses, as a single `MOUNT` target. The agent is started with `--httpPort` and `--grpcPort` and is up when its card answers.
+3. **Read the behavior contract.** `acts/sut-behaviors.yaml` from the SDK repository root (the parent of the mounted `itk/`), or the file `--behaviors` names. Present: the set of `tck-*` prefixes the SDK claims. Absent: gating is off, with a warning.
+4. **Start the SUT** through the same `Cluster` the traversal suite uses, as a single `MOUNT` target. The agent is started with `--httpPort` and `--grpcPort` and is up when its card answers. With `--sut-url` (or `sut_url` on the service) this step is skipped and the given URL is used as the agent's root.
 5. **Read the card** at `/.well-known/agent-card.json`, with `A2A-Version: 1.0`. The header matters: the spec makes an absent header mean 0.3, and an SDK with a compatibility layer would answer with its 0.3 card, on which capabilities are spelled differently. Redirects are not followed; the card decides what the whole run tests, so an agent that serves it somewhere else should fail loudly.
 6. **Build the dispatcher** for the binding. The URL comes from the card's `supportedInterfaces`, preferring the entry with `protocolVersion: 1.0` (the ITK agents also publish a 0.3 interface at the same URL for traversal compatibility). A JSON-RPC agent may mount at `/jsonrpc/`, a REST one at `/rest/`; the card is the only reliable source. The dispatcher adds `Authorization: Bearer itk-valid-token` to every abstract operation (see [Authentication](#authentication) below).
 7. **Start the webhook receiver**: `notifications_app.py` on a free port, the same mock the traversal suite uses for push notifications. If it comes up, the runner is granted the `webhook_endpoint` requirement and the `webhookUrl` variable; if not, tests needing it skip rather than losing the run.
@@ -31,7 +31,7 @@ ACTS is kept apart from the traversal suite on purpose. They share the launcher 
 9. **Deviation passes.** Some tests were skipped because the default SUT advertised a capability the test needs absent, or declared no authentication when the test needs some. For each such group a second SUT is started with an environment variable asking it to behave differently, those tests alone are re-run, and their verdicts are spliced in.
 10. **Build the report** (`report.build`), a section 13 document.
 
-Each binding is a separate call, with a separate SUT; `run_acts.py` loops over the bindings you asked for and the CI driver sends one request per binding.
+Each binding is a separate call; `run_acts.py` loops over the bindings you asked for and the CI driver sends one request per binding. With a mounted SDK each call starts its own SUT. An external SUT is the same instance for every call.
 
 ## From an abstract step to a wire call
 
@@ -121,6 +121,8 @@ The selection is keyed on the **skip reason**, not on a list of test ids: the co
 If the SUT does not honour the variable - the card still advertises streaming, or still declares no security scheme - the original skips stand and a warning says why. A SUT that fails to start in a deviated mode is also a warning, not the loss of the binding's report. Verdicts obtained from a deviated SUT are stamped with `configuration: <env var>` in the report (section 12.8), because a result from a differently configured instance is not interchangeable with one from the agent the rest of the run tested.
 
 The two run serially: the variable is set in the pipeline's own environment, which the launcher passes to the child, so two SUTs alive at once could not be told apart.
+
+An external SUT cannot be restarted, so the caller starts the deviated instances itself, with the variable set, and passes their URLs (`--reduced-sut-url` / `--auth-sut-url`, or `reduced_sut_url` / `auth_sut_url` on the service). Nothing is spawned and the pipeline's environment is left alone; the card check and the `configuration` stamp are the same as for a spawned SUT. A deviation with no URL leaves its tests skipped, with a warning.
 
 ## Authentication
 
