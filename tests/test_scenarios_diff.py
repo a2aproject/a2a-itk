@@ -210,3 +210,52 @@ class TestSharedSetIsValid:
             for s in resolve(load_file(path), Matrix.from_default()):
                 if 'go_v03' in s.sdks:
                     assert 'http_json' not in (s.protocols or []), s.name
+
+    @pytest.mark.parametrize(('path', 'expected_peers'), [
+        (SHARED_PR, {'current', 'dotnet_v10', 'go_v10', 'python_v10'}),
+        (SHARED_NIGHTLY, {
+            'current', 'dotnet_v10', 'go_v10', 'java_v10',
+            'python_v10', 'rust_v10', 'ts_v10',
+        }),
+    ])
+    def test_dotnet_push_keeps_only_v1_peers(self, path, expected_peers):
+        scenarios = resolve(
+            load_file(path), Matrix.from_default(), sut_sdk='dotnet',
+        )
+        push = [s for s in scenarios if s.behavior == 'push_notification']
+
+        assert {agent for s in push for agent in s.sdks} == expected_peers
+        assert {s.protocols[0] for s in push} == {
+            'jsonrpc', 'grpc', 'http_json',
+        }
+
+    @pytest.mark.parametrize('path', [SHARED_PR, SHARED_NIGHTLY])
+    def test_dotnet_retains_v03_non_push_coverage(self, path):
+        scenarios = resolve(
+            load_file(path), Matrix.from_default(), sut_sdk='dotnet',
+        )
+        legacy_variants = {
+            (s.behavior, s.streaming)
+            for s in scenarios
+            if 'python_v03' in s.sdks and s.protocols == ['jsonrpc']
+        }
+
+        assert legacy_variants == {
+            ('send_message', False),
+            ('send_message', True),
+            ('resubscribe', True),
+        }
+
+    @pytest.mark.parametrize('path', [SHARED_PR, SHARED_NIGHTLY])
+    def test_python_retains_v03_push_coverage(self, path):
+        scenarios = resolve(
+            load_file(path), Matrix.from_default(), sut_sdk='python',
+        )
+        push_peers = {
+            agent
+            for s in scenarios
+            if s.behavior == 'push_notification' and s.protocols == ['jsonrpc']
+            for agent in s.sdks
+        }
+
+        assert {'python_v03', 'go_v03'} <= push_peers
