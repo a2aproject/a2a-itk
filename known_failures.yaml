@@ -118,6 +118,21 @@ exclusions:
       the same peers pass.
 
   # ---------------------------------------------------------------------
+  # a2a-dotnet as SUT: push delivery is v1.0-only
+  # ---------------------------------------------------------------------
+  - sut_sdk: [dotnet]
+    agents: [python_v03, go_v03, ts_v03]
+    behaviors: [push_notification]
+    reason: >
+      The .NET ITK host supports v1.0 push delivery but opts out of v0.3
+      delivery (ActsServer.SupportsV03PushNotifications=false). A legacy
+      peer's return call carries pushNotificationConfig, which
+      V03ServerProcessor rejects with PushNotificationNotSupported.
+      Exclude legacy peers only for this behavior so v1.0 push and v0.3
+      send_message/resubscribe continue to run.
+    issue: https://github.com/a2aproject/a2a-dotnet/pull/576
+
+  # ---------------------------------------------------------------------
   # a2a-dotnet as SUT: go_v03's send configuration omits acceptedOutputModes
   # ---------------------------------------------------------------------
   - sut_sdk: [dotnet]
