@@ -48,9 +48,11 @@ RUN curl -L https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x
 # shared framework present. Roll-forward does not cross a major version by
 # default. The runtime package is a fraction of a second SDK's size, so this
 # is cheaper than installing both SDKs.
+ENV DOTNET_SDK_VERSION=10.0.403
+ENV DOTNET_ASPNETCORE_RUNTIME_VERSION=8.0.33
 RUN curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh && \
-    bash /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/local/dotnet && \
-    bash /tmp/dotnet-install.sh --channel 8.0 --runtime aspnetcore --install-dir /usr/local/dotnet && \
+    bash /tmp/dotnet-install.sh --version ${DOTNET_SDK_VERSION} --install-dir /usr/local/dotnet && \
+    bash /tmp/dotnet-install.sh --version ${DOTNET_ASPNETCORE_RUNTIME_VERSION} --runtime aspnetcore --install-dir /usr/local/dotnet && \
     rm /tmp/dotnet-install.sh
 ENV PATH=$PATH:/usr/local/dotnet
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1

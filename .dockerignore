@@ -25,10 +25,11 @@ dashboard
 # Developer tooling, not runtime. pyproto/ is committed, so the image never
 # regenerates it.
 build_protos.sh
-Dockerfile
 .dockerignore
 
 # Deliberately INCLUDED — each of these is easy to mistake for dead weight:
+#   Dockerfile — test_suite/launcher/config.py::image_digest hashes it inside
+#                the container so a toolchain bump invalidates cached peer trees.
 #   uv.lock    — `uv sync --frozen` reproduces exactly what CI resolved.
 #   README.md  — pyproject.toml declares `readme = "README.md"`; hatchling
 #                fails the build without it. It is a build input, not docs
