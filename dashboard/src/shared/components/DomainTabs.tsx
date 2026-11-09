@@ -1,39 +1,54 @@
 import { NavLink } from "react-router-dom";
-import { sdkPath } from "../../routes.tsx";
+import { DEFAULT_SDK, SUMMARY_PATH, sdkPath } from "../../routes.tsx";
 import type { Domain } from "../types.ts";
 
-const SUITES: { domain: Domain; label: string; blurb: string }[] = [
+export type SuiteTab = "summary" | Domain;
+
+const SUITES: {
+  id: SuiteTab;
+  label: string;
+  blurb: string;
+  to: (sdkId: string) => string;
+}[] = [
   {
-    domain: "itk",
-    label: "Interoperability",
-    blurb: "Every SDK against its peers",
+    id: "summary",
+    label: "Summary",
+    blurb: "All SDKs across both suites",
+    to: () => SUMMARY_PATH,
   },
   {
-    domain: "acts",
+    id: "itk",
+    label: "Interoperability",
+    blurb: "Every SDK against its peers",
+    to: (sdkId) => sdkPath("itk", sdkId),
+  },
+  {
+    id: "acts",
     label: "Conformance",
     blurb: "Each SDK against the specification",
+    to: (sdkId) => sdkPath("acts", sdkId),
   },
 ];
 
 /**
- * Suite switch. Keeps the current SDK when moving between suites, so the
- * question changes but the subject does not.
+ * Suite switch. Keeps the current SDK when moving between per-SDK suites, so
+ * the question changes but the subject does not.
  */
 export default function DomainTabs({
   active,
-  sdkId,
+  sdkId = DEFAULT_SDK,
 }: {
-  active: Domain;
-  sdkId: string;
+  active: SuiteTab;
+  sdkId?: string;
 }) {
   return (
     <nav className="suites" aria-label="Test suite">
-      {SUITES.map(({ domain, label, blurb }) => (
+      {SUITES.map(({ id, label, blurb, to }) => (
         <NavLink
-          key={domain}
-          to={sdkPath(domain, sdkId)}
-          className={({ isActive }) => (isActive ? "suite suite-active" : "suite")}
-          aria-current={domain === active ? "page" : undefined}
+          key={id}
+          to={to(sdkId)}
+          className={() => (id === active ? "suite suite-active" : "suite")}
+          aria-current={id === active ? "page" : undefined}
         >
           <span className="suite-label">{label}</span>
           <span className="suite-blurb">{blurb}</span>

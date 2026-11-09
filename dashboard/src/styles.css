@@ -903,6 +903,110 @@ a:hover {
   color: var(--text-muted);
 }
 
+/* Cross-SDK summary table */
+
+.summary-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.summary-table th,
+.summary-table td {
+  vertical-align: middle;
+}
+
+.summary-group-row th {
+  border-bottom: 1px solid var(--border);
+}
+
+.summary-table .group-col,
+.summary-table .group-start {
+  border-left: 1px solid var(--border);
+  padding-left: 16px;
+}
+
+.summary-table .group-col {
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.summary-row:hover > th,
+.summary-row:hover > td {
+  background: var(--bg-subtle);
+}
+
+.summary-sdk {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.3;
+}
+
+.summary-sdk-name {
+  font-weight: 600;
+}
+
+.summary-sdk-repo {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.summary-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.summary-date {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.summary-cell-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.summary-cell-link:hover {
+  text-decoration: none;
+}
+
+.summary-cell-link:hover .summary-fraction {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.summary-fraction {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.summary-num-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+.summary-metric-link {
+  display: inline-block;
+}
+
+.summary-metric-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.summary-num {
+  color: var(--text-muted);
+}
+
+.summary-table .cell-pass {
+  color: var(--pass);
+}
+
 /* Conformance summary */
 
 .minor-heading {
@@ -1378,6 +1482,11 @@ a:hover {
 
   .matrix thead th {
     white-space: normal;
+  }
+
+  .summary-table thead th,
+  .summary-table tbody th {
+    white-space: nowrap;
   }
 
   .chip {
