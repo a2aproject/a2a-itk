@@ -131,6 +131,8 @@ class ErrorType(str, enum.Enum):
     EXTENDED_AGENT_CARD_NOT_CONFIGURED = 'ExtendedAgentCardNotConfiguredError'
     EXTENSION_SUPPORT_REQUIRED = 'ExtensionSupportRequiredError'
     VERSION_NOT_SUPPORTED = 'VersionNotSupportedError'
+    #: A2A 1.1: a send guarded by a generation the task has moved past.
+    TASK_GENERATION_MISMATCH = 'TaskGenerationMismatchError'
 
     # Standard JSON-RPC errors, from A2A §9.5. That binding only: A2A gives
     # them no gRPC or HTTP representation.
@@ -238,7 +240,23 @@ class Preconditions(_Model):
     skills: list[dict[str, Any]] | None = None
     transport: list[TransportBinding] | None = None
     extensions: list[str] | None = None
+    #: A2A versions the agent must serve on the binding under test, each as
+    #: `Major.Minor`. For a test that sends a step as a client of a version
+    #: other than the one the run targets: an agent that does not serve that
+    #: version owes such a request nothing but a refusal.
+    protocol_versions: list[str] | None = Field(default=None, min_length=1)
     description: str | None = None
+
+    @model_validator(mode='after')
+    def _protocol_versions_are_versions(self) -> Preconditions:
+        """Each entry is compared with the versions an agent card lists, so
+        one that is not a version could never be met by any agent."""
+        for version in self.protocol_versions or ():
+            try:
+                parse_spec_version(version)
+            except ValueError as exc:
+                raise ValueError(f'`protocol_versions`: {exc}') from None
+        return self
 
 
 class CollectionMatch(_Model):
@@ -452,6 +470,13 @@ class StreamAssertions(_Model):
     events: list[EventAssertion] | None = None
     final_event: dict[str, Assertion] | None = None
     each_event: dict[str, Assertion] | None = None
+    stays_open_ms: int | None = Field(
+        default=None,
+        gt=0,
+        description='The stream must still be open this long after its last '
+                    'event. The runner then ends the read itself; a stream '
+                    'the SUT closes fails the step.',
+    )
 
     def orderings(self) -> frozenset[Ordering]:
         """The ordering rules that apply, however `ordering` was written."""
@@ -497,6 +522,12 @@ class StreamPlan(StreamAssertions):
             )
         if self.disconnect_after is None:
             return self
+        if self.stays_open_ms is not None:
+            raise ValueError(
+                f'disconnect_after ({self.disconnect_after}) has the runner '
+                f'hang up, so `stays_open_ms` could not show that the SUT '
+                f'kept the stream open'
+            )
         if self.max_count is not None:
             raise ValueError(
                 f'disconnect_after ({self.disconnect_after}) cuts the stream '
@@ -525,6 +556,40 @@ class ExpectStream(StreamAssertions):
         description='Open one stream per entry, concurrently, all with this '
                     'step\'s request. Omit for a single stream.',
     )
+
+    @model_validator(mode='after')
+    def _the_deadline_outlasts_the_wait(self) -> ExpectStream:
+        """A stream is read for longer than it has to be seen open.
+
+        Otherwise the step's deadline passes first, and an agent that keeps
+        the stream open as required fails the step.
+        """
+        waits = [self.stays_open_ms, *(plan.stays_open_ms for plan in self.streams or ())]
+        longest = max((wait for wait in waits if wait is not None), default=None)
+        if (
+            longest is not None
+            and self.timeout_ms is not None
+            and self.timeout_ms <= longest
+        ):
+            raise ValueError(
+                f'timeout_ms ({self.timeout_ms}) ends the read before a stream '
+                f'can be seen open {longest}ms after its last event'
+            )
+        return self
+
+    @model_validator(mode='after')
+    def _stays_open_is_not_cut_short(self) -> ExpectStream:
+        """The shared block applies to every stream, a cut one included."""
+        if self.stays_open_ms is None:
+            return self
+        for plan in self.streams or ():
+            if plan.disconnect_after is not None:
+                raise ValueError(
+                    '`stays_open_ms` applies to every stream of the step, and '
+                    'one of them sets `disconnect_after`; the runner hangs up '
+                    'on that stream, so it cannot show the SUT kept it open'
+                )
+        return self
 
 
 class ExpectWebhook(_Model):
@@ -605,6 +670,25 @@ class Step(_Model):
     assertions: list[NamedAssertion] | None = None
     repeat: Repeat | None = None
     delay_ms: int | None = Field(default=None, ge=0)
+    a2a_version: str | None = Field(
+        default=None,
+        min_length=1,
+        description='Sent as `A2A-Version` on this step in place of the '
+                    'version the run targets. The step is sent as a client of '
+                    'that version would send it.',
+    )
+    min_duration_ms: int | None = Field(
+        default=None,
+        ge=0,
+        description='The response must not arrive sooner than this after the '
+                    'request was sent. Shows that the SUT held the request.',
+    )
+    max_duration_ms: int | None = Field(
+        default=None,
+        ge=0,
+        description='The response must arrive within this long. Shows that '
+                    'the SUT answered at once.',
+    )
 
     def kind(self) -> StepKind:
         """Which form this step takes. Total, given validation passed."""
@@ -713,6 +797,44 @@ class Step(_Model):
 
         if self.repeat is not None and kind is not StepKind.OPERATION:
             raise ValueError(f'`repeat` re-dispatches an operation; not valid on a {kind.value} step')
+
+        if self.a2a_version is not None and kind is not StepKind.OPERATION:
+            if kind is StepKind.RAW:
+                raise ValueError(
+                    '`a2a_version` belongs to an operation step; a raw step '
+                    'writes its own `A2A-Version` header'
+                )
+            raise ValueError(
+                f'`a2a_version` belongs to an operation step, not a {kind.value} step'
+            )
+
+        bounds = {
+            name: getattr(self, name)
+            for name in ('min_duration_ms', 'max_duration_ms')
+            if getattr(self, name) is not None
+        }
+        for name in bounds:
+            if kind is not StepKind.OPERATION:
+                raise ValueError(
+                    f'`{name}` times the response to an operation; not valid '
+                    f'on a {kind.value} step'
+                )
+            if self.repeat is not None:
+                raise ValueError(
+                    f'`{name}` times one request, and `repeat` sends several; '
+                    f'which of them it bounds would be undefined'
+                )
+            if self.expect_stream is not None:
+                raise ValueError(
+                    f'`{name}` times a single response, and this step reads a '
+                    f'stream; bound a stream with `timeout_ms` or `stays_open_ms`'
+                )
+        if len(bounds) == 2 and self.min_duration_ms > self.max_duration_ms:
+            raise ValueError(
+                f'min_duration_ms ({self.min_duration_ms}) exceeds '
+                f'max_duration_ms ({self.max_duration_ms}); no response can '
+                f'satisfy both'
+            )
 
         return self
 

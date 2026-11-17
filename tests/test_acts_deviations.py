@@ -1004,3 +1004,155 @@ class TestTheReportNamesTheVersion:
     def test_a_run_without_a_card_records_no_interface(self):
         report = self._report(spec_version='1.0', card={})
         assert 'interface_protocol_version' not in report['environment']
+
+class TestInterfacesForOtherVersions:
+    """`OtherVersionInterfaces`: where a step sent as another version goes."""
+
+    def interfaces(self, monkeypatch, *listed, spec_version='1.1'):
+        card = {'supportedInterfaces': list(listed)}
+        opened: list[str] = []
+
+        class Opened:
+            def __init__(self, url):
+                self.url = url
+                self.closed = False
+
+            async def aclose(self):
+                self.closed = True
+
+        def dispatcher_at(url, binding, base_url):
+            opened.append(url)
+            return Opened(url)
+
+        monkeypatch.setattr(acts_runner, '_dispatcher_at', dispatcher_at)
+        primary = Opened('the run\'s own')
+        others = acts_runner.OtherVersionInterfaces(
+            card, TransportBinding.JSONRPC, 'http://sut', spec_version, primary
+        )
+        return others, primary, opened
+
+    def test_a_version_served_at_the_runs_url_uses_the_runs_dispatcher(self, monkeypatch):
+        """The common case: one URL serves every version, and nothing is opened."""
+        others, primary, opened = self.interfaces(
+            monkeypatch, _interface('1.1', 'http://sut/a'), _interface('1.0', 'http://sut/a')
+        )
+        assert others('1.0') is primary
+        assert opened == []
+
+    def test_a_version_served_elsewhere_gets_a_dispatcher_for_that_url(self, monkeypatch):
+        others, primary, opened = self.interfaces(
+            monkeypatch, _interface('1.1', 'http://sut/v11'), _interface('1.0', 'http://sut/v10')
+        )
+        first = others('1.0')
+        assert first is not primary
+        assert first.url == 'http://sut/v10'
+        # Made once, however many steps use it.
+        assert others('1.0') is first
+        assert opened == ['http://sut/v10']
+
+    def test_a_version_the_card_does_not_list_has_no_interface(self, monkeypatch):
+        others, _, opened = self.interfaces(monkeypatch, _interface('1.1', 'http://sut/a'))
+        assert others('1.99') is None
+        assert others('not a version') is None
+        assert opened == []
+
+    def test_an_interface_on_another_binding_is_not_one(self, monkeypatch):
+        others, _, _ = self.interfaces(
+            monkeypatch,
+            _interface('1.1', 'http://sut/a'),
+            _interface('1.0', 'sut:50051', binding='GRPC'),
+        )
+        assert others('1.0') is None
+
+    def test_a_patch_component_on_the_card_is_tolerated(self, monkeypatch):
+        others, primary, _ = self.interfaces(
+            monkeypatch, _interface('1.1', 'http://sut/a'), _interface('1.0.0', 'http://sut/a')
+        )
+        assert others('1.0') is primary
+
+    def test_closing_closes_what_was_opened_and_not_the_runs_dispatcher(self, monkeypatch):
+        others, primary, _ = self.interfaces(
+            monkeypatch, _interface('1.1', 'http://sut/v11'), _interface('1.0', 'http://sut/v10')
+        )
+        other = others('1.0')
+        asyncio.run(others.aclose())
+        assert other.closed
+        assert not primary.closed
+
+    @pytest.mark.parametrize('breaks', [False, True])
+    def test_a_pass_gives_the_runner_the_interfaces_and_closes_them_after(
+        self, monkeypatch, breaks
+    ):
+        import contextlib
+
+        seen: dict[str, object] = {}
+
+        async def fake_fetch_card(base_url, *, spec_version, **kwargs):
+            return {'supportedInterfaces': [
+                _interface('1.1', 'http://sut/v11'), _interface('1.0', 'http://sut/v10'),
+            ]}
+
+        class _Dispatcher:
+            binding = TransportBinding.JSONRPC
+
+            def __init__(self, url):
+                self.url = url
+                self.closed = False
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                self.closed = True
+
+            async def aclose(self):
+                self.closed = True
+
+        made: list[_Dispatcher] = []
+
+        def fake_for_binding(binding, url, **kwargs):
+            made.append(_Dispatcher(url))
+            return made[-1]
+
+        class _Runner:
+            def __init__(self, dispatcher, *, dispatcher_for_version, **kwargs):
+                self.other = dispatcher_for_version('1.0')
+                seen['run'] = dispatcher.url
+                seen['other'] = self.other.url
+
+            async def run_suite(self, suite):
+                seen['open while the suite runs'] = not self.other.closed
+                if breaks:
+                    raise RuntimeError('the suite broke')
+                return []
+
+        @contextlib.asynccontextmanager
+        async def fake_webhook():
+            yield None, None
+
+        monkeypatch.setattr(acts_runner, 'fetch_agent_card', fake_fetch_card)
+        monkeypatch.setattr(acts_runner, 'for_binding', fake_for_binding)
+        monkeypatch.setattr(acts_runner, '_webhook_receiver', fake_webhook)
+        monkeypatch.setattr(acts_runner, 'Runner', _Runner)
+
+        a_pass = acts_runner._run_pass(
+            load_suite(MANIFEST),
+            transport=TransportBinding.JSONRPC,
+            variables=None,
+            capabilities=None,
+            declared=None,
+            log_dir=None,
+            log_name='acts_sut',
+            sut_url='http://external.sut:8788',
+            spec_version='1.1',
+        )
+        if breaks:
+            with pytest.raises(RuntimeError, match='the suite broke'):
+                asyncio.run(a_pass)
+        else:
+            asyncio.run(a_pass)
+        assert seen == {
+            'run': 'http://sut/v11', 'other': 'http://sut/v10',
+            'open while the suite runs': True,
+        }
+        assert [d.closed for d in made] == [True, True]

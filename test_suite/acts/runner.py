@@ -34,11 +34,12 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from typing import Any, Final, TypeVar
+from typing import Any, Final, NamedTuple, TypeVar
 
 from pyproto import a2a_pb2
 
@@ -78,9 +79,14 @@ from test_suite.acts.schema import (
     StreamPlan,
     Test,
     TransportBinding,
+    parse_spec_version,
 )
 from test_suite.acts.streaming import StreamedEvent, evaluate_stream, normalize
-from test_suite.acts.wire_map import binding_for_operation
+from test_suite.acts.wire_map import (
+    binding_for_operation,
+    card_interfaces,
+    interface_version,
+)
 from test_suite.acts.variables import PathError, Scope, UnresolvedVariable
 
 
@@ -228,6 +234,66 @@ def _declared_timeout_ms(expect: Any | None) -> int | None:
     here: nothing the SUT can be held to.
     """
     return None if expect is None else expect.timeout_ms
+
+
+class _Reading(NamedTuple):
+    """What reading one stream produced."""
+
+    events: list[StreamedEvent]
+    #: The HTTP status the stream opened with, where the binding has one.
+    status: int | None
+    #: The read was cut short by the step's deadline.
+    timed_out: bool
+    #: The SUT ended the stream, as against this runner ceasing to read it.
+    closed_by_sut: bool
+
+
+def _stays_open_ms(block: Any | None, plan: StreamPlan | None) -> int | None:
+    """How long a stream has to stay open: the longer of its own bound and
+    the step's, which applies to every stream."""
+    bounds = [
+        part.stays_open_ms for part in (block, plan)
+        if part is not None and part.stays_open_ms is not None
+    ]
+    return max(bounds, default=None)
+
+
+def _evaluate_duration(step: Step, elapsed_ms: float) -> AssertionResult:
+    """Compare how long a response took with the step's duration bounds.
+
+    The only way to observe that a server held a request open, or that it
+    answered at once: no assertion on the response can show either.
+    """
+    result = AssertionResult()
+    low, high = step.min_duration_ms, step.max_duration_ms
+    if low is not None and elapsed_ms < low:
+        took = math.floor(elapsed_ms)
+        result += _duration_failure(
+            'min_duration_ms', f'at least {low}ms', f'{took}ms',
+            f'the response arrived after {took}ms',
+        )
+    elif low is not None:
+        result += AssertionResult(checks=1)
+    if high is not None and elapsed_ms > high:
+        took = math.ceil(elapsed_ms)
+        result += _duration_failure(
+            'max_duration_ms', f'at most {high}ms', f'{took}ms',
+            f'the response arrived after {took}ms',
+        )
+    elif high is not None:
+        result += AssertionResult(checks=1)
+    return result
+
+
+def _duration_failure(
+    bound: str, wanted: str, actual: str, happened: str
+) -> AssertionResult:
+    """A step whose response time was outside ``bound``."""
+    failure = Failure(
+        'duration', bound, wanted, actual,
+        f'{happened}; the step requires that it take {wanted}',
+    )
+    return AssertionResult((failure,), 1)
 
 
 def _stream_label(index: int, total: int) -> str:
@@ -401,8 +467,13 @@ class Runner:
         clock: Callable[[], float] = time.monotonic,
         new_uuid: Callable[[], str] | None = None,
         read_webhook: Callable[[str], Awaitable[list[Mapping[str, Any]]]] | None = None,
+        dispatcher_for_version: Callable[[str], Dispatcher | None] | None = None,
     ) -> None:
         self.dispatcher = dispatcher
+        #: Given an A2A version, the dispatcher for the interface the agent
+        #: card lists for it on this binding, or ``None`` when it lists none.
+        #: Without it every step goes to ``dispatcher``.
+        self._dispatcher_for_version = dispatcher_for_version
         #: Notifications delivered so far for one task id, oldest first.
         #: ``None`` when no receiver is running.
         self._read_webhook = read_webhook
@@ -607,6 +678,24 @@ class Runner:
             absent = set(preconditions.extensions) - have
             if absent:
                 return f'agent card lacks extension(s) {", ".join(sorted(absent))}'
+
+        if preconditions.protocol_versions:
+            # For the binding under test only: an interface for the version on
+            # another binding does not serve a request sent over this one.
+            served = {
+                interface_version(interface)
+                for interface in card_interfaces(card, self.binding)
+            } - {None}
+            absent = [
+                version for version in preconditions.protocol_versions
+                if parse_spec_version(version) not in served
+            ]
+            if absent:
+                listed = ', '.join(f'{a}.{b}' for a, b in sorted(served)) or 'none'
+                return (
+                    f'agent card lists no {self.binding.value} interface for '
+                    f'A2A {", ".join(absent)}; it lists {listed}'
+                )
 
         return None
 
@@ -854,10 +943,29 @@ class Runner:
                 # inputs, not with the SUT.
                 return self._step(step, Outcome.ERROR, started, message=str(exc))
 
+            sent = self._clock()
+            longest = step.max_duration_ms
             try:
-                response, attempts, converged = await self._dispatch(step, params, until)
+                async with asyncio.timeout(
+                    None if longest is None else longest / 1000
+                ) as bound:
+                    response, attempts, converged = await self._dispatch(
+                        step, params, until
+                    )
             except UntilError as exc:
                 return self._step(step, Outcome.ERROR, started, message=str(exc))
+            except TimeoutError:
+                if not bound.expired():
+                    raise
+                # The SUT is holding the request. Waiting on would show only
+                # how late the response is, and that after the transport's
+                # own timeout, minutes later.
+                held = _duration_failure(
+                    'max_duration_ms', f'at most {longest}ms', 'no response',
+                    f'no response after {longest}ms',
+                )
+                return self._finish(step, scope, held, started, attempts)
+            elapsed_ms = (self._clock() - sent) * 1000
 
             if not converged:
                 return self._step(
@@ -877,6 +985,8 @@ class Runner:
                 raise
             # The step's own assertions use a value its capture could not read.
             result = AssertionResult()
+        if step.kind() is StepKind.OPERATION:
+            result += _evaluate_duration(step, elapsed_ms)
         return self._finish(step, scope, result, started, attempts, missed=missed)
 
     async def _run_streaming_step(
@@ -903,11 +1013,13 @@ class Runner:
         except (UnresolvedVariable, PathError) as exc:
             return self._step(step, Outcome.ERROR, started, message=str(exc))
 
+        sent = self._clock()
         gathered = await asyncio.gather(
             *(
                 self._collect(
                     open_stream(), block,
                     disconnect_after=None if plan is None else plan.disconnect_after,
+                    stays_open_ms=_stays_open_ms(block, plan),
                 )
                 for plan in plans
             ),
@@ -915,13 +1027,16 @@ class Runner:
             # streams read on, leaking their connections for the rest of the run.
             return_exceptions=True,
         )
+        # A streaming step without `expect_stream` may bound its duration. It
+        # is timed over the whole call: until it is refused, or the stream ends.
+        duration = _evaluate_duration(step, (self._clock() - sent) * 1000)
 
         raised = next((r for r in gathered if isinstance(r, BaseException)), None)
         if raised is not None:
-            return self._stream_refusal(step, scope, started, raised)
+            return self._stream_refusal(step, scope, started, raised, duration)
 
-        collected: list[tuple[list[StreamedEvent], int | None, bool]] = list(gathered)
-        for index, (events, _, timed_out) in enumerate(collected):
+        collected: list[_Reading] = list(gathered)
+        for index, (events, _, timed_out, _) in enumerate(collected):
             if timed_out and not _declared_timeout_ms(block):
                 # The bound was ours, not the test's, so we cannot say the SUT
                 # overran anything — only that this run could not finish
@@ -940,7 +1055,7 @@ class Runner:
 
         # The first stream stands for the step, for `{{id.response}}` and for
         # `capture`. The schema rejects `capture` on a step that opens several.
-        first_stream = collected[0][0]
+        first_stream = collected[0].events
         scope.record_response(step.id, [event.payload for event in first_stream])
         missed = self._capture_from_stream(step, scope, first_stream)
 
@@ -957,10 +1072,29 @@ class Runner:
                 plans = tuple(block.streams)
 
         result = AssertionResult()
-        for index, (plan, (events, status, timed_out)) in enumerate(
+        for index, (plan, (events, status, timed_out, closed_by_sut)) in enumerate(
             zip(plans, collected)
         ):
             one = AssertionResult()
+            stays_open_ms = _stays_open_ms(block, plan)
+            if stays_open_ms is not None and closed_by_sut:
+                # Reported first: what the events were matters less than that
+                # the stream they came on is gone.
+                one += AssertionResult(
+                    (
+                        Failure(
+                            'stream', 'stays_open_ms',
+                            f'open {stays_open_ms}ms after its last event',
+                            f'closed by the SUT after {len(events)} event(s)',
+                            f'the SUT closed the stream after {len(events)} '
+                            f'event(s); it had to stay open for {stays_open_ms}ms '
+                            f'after its last event',
+                        ),
+                    ),
+                    1,
+                )
+            elif stays_open_ms is not None and not timed_out:
+                one += AssertionResult(checks=1)
             if block is not None:
                 one += evaluate_stream(block, events, timed_out=timed_out)
             elif step.expect_error is not None:
@@ -976,15 +1110,24 @@ class Runner:
             one += self._evaluate_stream_status(step, scope, status, len(events))
             result += one if len(plans) == 1 else _within_stream(one, index, plan)
 
+        result += duration
         return self._finish(step, scope, result, started, attempts=1, missed=missed)
 
     def _stream_refusal(
-        self, step: Step, scope: Scope, started: float, exc: BaseException
+        self,
+        step: Step,
+        scope: Scope,
+        started: float,
+        exc: BaseException,
+        duration: AssertionResult,
     ) -> StepResult:
         """What a stream that never opened means for the step.
 
         Only ever one stream's worth: a step cannot carry both `expect_stream`
         (where `streams` lives) and `expect_error`.
+
+        ``duration`` is how the time the refusal took compares with the step's
+        bounds, and is reported after the refusal itself.
         """
         if isinstance(exc, StreamNotOpened) and step.expect_error is not None:
             # Refusing to open the stream is the conformant answer to
@@ -999,7 +1142,7 @@ class Runner:
             result = evaluate_error(_resolved(step.expect_error, scope), observed)
             if exc.response.error is not None:
                 result = _explain_unnamed(result, exc.response.error)
-            return self._finish(step, scope, result, started, attempts=1)
+            return self._finish(step, scope, result + duration, started, attempts=1)
 
         if isinstance(exc, DispatchError) and step.expect_error is not None:
             # The call failed without producing an error document — a dropped
@@ -1008,7 +1151,7 @@ class Runner:
             result = evaluate_error(
                 _resolved(step.expect_error, scope), {'message': str(exc)}
             )
-            return self._finish(step, scope, result, started, attempts=1)
+            return self._finish(step, scope, result + duration, started, attempts=1)
 
         raise exc
 
@@ -1026,8 +1169,9 @@ class Runner:
             headers = self._raw_headers()
             return lambda: self.dispatcher.stream_raw(raw, headers)
         params = self._prepare_params(step, scope)
-        headers = self._headers()
-        return lambda: self.dispatcher.stream(step.operation, params, headers)
+        headers = self._headers(step)
+        dispatcher = self._dispatcher_for(step)
+        return lambda: dispatcher.stream(step.operation, params, headers)
 
     async def _collect(
         self,
@@ -1035,7 +1179,8 @@ class Runner:
         expect: Any | None,
         *,
         disconnect_after: int | None = None,
-    ) -> tuple[list[StreamedEvent], int | None, bool]:
+        stays_open_ms: int | None = None,
+    ) -> _Reading:
         """Read a stream into a list, bounded by `timeout_ms` and `max_count`.
 
         One event past `max_count` is enough to prove the limit was broken, so
@@ -1048,9 +1193,15 @@ class Runner:
         goes quiet sends none.
 
         ``disconnect_after`` is a third bound, and the only deliberate one.
+
+        ``stays_open_ms`` ends the read from this side as well, for a stream
+        the SUT is required *not* to close: once an event has arrived, the
+        read stops when that long passes without another. Whether the SUT
+        closed the stream first is reported, since that is the failure.
         """
         events: list[StreamedEvent] = []
         status: int | None = None
+        closed_by_sut = False
         # `expect` is absent when a streaming operation asserts only that the
         # call fails — `STREAM-SUB-003` subscribes to a terminal task.
         limit = None if expect is None or expect.max_count is None else expect.max_count + 1
@@ -1058,13 +1209,30 @@ class Runner:
             limit = disconnect_after if limit is None else min(limit, disconnect_after)
 
         async def pump() -> None:
-            nonlocal status
-            async for event in source:
+            nonlocal status, closed_by_sut
+            stream = source.__aiter__()
+            while True:
+                quiet_for = None
+                if stays_open_ms is not None and events:
+                    quiet_for = stays_open_ms / 1000
+                try:
+                    if quiet_for is None:
+                        event = await anext(stream)
+                    else:
+                        try:
+                            event = await asyncio.wait_for(anext(stream), quiet_for)
+                        except (asyncio.TimeoutError, TimeoutError):
+                            # Nothing for `stays_open_ms`, and no end of
+                            # stream either: it is still open.
+                            return
+                except StopAsyncIteration:
+                    closed_by_sut = True
+                    return
                 if status is None:
                     status = event.status
                 events.append(normalize(event.data, event.index))
                 if limit is not None and len(events) >= limit:
-                    break
+                    return
 
         deadline = _declared_timeout_ms(expect) or self.stream_timeout_ms
         timed_out = False
@@ -1073,7 +1241,7 @@ class Runner:
         except (asyncio.TimeoutError, TimeoutError):
             timed_out = True
         await _hang_up(source, required=disconnect_after is not None)
-        return events, status, timed_out
+        return _Reading(events, status, timed_out, closed_by_sut)
 
     def _evaluate_stream_status(
         self, step: Step, scope: Scope, status: int | None, count: int
@@ -1193,9 +1361,29 @@ class Runner:
             step, Outcome.PASS, started, attempts=attempts, checks=result.checks
         )
 
-    def _headers(self) -> dict[str, str]:
-        """§12.4: the version header goes on every abstract operation."""
-        return {VERSION_HEADER: self.spec_version}
+    def _headers(self, step: Step | None = None) -> dict[str, str]:
+        """The version header goes on every abstract operation.
+
+        The run version, unless the step is sent as a client of another one.
+        """
+        version = self.spec_version
+        if step is not None and step.a2a_version is not None:
+            version = step.a2a_version
+        return {VERSION_HEADER: version}
+
+    def _dispatcher_for(self, step: Step) -> Dispatcher:
+        """Where a step's request goes.
+
+        A step sent as a client of another version goes to the interface the
+        agent card lists for that version, where it lists one. An agent that
+        does not serve the version lists none, and the step goes to the
+        interface the run uses, which is expected to refuse it.
+        """
+        if step.a2a_version is not None and self._dispatcher_for_version is not None:
+            other = self._dispatcher_for_version(step.a2a_version)
+            if other is not None:
+                return other
+        return self.dispatcher
 
     def _raw_headers(self) -> dict[str, str]:
         """Nothing. A raw request goes exactly as the test wrote it.
@@ -1234,12 +1422,13 @@ class Runner:
         condition ever held. §9.1 makes an exhausted poll a *failure*, so that
         last flag is a result rather than an exception.
         """
-        headers = self._headers()
+        headers = self._headers(step)
+        dispatcher = self._dispatcher_for(step)
         operation: Operation = step.operation
         repeat = step.repeat
 
         if repeat is None:
-            return await self.dispatcher.dispatch(operation, params, headers), 1, True
+            return await dispatcher.dispatch(operation, params, headers), 1, True
 
         attempts = repeat.max_attempts or DEFAULT_MAX_ATTEMPTS
         delay_ms = DEFAULT_DELAY_MS if repeat.delay_ms is None else repeat.delay_ms
@@ -1247,7 +1436,7 @@ class Runner:
 
         response = None
         for attempt in range(1, attempts + 1):
-            response = await self.dispatcher.dispatch(operation, params, headers)
+            response = await dispatcher.dispatch(operation, params, headers)
             if evaluate_until(until, response.payload):
                 return response, attempt, True
             if attempt < attempts:
