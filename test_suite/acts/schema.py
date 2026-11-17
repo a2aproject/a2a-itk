@@ -170,7 +170,13 @@ class HttpMethod(str, enum.Enum):
 class Ordering(str, enum.Enum):
     """Ordering constraint over a stream's events (spec §7.1)."""
 
+    #: Task states never regress.
     MONOTONIC_STATE = 'monotonic_state'
+    #: `generation` only increases. A2A 1.1.
+    MONOTONIC_GENERATION = 'monotonic_generation'
+    #: Each update is exactly one above the latest `generation` before it.
+    #: For a stream that is sent every event. A2A 1.1.
+    CONTIGUOUS_GENERATION = 'contiguous_generation'
 
 
 class Backoff(str, enum.Enum):
@@ -439,10 +445,21 @@ class StreamAssertions(_Model):
     min_count: int | None = Field(default=None, ge=0)
     max_count: int | None = Field(default=None, ge=0)
     timeout_ms: int | None = Field(default=None, ge=0)
-    ordering: Ordering | None = None
+    ordering: Ordering | Annotated[list[Ordering], Field(min_length=1)] | None = Field(
+        default=None,
+        description='One ordering rule, or a list of rules that all apply.',
+    )
     events: list[EventAssertion] | None = None
     final_event: dict[str, Assertion] | None = None
     each_event: dict[str, Assertion] | None = None
+
+    def orderings(self) -> frozenset[Ordering]:
+        """The ordering rules that apply, however `ordering` was written."""
+        if self.ordering is None:
+            return frozenset()
+        if isinstance(self.ordering, Ordering):
+            return frozenset({self.ordering})
+        return frozenset(self.ordering)
 
     @model_validator(mode='after')
     def _counts_are_consistent(self) -> StreamAssertions:

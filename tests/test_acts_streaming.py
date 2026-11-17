@@ -15,12 +15,14 @@ from pathlib import Path
 import pytest
 
 from test_suite.acts import load_suite
+from test_suite.acts.assertions import evaluate
 from test_suite.acts.schema import EventAssertion, ExpectStream
 from test_suite.acts.streaming import (
     DISCRIMINATORS,
     EVENT_KINDS,
     TERMINAL_STATES,
     StreamedEvent,
+    check_generation,
     check_ordering,
     evaluate_stream,
     normalize,
@@ -49,6 +51,27 @@ def artifact(index: int = 0, **parts) -> StreamedEvent:
     )
 
 
+def message_update(index: int = 0, **extra) -> StreamedEvent:
+    """A client message added to a task, as A2A 1.1 reports it."""
+    payload = {
+        'taskId': 'T1', 'generation': '4',
+        'message': {'messageId': 'm1', 'role': 'ROLE_USER'},
+        **extra,
+    }
+    return normalize({'messageUpdate': payload}, index)
+
+
+def stream_error(index: int = 0) -> StreamedEvent:
+    """One refused request on a live exchange, as A2A 1.1 reports it."""
+    return normalize(
+        {'error': {
+            'taskId': 'T1', 'code': 'INVALID_ARGUMENT',
+            'message': 'the message was rejected', 'referenceId': 'm2',
+        }},
+        index,
+    )
+
+
 def stream(**kwargs) -> ExpectStream:
     return ExpectStream(**kwargs)
 
@@ -69,6 +92,9 @@ class TestNormalization:
             ('message', 'message'),
             ('statusUpdate', 'status_update'),
             ('artifactUpdate', 'artifact_update'),
+            ('messageUpdate', 'message_update'),
+            ('message_update', 'message_update'),
+            ('error', 'error'),
         ],
     )
     def test_every_oneof_arm(self, key, kind):
@@ -86,8 +112,34 @@ class TestNormalization:
         assert normalize({'task': {}, 'extra': 1}, 0).kind is None
 
     def test_the_kind_table_covers_the_proto(self):
-        assert EVENT_KINDS == {'task', 'message', 'status_update', 'artifact_update'}
-        assert set(DISCRIMINATORS) >= EVENT_KINDS
+        """Read off the specification's own message, so a kind added to the
+        proto and not here fails this test and does not pass through as an
+        event of no kind."""
+        from pyproto import a2a_pb2
+
+        arms = a2a_pb2.StreamResponse.DESCRIPTOR.fields
+        assert EVENT_KINDS == {arm.name for arm in arms}
+        assert EVENT_KINDS == {
+            'task', 'message', 'status_update', 'artifact_update',
+            'message_update', 'error',
+        }
+        for arm in arms:
+            # Both the proto name and the name ProtoJSON puts on the wire.
+            assert DISCRIMINATORS[arm.name] == arm.name
+            assert DISCRIMINATORS[arm.json_name] == arm.name
+
+    def test_an_event_of_an_unknown_kind_is_kept_as_it_arrived(self):
+        """A later minor version may add kinds. The runner reports what the
+        SUT sent, so such an event stays whole and still counts."""
+        future = {'futureEvent': {'taskId': 'T1', 'detail': 'x'}}
+        event = normalize(future, 1)
+        assert event.kind is None
+        assert event.view() == future
+        events = [status('TASK_STATE_WORKING', 0), event, status('TASK_STATE_COMPLETED', 2)]
+        assert evaluate_stream(stream(min_count=3, max_count=3), events).ok
+        assert evaluate_stream(
+            stream(events=[{'index': 1, 'futureEvent': {'detail': 'x'}}]), events
+        ).ok
 
 
 class TestEventView:
@@ -100,6 +152,10 @@ class TestEventView:
         """`{status_update: {status: ...}}` — the spec's style."""
         view = status('TASK_STATE_WORKING').view()
         assert view['status_update']['status'] == {'state': 'TASK_STATE_WORKING'}
+
+    def test_the_kind_is_offered_in_both_spellings(self):
+        view = status('TASK_STATE_WORKING').view()
+        assert view['statusUpdate'] is view['status_update']
 
     def test_only_the_matching_discriminator_is_present(self):
         """Which is what makes `final_event: {message: {exists: true}}` mean something."""
@@ -117,6 +173,60 @@ class TestEventView:
     def test_events_without_a_state_contribute_none(self):
         assert artifact().state() is None
         assert normalize({'message': {'role': 'ROLE_AGENT'}}, 0).state() is None
+        assert message_update().state() is None
+        assert stream_error().state() is None
+
+
+class TestEventKindNames:
+    """How an assertion names the kind of an event.
+
+    These decide what "this event is a message update" and "no message update
+    was sent" mean, so a mistake here makes a test pass for the wrong reason.
+    """
+
+    @pytest.mark.parametrize('spelling', ['message_update', 'messageUpdate'])
+    @pytest.mark.parametrize('wire', ['message_update', 'messageUpdate'])
+    def test_either_spelling_names_the_kind_however_it_arrived(self, spelling, wire):
+        event = normalize({wire: {'taskId': 'T1', 'generation': '4'}}, 0)
+        assert evaluate({spelling: {'taskId': 'T1'}}, event.view()).ok
+        assert not evaluate({spelling: {'taskId': 'OTHER'}}, event.view()).ok
+
+    @pytest.mark.parametrize('spelling', ['message_update', 'messageUpdate'])
+    def test_absent_fails_on_an_event_of_that_kind(self, spelling):
+        """`each_event: {message_update: {absent: true}}` is how a test says a
+        client of A2A 1.0 is never sent one. It must not pass because the wire
+        spelled the kind differently from the test."""
+        assertion = {spelling: {'absent': True}}
+        assert not evaluate(assertion, message_update().view()).ok
+        assert evaluate(assertion, status('TASK_STATE_WORKING').view()).ok
+
+    def test_the_name_of_a_kind_means_the_kind_and_not_a_field(self):
+        """A message update and a stream error both have a field `message`.
+        Read straight through, `{message: ...}` would match them, and could no
+        longer say that an event is a `Message`."""
+        is_a_message = {'message': {'exists': True}}
+        assert evaluate(is_a_message, normalize({'message': {'role': 'ROLE_AGENT'}}, 0).view()).ok
+        assert not evaluate(is_a_message, message_update().view()).ok
+        assert not evaluate(is_a_message, stream_error().view()).ok
+        assert not evaluate(is_a_message, status('TASK_STATE_WORKING').view()).ok
+
+    def test_such_a_field_is_reached_through_its_own_kind(self):
+        added = {'message_update': {'message': {'role': 'ROLE_USER', 'messageId': 'm1'}}}
+        assert evaluate(added, message_update().view()).ok
+        rejected = {'error': {'message': {'contains': 'rejected'}, 'referenceId': 'm2'}}
+        assert evaluate(rejected, stream_error().view()).ok
+        assert not evaluate(
+            {'error': {'referenceId': 'another'}}, stream_error().view()
+        ).ok
+
+    def test_the_other_fields_still_read_straight_through(self):
+        view = message_update().view()
+        assert evaluate({'taskId': 'T1', 'generation': {'gt': 3}}, view).ok
+        assert evaluate({'code': 'INVALID_ARGUMENT'}, stream_error().view()).ok
+
+    def test_an_error_event_is_not_a_status(self):
+        """It reports that one request was refused, not a state of the task."""
+        assert not evaluate({'status': {'exists': True}}, stream_error().view()).ok
 
 
 class TestCounts:
@@ -204,6 +314,234 @@ class TestOrdering:
         assert not evaluate_stream(
             stream(ordering=Ordering.MONOTONIC_STATE), events
         ).ok
+
+
+def gen_status(generation, index, state='TASK_STATE_WORKING') -> StreamedEvent:
+    extra = {} if generation is None else {'generation': generation}
+    return status(state, index, **extra)
+
+
+def snapshot(generation, index) -> StreamedEvent:
+    task = {'id': 'T1', 'status': {'state': 'TASK_STATE_WORKING'}}
+    if generation is not None:
+        task['generation'] = generation
+    return normalize({'task': task}, index)
+
+
+class TestGenerationOrdering:
+    """`monotonic_generation` and `contiguous_generation`.
+
+    A2A 1.1 numbers the changes to a task: every change raises `generation`
+    by one and is reported by one event carrying the new value.
+    """
+
+    def test_a_stream_that_reports_every_change(self):
+        """As a JSON binding sends it: 64-bit integers written as strings."""
+        events = [
+            snapshot('2', 0),
+            gen_status('3', 1),
+            normalize({'artifactUpdate': {'taskId': 'T1', 'generation': '4'}}, 2),
+            message_update(3, generation='5'),
+            gen_status('6', 4, 'TASK_STATE_COMPLETED'),
+        ]
+        for contiguous in (False, True):
+            result = check_generation(events, contiguous=contiguous)
+            assert result.ok
+            assert result.checks == 5
+
+    def test_generations_as_numbers(self):
+        """A generation written as a JSON number is read as well."""
+        events = [snapshot(2, 0), gen_status(3, 1), gen_status(4, 2)]
+        assert check_generation(events, contiguous=True).ok
+
+    def test_a_gap_is_allowed_unless_the_stream_must_be_contiguous(self):
+        """A subscriber that is not sent every event sees gaps."""
+        events = [snapshot('2', 0), gen_status('3', 1), gen_status('5', 2)]
+        assert check_generation(events).ok
+        result = check_generation(events, contiguous=True)
+        assert len(result.failures) == 1
+        failure = result.first
+        assert failure.path == 'events[2].generation'
+        assert (failure.expected, failure.actual) == (4, 5)
+        assert 'the latest before it was 3, at event 1' in failure.message
+
+    def test_the_first_update_after_a_snapshot_is_checked_too(self):
+        assert check_generation([snapshot('2', 0), gen_status('3', 1)], contiguous=True).ok
+        assert not check_generation(
+            [snapshot('2', 0), gen_status('4', 1)], contiguous=True
+        ).ok
+
+    @pytest.mark.parametrize('contiguous', [False, True])
+    def test_an_update_that_repeats_a_generation_fails(self, contiguous):
+        """Two events must never report the same generation."""
+        events = [gen_status('3', 0), gen_status('3', 1)]
+        result = check_generation(events, contiguous=contiguous)
+        assert len(result.failures) == 1
+        assert 'not greater than the 3 already seen at event 0' in result.first.message
+
+    @pytest.mark.parametrize('contiguous', [False, True])
+    def test_an_update_that_goes_back_fails(self, contiguous):
+        events = [gen_status('5', 0), gen_status('4', 1)]
+        assert not check_generation(events, contiguous=contiguous).ok
+
+    @pytest.mark.parametrize(
+        ('written', 'said'),
+        [
+            (None, 'carries no generation'),
+            ('0', 'has generation 0'),
+            (0, 'has generation 0'),
+            ('-1', 'has generation -1'),
+            ('abc', "has generation 'abc', which is not an integer"),
+            (1.5, 'has generation 1.5, which is not an integer'),
+            (True, 'has generation True, which is not an integer'),
+        ],
+    )
+    def test_an_update_needs_a_generation_of_at_least_one(self, written, said):
+        """An absent field and a zero are how an agent that does not
+        implement generation looks on the wire."""
+        result = check_generation([gen_status(written, 0)])
+        assert len(result.failures) == 1
+        assert said in result.first.message
+        assert result.first.path == 'events[0].generation'
+
+    def test_a_snapshot_may_repeat_the_latest_generation(self):
+        """It reports the state of the task and is not a change to it."""
+        events = [gen_status('3', 0), snapshot('3', 1), gen_status('4', 2)]
+        assert check_generation(events, contiguous=True).ok
+
+    def test_a_snapshot_older_than_what_was_already_sent_fails(self):
+        result = check_generation([gen_status('3', 0), snapshot('2', 1)])
+        assert len(result.failures) == 1
+        assert 'lower than the 3 already seen at event 0' in result.first.message
+
+    def test_an_old_snapshot_is_reported_once(self):
+        """The update after it is one above the latest generation, which the
+        old snapshot did not change."""
+        events = [gen_status('3', 0), snapshot('2', 1), gen_status('4', 2)]
+        result = check_generation(events, contiguous=True)
+        assert [f.path for f in result.failures] == ['events[1].generation']
+
+    @pytest.mark.parametrize('payload', [None, 'text', ['a', 'list']])
+    def test_an_update_that_is_not_an_object_carries_no_generation(self, payload):
+        """What a broken agent may send. It fails the stream; it must not
+        break the run."""
+        result = check_generation([normalize({'statusUpdate': payload}, 0)])
+        assert 'carries no generation' in result.first.message
+
+    @pytest.mark.parametrize('written', [None, '0'])
+    def test_a_snapshot_needs_a_generation_too(self, written):
+        assert not check_generation([snapshot(written, 0)]).ok
+
+    def test_events_without_a_generation_field_are_skipped(self):
+        """A `Message` and a stream error have none, and an event of a kind
+        the runner does not know is not the runner's to judge."""
+        events = [
+            gen_status('3', 0),
+            stream_error(1),
+            normalize({'futureEvent': {'generation': 'whatever'}}, 2),
+            gen_status('4', 3),
+        ]
+        result = check_generation(events, contiguous=True)
+        assert result.ok
+        assert result.checks == 2
+        only_a_message = [normalize({'message': {'role': 'ROLE_AGENT'}}, 0)]
+        assert check_generation(only_a_message, contiguous=True).ok
+
+    def test_a_stream_may_open_with_an_update(self):
+        """A subscriber that resumes is not sent the task first."""
+        events = [gen_status('7', 0), gen_status('8', 1)]
+        assert check_generation(events, contiguous=True).ok
+
+    def test_one_missing_generation_is_reported_once(self):
+        """And not a second time as a gap at the event after it."""
+        events = [gen_status('3', 0), gen_status(None, 1), gen_status('5', 2)]
+        result = check_generation(events, contiguous=True)
+        assert [f.path for f in result.failures] == ['events[1].generation']
+
+    def test_a_gap_after_that_is_reported_again(self):
+        events = [
+            gen_status('3', 0), gen_status(None, 1), gen_status('5', 2), gen_status('7', 3),
+        ]
+        result = check_generation(events, contiguous=True)
+        assert [f.path for f in result.failures] == [
+            'events[1].generation', 'events[3].generation',
+        ]
+
+    def test_every_digit_of_a_64_bit_generation_counts(self):
+        """These two are the same number once read as floats."""
+        below, above = '9007199254740992', '9007199254740993'
+        assert float(below) == float(above)
+        assert check_generation([gen_status(below, 0), gen_status(above, 1)], contiguous=True).ok
+        assert not check_generation([gen_status(above, 0), gen_status(below, 1)]).ok
+
+
+class TestOrderingRules:
+    """`ordering` as one rule or a list, through `evaluate_stream`."""
+
+    GOOD = [
+        snapshot('2', 0),
+        gen_status('3', 1),
+        gen_status('4', 2, 'TASK_STATE_COMPLETED'),
+    ]
+    #: Generations in order, but the task returns from a terminal state.
+    REGRESSES = [
+        gen_status('3', 0, 'TASK_STATE_COMPLETED'),
+        gen_status('4', 1, 'TASK_STATE_WORKING'),
+    ]
+    #: States in order, but a generation is skipped.
+    SKIPS = [gen_status('3', 0), gen_status('5', 1, 'TASK_STATE_COMPLETED')]
+    #: States in order, but two events report the same generation.
+    REPEATS = [gen_status('3', 0), gen_status('3', 1, 'TASK_STATE_COMPLETED')]
+
+    @pytest.mark.parametrize(
+        'ordering',
+        [
+            'monotonic_state',
+            'monotonic_generation',
+            'contiguous_generation',
+            ['monotonic_state', 'monotonic_generation'],
+            ['monotonic_state', 'contiguous_generation'],
+        ],
+    )
+    def test_a_well_ordered_stream_satisfies_every_rule(self, ordering):
+        assert evaluate_stream(stream(ordering=ordering), self.GOOD).ok
+
+    @pytest.mark.parametrize(
+        ('ordering', 'events', 'ok'),
+        [
+            ('monotonic_state', 'REGRESSES', False),
+            ('monotonic_generation', 'REGRESSES', True),
+            (['monotonic_state', 'monotonic_generation'], 'REGRESSES', False),
+            ('monotonic_state', 'SKIPS', True),
+            ('monotonic_generation', 'SKIPS', True),
+            ('contiguous_generation', 'SKIPS', False),
+            (['monotonic_state', 'contiguous_generation'], 'SKIPS', False),
+            ('monotonic_state', 'REPEATS', True),
+            ('monotonic_generation', 'REPEATS', False),
+            (['monotonic_state', 'monotonic_generation'], 'REPEATS', False),
+            ('contiguous_generation', 'REPEATS', False),
+        ],
+    )
+    def test_each_rule_checks_its_own_thing(self, ordering, events, ok):
+        result = evaluate_stream(stream(ordering=ordering), getattr(self, events))
+        assert result.ok is ok
+
+    def test_no_rule_no_check(self):
+        assert evaluate_stream(stream(), self.REGRESSES + self.SKIPS).ok
+
+    def test_naming_both_generation_rules_reports_a_problem_once(self):
+        both = stream(ordering=['monotonic_generation', 'contiguous_generation'])
+        repeated = [gen_status('3', 0), gen_status('3', 1)]
+        assert len(evaluate_stream(both, repeated).failures) == 1
+        assert not evaluate_stream(both, self.SKIPS).ok
+
+    def test_a_rule_on_one_stream_of_a_set(self):
+        """`streams` entries take the same rules for their own stream."""
+        from test_suite.acts.schema import StreamPlan
+
+        plan = StreamPlan(ordering='contiguous_generation')
+        assert evaluate_stream(plan, self.GOOD).ok
+        assert not evaluate_stream(plan, self.SKIPS).ok
 
 
 class TestFinalEvent:
