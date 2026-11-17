@@ -147,6 +147,14 @@ $CONTAINER_RT exec -u root itk-service git config --system core.multiPackIndex f
 $CONTAINER_RT exec -u root itk-service bash -lc \
   'while IFS= read -r -d "" d; do git config --system --add safe.directory "${d%/.git}"; done < <(find /root/.cache/a2a-itk -type d -name .git -print0)'
 
+# 4.2. Drop cached peer trees past ITK_TREE_TTL or over ITK_DISK_BUDGET_BYTES.
+# CI saves this directory with actions/cache, so without this step the saved
+# cache grows with every new peer commit. The TTL is 2 days: longer than the
+# daily nightly interval, so a late cron does not evict the peers it is about
+# to use, and short enough to drop one-time trees of moving `main` refs.
+$CONTAINER_RT exec -e ITK_TREE_TTL=172800 -w /app itk-service \
+  uv run python -m test_suite.launcher.cache evict
+
 # 5. Wait for readiness.
 MAX_RETRIES=30
 echo "Waiting for ITK service to start on 127.0.0.1:8000..."
