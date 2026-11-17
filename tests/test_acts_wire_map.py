@@ -13,7 +13,12 @@ from pathlib import Path
 import pytest
 
 from test_suite.acts import load_suite
-from test_suite.acts.schema import ErrorType, HttpMethod, Operation
+from test_suite.acts.schema import (
+    ErrorType,
+    HttpMethod,
+    Operation,
+    TransportBinding,
+)
 from test_suite.acts.wire_map import (
     ERRORS,
     GRPC_SERVICE,
@@ -25,6 +30,9 @@ from test_suite.acts.wire_map import (
     error_for_reason,
     errors_sharing_http_status,
     http_status_for_grpc,
+    card_interfaces,
+    interface_binding,
+    interface_version,
 )
 
 
@@ -248,7 +256,8 @@ class TestPathTemplates:
 class TestErrorsMatchA2ASpec:
     """A2A §5.4, which ACTS §6.2's own footnote makes authoritative over it."""
 
-    #: Transcribed from docs/specification.md §5.4 at dbcabfba.
+    #: Transcribed from docs/specification.md §5.4 at dbcabfba, and the last
+    #: row from the same table of A2A 1.1 at v1.1.0-rc.
     SPEC_5_4 = {
         ErrorType.TASK_NOT_FOUND: (-32001, 'NOT_FOUND', 404),
         ErrorType.TASK_NOT_CANCELABLE: (-32002, 'FAILED_PRECONDITION', 400),
@@ -265,6 +274,7 @@ class TestErrorsMatchA2ASpec:
             -32008, 'FAILED_PRECONDITION', 400,
         ),
         ErrorType.VERSION_NOT_SUPPORTED: (-32009, 'FAILED_PRECONDITION', 400),
+        ErrorType.TASK_GENERATION_MISMATCH: (-32010, 'ABORTED', 409),
     }
 
     @pytest.mark.parametrize('error', sorted(SPEC_5_4, key=lambda e: e.value))
@@ -329,6 +339,49 @@ class TestErrorsMatchA2ASpec:
             ErrorType.INTERNAL,
         }
         assert set(ERRORS) == a2a_names
+
+
+class TestAgentCardInterfaces:
+    """Reading `supportedInterfaces` off an agent card."""
+
+    @pytest.mark.parametrize(
+        ('written', 'binding'),
+        [
+            ('JSONRPC', TransportBinding.JSONRPC),
+            ('jsonrpc', TransportBinding.JSONRPC),
+            ('GRPC', TransportBinding.GRPC),
+            ('HTTP+JSON', TransportBinding.REST),
+            ('HTTP_JSON', TransportBinding.REST),
+            ('REST', TransportBinding.REST),
+        ],
+    )
+    def test_the_binding_as_a_card_spells_it(self, written, binding):
+        assert interface_binding({'protocolBinding': written}) is binding
+
+    @pytest.mark.parametrize('interface', [{}, {'protocolBinding': 'CARRIER-PIGEON'}])
+    def test_a_binding_this_suite_does_not_know(self, interface):
+        assert interface_binding(interface) is None
+
+    @pytest.mark.parametrize(
+        ('written', 'version'),
+        [('1.0', (1, 0)), ('1.1', (1, 1)), ('1.10', (1, 10)), ('0.3', (0, 3)),
+         ('1.0.0', (1, 0))],
+    )
+    def test_the_version_as_major_and_minor(self, written, version):
+        """A patch component on a card is ignored: `1.0.0` means 1.0."""
+        assert interface_version({'protocolVersion': written}) == version
+
+    @pytest.mark.parametrize('written', [None, '', 'v1', 'v1.0', '1.0-rc'])
+    def test_an_interface_without_a_readable_version(self, written):
+        assert interface_version({'protocolVersion': written}) is None
+
+    def test_the_interfaces_of_a_card_on_one_binding(self):
+        rest = {'protocolBinding': 'HTTP+JSON', 'url': 'http://sut/rest'}
+        grpc = {'protocolBinding': 'GRPC', 'url': 'sut:1'}
+        card = {'supportedInterfaces': [rest, grpc, {'protocolBinding': 'SOAP'}]}
+        assert card_interfaces(card, TransportBinding.REST) == [rest]
+        assert card_interfaces(card, TransportBinding.JSONRPC) == []
+        assert card_interfaces({}, TransportBinding.GRPC) == []
 
 
 class TestReverseLookups:
