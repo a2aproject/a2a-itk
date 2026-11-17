@@ -14,6 +14,10 @@ reads it. Each binding then gets its own fresh SUT, matching what the nightly
 does: one `POST /run-acts` per transport, so no run inherits another's task
 store.
 
+``--spec-version`` is the A2A version the run targets, 1.0 unless given. It
+selects the tests that apply to that version, is sent as ``A2A-Version`` and
+is recorded in the report. One invocation tests one version.
+
 ``--sut-url`` dials an agent the caller already started, and every binding
 runs against that one instance. The harness cannot restart it, so the
 instances the reduced-capability and auth passes would otherwise spawn come
@@ -54,7 +58,7 @@ def _render_combined(reports: list, report_writer) -> None:
     multi-binding run rather than three separate verdicts.
     """
     print('=' * 56)
-    print(f"ACROSS {len(reports)} BINDING(S)")
+    print(f"ACROSS {len(reports)} BINDING(S) AT A2A {reports[0]['spec_version']}")
     print('=' * 56)
     # Each binding is scored on its own subset, so the three denominators
     # differ. Naming the union spares the reader working out where the tests
@@ -180,6 +184,11 @@ def main(argv: list[str] | None = None) -> int:
              'Default: jsonrpc.',
     )
     parser.add_argument(
+        '--spec-version', default=None, metavar='VERSION',
+        help='The A2A version the run targets, as Major.Minor. Selects the '
+             'tests that apply to it and is sent as A2A-Version. Default: 1.0.',
+    )
+    parser.add_argument(
         '-t', '--test', action='append', dest='tests', metavar='ID',
         help='Run only this test id. Repeatable.',
     )
@@ -236,7 +245,19 @@ def main(argv: list[str] | None = None) -> int:
 
     import acts_runner
     from test_suite.acts import report as report_writer
-    from test_suite.acts.schema import TransportBinding
+    from test_suite.acts.schema import (
+        DEFAULT_SPEC_VERSION,
+        TransportBinding,
+        parse_spec_version,
+    )
+
+    spec_version = (
+        DEFAULT_SPEC_VERSION if args.spec_version is None else args.spec_version
+    )
+    try:
+        parse_spec_version(spec_version)
+    except ValueError as exc:
+        parser.error(f'--spec-version: {exc}')
 
     if mount is not None and not args.no_codegen:
         _generate_protos(mount)
@@ -247,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
             result = asyncio.run(
                 acts_runner.run(
                     transport=TransportBinding(binding),
+                    spec_version=spec_version,
                     sut_url=args.sut_url,
                     suite_path=args.suite,
                     test_ids=args.tests,

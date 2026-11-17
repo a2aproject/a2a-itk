@@ -67,6 +67,7 @@ from test_suite.acts.dispatcher.base import (
 from test_suite.acts.dispatcher.params import adapt
 from test_suite.acts.loader import LoadedSuite
 from test_suite.acts.schema import (
+    DEFAULT_SPEC_VERSION,
     Backoff,
     Level,
     Operation,
@@ -101,9 +102,14 @@ DEFAULT_DELAY_MS = 1000
 #: patient as a polled one rather than inventing a second notion of "too slow".
 DEFAULT_STREAM_TIMEOUT_MS: Final = 30_000
 
-#: §12.4 requires this on every request, carrying the document's
-#: `spec_version`. On gRPC the dispatcher turns it into call metadata.
+#: Sent on every request the runner builds, carrying the A2A version the run
+#: targets. On gRPC the dispatcher turns it into call metadata.
 VERSION_HEADER = 'A2A-Version'
+
+#: The variable through which a test reads the version the run targets. A raw
+#: step is sent exactly as written, so this is how one carries the run's
+#: version in a header it spells out itself.
+SPEC_VERSION_VARIABLE = 'specVersion'
 
 #: How often a webhook step re-reads the receiver while waiting.
 _WEBHOOK_POLL_S: Final = 0.25
@@ -386,7 +392,7 @@ class Runner:
         dispatcher: Dispatcher,
         *,
         variables: Mapping[str, Any] | None = None,
-        spec_version: str = '1.0',
+        spec_version: str = DEFAULT_SPEC_VERSION,
         agent_card: Mapping[str, Any] | None = None,
         sut_behaviors: Iterable[str] | None = None,
         capabilities: Iterable[RunnerRequirement] = (),
@@ -403,7 +409,14 @@ class Runner:
         #: Overlaid on the document's own `variables`, so a runner-supplied
         #: value wins. The corpus references two variables no document
         #: defines and they can only arrive this way.
-        self.variables = dict(variables or {})
+        #:
+        #: The run version is added last, so nothing can make the variable
+        #: disagree with the header the same run sends.
+        self.variables = {
+            **(variables or {}), SPEC_VERSION_VARIABLE: spec_version,
+        }
+        #: The A2A version this run targets. It decides which tests apply,
+        #: what `A2A-Version` carries and what `{{specVersion}}` resolves to.
         self.spec_version = spec_version
         self.agent_card = agent_card
         #: The `tck-*` prefixes the SUT declares, from its own
@@ -497,6 +510,15 @@ class Runner:
         if not test.applies_to(self.binding):
             targets = ', '.join(t.value for t in test.transport or ())
             return f'targets {targets}; this runner speaks {self.binding.value}'
+
+        # The same kind of backstop for the version range: the pipeline drops
+        # these before the run (`acts_runner._for_version`), because a test
+        # outside the range is not part of the run and must not be reported.
+        if not test.applies_to_version(self.spec_version):
+            return (
+                f'applies to {test.version_range()}; '
+                f'this run targets A2A {self.spec_version}'
+            )
 
         deferred = {
             step.kind() for step in test.steps if step.kind() not in EXECUTABLE_KINDS

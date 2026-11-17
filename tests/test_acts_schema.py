@@ -27,6 +27,7 @@ from test_suite.acts.schema import (
     Test,
     TransportBinding,
     is_acts_document,
+    parse_spec_version,
 )
 
 
@@ -156,6 +157,81 @@ class TestSuiteAndTest:
         assert t.applies_to(TransportBinding.JSONRPC)
         assert not t.applies_to(TransportBinding.GRPC)
         assert not t.applies_to(TransportBinding.REST)
+
+
+class TestVersionRange:
+    """Which A2A versions a test applies to.
+
+    One corpus serves every version, so a wrong answer here either runs a test
+    against a version that never had the requirement or drops it from the
+    version that does.
+    """
+
+    def test_a_test_without_bounds_applies_to_every_version(self):
+        test = Test.model_validate(_test())
+        assert test.applies_to_version('1.0')
+        assert test.applies_to_version('1.1')
+        assert test.applies_to_version('2.0')
+
+    def test_the_minimum_is_inclusive(self):
+        test = Test.model_validate(_test(min_spec_version='1.1'))
+        assert not test.applies_to_version('1.0')
+        assert test.applies_to_version('1.1')
+        assert test.applies_to_version('1.2')
+
+    def test_the_maximum_is_inclusive(self):
+        test = Test.model_validate(_test(max_spec_version='1.0'))
+        assert test.applies_to_version('1.0')
+        assert not test.applies_to_version('1.1')
+
+    def test_both_bounds_together(self):
+        test = Test.model_validate(
+            _test(min_spec_version='1.1', max_spec_version='1.2')
+        )
+        assert [
+            test.applies_to_version(v) for v in ('1.0', '1.1', '1.2', '1.3')
+        ] == [False, True, True, False]
+
+    def test_versions_compare_as_numbers_not_as_text(self):
+        """As text, "1.10" sorts before "1.9"."""
+        test = Test.model_validate(_test(min_spec_version='1.10'))
+        assert not test.applies_to_version('1.9')
+        assert test.applies_to_version('1.10')
+        assert parse_spec_version('1.10') > parse_spec_version('1.9')
+
+    @pytest.mark.parametrize(
+        'bound', ['1', '1.0.0', 'v1.1', '1.x', '', '01.0', '1.01', '\u0661.\u0660'],
+    )
+    def test_a_bound_that_is_not_a_version_is_rejected(self, bound):
+        with pytest.raises(ValidationError, match='min_spec_version'):
+            Test.model_validate(_test(min_spec_version=bound))
+        with pytest.raises(ValidationError, match='max_spec_version'):
+            Test.model_validate(_test(max_spec_version=bound))
+
+    def test_an_unquoted_yaml_number_is_rejected(self):
+        """`max_spec_version: 1.10` unquoted is the float 1.1."""
+        with pytest.raises(ValidationError, match='max_spec_version'):
+            Test.model_validate(_test(max_spec_version=1.10))
+
+    def test_an_empty_range_is_rejected(self):
+        """It would drop the test from every run without saying so."""
+        with pytest.raises(ValidationError, match='would apply to no version'):
+            Test.model_validate(
+                _test(min_spec_version='1.1', max_spec_version='1.0')
+            )
+
+    @pytest.mark.parametrize(
+        ('bounds', 'expected'),
+        [
+            ({}, 'every A2A version'),
+            ({'min_spec_version': '1.1'}, 'A2A 1.1 and newer'),
+            ({'max_spec_version': '1.0'}, 'A2A 1.0 and older'),
+            ({'min_spec_version': '1.1', 'max_spec_version': '1.2'}, 'A2A 1.1 to 1.2'),
+            ({'min_spec_version': '1.1', 'max_spec_version': '1.1'}, 'A2A 1.1'),
+        ],
+    )
+    def test_the_range_reads_as_words(self, bounds, expected):
+        assert Test.model_validate(_test(**bounds)).version_range() == expected
 
 
 class TestStepKind:

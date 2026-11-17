@@ -373,6 +373,24 @@ class TestProcessing:
         with pytest.raises(SystemExit):
             self.run(tmp_path, [a_report(transport='grpc')] * 2)
 
+    def test_reports_for_different_a2a_versions_are_refused(self, tmp_path, caplog):
+        """An entry carries one `spec_version`; mixing two would publish a
+        1.0 result as a 1.1 one."""
+        at_10 = a_report(transport='jsonrpc')
+        at_11 = {**a_report(transport='grpc'), 'spec_version': '1.1'}
+        with pytest.raises(SystemExit):
+            self.run(tmp_path, [at_10, at_11], history=[])
+        assert 'different A2A versions (1.0, 1.1)' in caplog.text
+
+    def test_an_entry_names_the_version_its_reports_targeted(self, tmp_path):
+        reports = [
+            {**a_report(transport=t), 'spec_version': '1.1'}
+            for t in ('jsonrpc', 'grpc')
+        ]
+        code, history = self.run(tmp_path, reports, history=[])
+        assert code == 0
+        assert history[-1]['spec_version'] == '1.1'
+
     def test_both_sdks_can_share_one_asset(self, tmp_path):
         """Nothing keys the history by SDK, so a shared asset stays coherent."""
         first = build_run([a_report(sdk='a2a-python')])

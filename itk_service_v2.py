@@ -26,7 +26,11 @@ import acts_runner
 import itk_runner
 from acts_runner import ActsRunError
 from itk_runner import ClusterStartupError
-from test_suite.acts.schema import RunnerRequirement, TransportBinding
+from test_suite.acts.schema import (
+    DEFAULT_SPEC_VERSION,
+    RunnerRequirement,
+    TransportBinding,
+)
 from test_suite.launcher import InfraFailure, PermanentError
 from test_suite.launcher.matrix import MatrixError
 from test_suite.scenarios.loader import ScenarioFileError
@@ -106,6 +110,10 @@ class RunActsRequest(BaseModel):
     """
 
     transport: TransportBinding
+    #: The A2A version the run targets, as `Major.Minor`. Selects the tests
+    #: that apply to it, is sent as `A2A-Version` and is recorded in the
+    #: report. One request tests one version.
+    spec_version: str = DEFAULT_SPEC_VERSION
     #: SDK identity for the report's `sdk-info` (spec §13.1).
     sdk: str
     sdk_version: str = 'unknown'
@@ -241,6 +249,7 @@ async def run_acts(request: RunActsRequest) -> dict[str, Any]:
     try:
         result = await acts_runner.run(
             transport=request.transport,
+            spec_version=request.spec_version,
             sut_url=request.sut_url,
             test_ids=request.tests,
             variables=request.variables,
@@ -255,9 +264,10 @@ async def run_acts(request: RunActsRequest) -> dict[str, Any]:
             log_dir=_agent_log_dir(),
         )
     except ActsRunError as e:
-        # The SUT would not start, its card is unreadable, or the request
-        # names tests that do not exist or deviation URLs without `sut_url`.
-        # None of it is retryable.
+        # The SUT would not start, its card is unreadable or offers no
+        # interface for the requested version, or the request names tests that
+        # do not exist or deviation URLs without `sut_url`. None of it is
+        # retryable.
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.exception('ACTS run failed')

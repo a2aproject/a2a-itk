@@ -29,6 +29,7 @@ from acts_runner import (
     DEVIATIONS,
     REDUCED_CAPABILITIES_ENV,
     ActsRunError,
+    NoApplicableTests,
     _capabilities_dropped,
     _capability_skips,
     _security_declared,
@@ -228,6 +229,7 @@ class TestASplicedVerdictSaysWhichConfigurationProducedIt:
         return asyncio.run(acts_runner._rerun_deviation(
             before, load_suite(MANIFEST),
             deviation=AUTH, transport=TransportBinding.JSONRPC,
+            spec_version='1.0',
             variables=None, capabilities=None, declared=None, log_dir=None,
         ))
 
@@ -280,6 +282,7 @@ class TestAFailedPassDoesNotLoseTheReport:
         after = asyncio.run(acts_runner._rerun_deviation(
             before, load_suite(MANIFEST),
             deviation=AUTH, transport=TransportBinding.JSONRPC,
+            spec_version='1.0',
             variables=None, capabilities=None, declared=None, log_dir=None,
         ))
 
@@ -297,6 +300,7 @@ class TestAFailedPassDoesNotLoseTheReport:
             asyncio.run(acts_runner._rerun_deviation(
                 self._blocked(), load_suite(MANIFEST),
                 deviation=AUTH, transport=TransportBinding.JSONRPC,
+                spec_version='1.0',
                 variables=None, capabilities=None, declared=None, log_dir=None,
             ))
 
@@ -314,6 +318,7 @@ class TestAFailedPassDoesNotLoseTheReport:
         assert asyncio.run(acts_runner._rerun_deviation(
             results, load_suite(MANIFEST),
             deviation=AUTH, transport=TransportBinding.JSONRPC,
+            spec_version='1.0',
             variables=None, capabilities=None, declared=None, log_dir=None,
         )) == results
 
@@ -450,6 +455,7 @@ class TestExternalSutUrl:
             acts_runner._run_pass(
                 suite,
                 transport=TransportBinding.JSONRPC,
+                spec_version='1.0',
                 variables=None,
                 capabilities=None,
                 declared=None,
@@ -640,3 +646,347 @@ class TestAnExternalRunIsMarkedInTheReport:
 
     def test_a_spawned_sut_carries_no_marker(self):
         assert 'sut' not in self._report(external=False)['environment']
+
+
+def _interface(version: str | None, url: str, binding: str = 'JSONRPC') -> dict:
+    interface = {'protocolBinding': binding, 'url': url}
+    if version is not None:
+        interface['protocolVersion'] = version
+    return interface
+
+
+class TestWhichInterfaceARunDials:
+    """`interface_for` picks the card's interface for the run version.
+
+    The wrong pick is expensive in both directions: an interface for another
+    version answers every request with a version error, which reads as a
+    report full of conformance failures, and refusing a usable interface
+    loses the run.
+    """
+
+    def pick(self, spec_version: str, *interfaces: dict) -> tuple[str, str | None]:
+        return acts_runner.interface_for(
+            {'supportedInterfaces': list(interfaces)},
+            TransportBinding.JSONRPC,
+            spec_version,
+        )
+
+    def test_the_exact_version_wins_wherever_it_is_listed(self):
+        card = (
+            _interface('0.3', 'http://sut/v03'),
+            _interface('1.1', 'http://sut/v11'),
+            _interface('1.0', 'http://sut/v10'),
+        )
+        assert self.pick('1.0', *card) == ('http://sut/v10', '1.0')
+        assert self.pick('1.1', *card) == ('http://sut/v11', '1.1')
+
+    def test_a_newer_minor_serves_an_older_run(self):
+        """How a 1.0 run asks whether a 1.1 server still behaves as 1.0."""
+        assert self.pick('1.0', _interface('1.1', 'http://sut/v11')) == (
+            'http://sut/v11', '1.1',
+        )
+
+    def test_the_newest_of_several_newer_minors_is_used(self):
+        card = (
+            _interface('1.1', 'http://sut/v11'),
+            _interface('1.10', 'http://sut/v110'),
+            _interface('1.9', 'http://sut/v19'),
+        )
+        assert self.pick('1.0', *card) == ('http://sut/v110', '1.10')
+
+    def test_an_older_minor_is_a_configuration_error(self):
+        """A 1.0 interface answers a 1.1 request with a version error, so the
+        run would report every test as a failure of the SUT."""
+        with pytest.raises(ActsRunError) as exc:
+            self.pick(
+                '1.1',
+                _interface('1.0', 'http://sut/v10'),
+                _interface('0.3', 'http://sut/v03'),
+            )
+        assert 'no jsonrpc interface for A2A 1.1' in str(exc.value)
+        assert '1.0, 0.3' in str(exc.value)
+
+    def test_another_major_is_never_used(self):
+        with pytest.raises(ActsRunError, match='no jsonrpc interface for A2A 1.0'):
+            self.pick('1.0', _interface('0.3', 'http://sut/v03'))
+        with pytest.raises(ActsRunError, match='no jsonrpc interface for A2A 1.0'):
+            self.pick('1.0', _interface('2.0', 'http://sut/v20'))
+
+    def test_an_interface_without_a_version_is_the_last_resort(self):
+        card = (_interface(None, 'http://sut/any'), _interface('1.1', 'http://sut/v11'))
+        assert self.pick('1.1', *card) == ('http://sut/v11', '1.1')
+        assert self.pick('1.0', *card) == ('http://sut/v11', '1.1')
+        assert self.pick('1.2', *card) == ('http://sut/any', None)
+
+    def test_a_patch_component_on_the_card_is_ignored(self):
+        card = (_interface(None, 'http://sut/any'), _interface('1.0.0', 'http://sut/v10'))
+        assert self.pick('1.0', *card) == ('http://sut/v10', '1.0.0')
+
+    @pytest.mark.parametrize('written', ['v1.0', '1', 'latest', '1.0-rc'])
+    def test_a_version_that_cannot_be_read_is_never_used(self, written):
+        """It is not the same as no version: the interface says it serves
+        something, and nothing shows that it is the run version."""
+        with pytest.raises(ActsRunError, match='no jsonrpc interface for A2A 1.0'):
+            self.pick('1.0', _interface(written, 'http://sut/odd'))
+
+    def test_only_the_requested_binding_is_considered(self):
+        with pytest.raises(ActsRunError, match='advertises no jsonrpc interface'):
+            self.pick('1.1', _interface('1.1', 'sut:50051', binding='GRPC'))
+
+
+VERSIONED_SUITE = '''\
+acts_version: "1.0"
+spec_version: "{written_against}"
+suites:
+  - id: core
+    name: Core
+    tests:
+      - id: T-EVERY
+        name: every version
+        level: must
+        steps: [{{id: s, operation: get_task, params: {{id: x}}}}]
+      - id: T-ONLY-10
+        name: 1.0 only
+        level: must
+        max_spec_version: "1.0"
+        steps: [{{id: s, operation: get_task, params: {{id: x}}}}]
+      - id: T-FROM-11
+        name: from 1.1
+        level: must
+        min_spec_version: "1.1"
+        steps: [{{id: s, operation: get_task, params: {{id: x}}}}]
+'''
+
+
+class TestARunTargetsOneVersion:
+    """`spec_version` is the one input that selects the tests, sets the
+    header, picks the interface and names the version in the report."""
+
+    @pytest.fixture
+    def suite_path(self, tmp_path):
+        path = tmp_path / 'versioned.acts.yaml'
+        path.write_text(VERSIONED_SUITE.format(written_against='1.1'), encoding='utf-8')
+        return path
+
+    def _run(self, monkeypatch, suite_path, **kwargs):
+        seen: dict[str, object] = {}
+
+        async def fake_pass(suite, *, spec_version=None, **_):
+            seen['ids'] = [t.id for t in suite.tests]
+            seen['spec_version'] = spec_version
+            return [], {}
+
+        monkeypatch.setattr(acts_runner, '_run_pass', fake_pass)
+        outcome = asyncio.run(acts_runner.run(
+            transport=TransportBinding.JSONRPC,
+            sut_url='http://external.sut:8788',
+            suite_path=suite_path,
+            gate_on_behaviors=False,
+            **kwargs,
+        ))
+        return outcome, seen
+
+    def test_the_default_is_1_0(self, monkeypatch, suite_path):
+        outcome, seen = self._run(monkeypatch, suite_path)
+        assert seen == {'ids': ['T-EVERY', 'T-ONLY-10'], 'spec_version': '1.0'}
+        assert outcome.spec_version == '1.0'
+
+    def test_a_1_1_run_gets_the_1_1_tests(self, monkeypatch, suite_path):
+        outcome, seen = self._run(monkeypatch, suite_path, spec_version='1.1')
+        assert seen == {'ids': ['T-EVERY', 'T-FROM-11'], 'spec_version': '1.1'}
+        assert outcome.spec_version == '1.1'
+
+    def test_a_test_outside_the_range_is_absent_from_the_report(
+        self, monkeypatch, suite_path
+    ):
+        """Absent, not skipped: a 1.0 run must report the same tests after
+        1.1 tests are added to the corpus as it did before."""
+        outcome, _ = self._run(monkeypatch, suite_path)
+        assert [t.id for t in outcome.suite.tests] == ['T-EVERY', 'T-ONLY-10']
+
+    def test_a_selection_outside_the_range_is_refused(self, monkeypatch, suite_path):
+        with pytest.raises(NoApplicableTests) as exc:
+            self._run(monkeypatch, suite_path, test_ids=['T-FROM-11'])
+        assert 'applies to A2A 1.0' in str(exc.value)
+        assert 'T-FROM-11 (A2A 1.1 and newer)' in str(exc.value)
+
+    def test_a_document_is_not_run_past_the_version_it_was_written_against(
+        self, monkeypatch, tmp_path
+    ):
+        """An unbounded test claims to hold only up to its document's
+        `spec_version`; nobody checked it against anything newer."""
+        path = tmp_path / 'old.acts.yaml'
+        path.write_text(VERSIONED_SUITE.format(written_against='1.0'), encoding='utf-8')
+        with pytest.raises(ActsRunError) as exc:
+            self._run(monkeypatch, path, spec_version='1.1')
+        assert 'cannot run at A2A 1.1' in str(exc.value)
+        assert 'old.acts.yaml (1.0)' in str(exc.value)
+
+    def test_the_mirrored_corpus_refuses_a_version_it_does_not_cover(
+        self, monkeypatch
+    ):
+        """Asked for a version newer than the corpus, the run stops before it
+        starts a SUT instead of grading the SUT on tests for another version."""
+        async def no_pass(*args, **kwargs):
+            raise AssertionError('no pass may start')
+
+        monkeypatch.setattr(acts_runner, '_run_pass', no_pass)
+        with pytest.raises(ActsRunError, match='cannot run at A2A 9.0'):
+            asyncio.run(acts_runner.run(
+                transport=TransportBinding.JSONRPC,
+                sut_url='http://external.sut:8788',
+                spec_version='9.0',
+            ))
+
+    @pytest.mark.parametrize('bad', ['1', '1.1.0', 'latest', '', '01.0'])
+    def test_a_run_version_that_is_not_a_version_is_refused(
+        self, monkeypatch, suite_path, bad
+    ):
+        with pytest.raises(ActsRunError, match='spec_version'):
+            self._run(monkeypatch, suite_path, spec_version=bad)
+
+    def test_a_version_older_than_the_suite_covers_is_refused(
+        self, monkeypatch, suite_path
+    ):
+        """An unbounded test holds from 1.0 on, not for 0.3."""
+        with pytest.raises(ActsRunError, match='covers A2A 1.0 and newer'):
+            self._run(monkeypatch, suite_path, spec_version='0.3')
+
+    def test_a_deviation_pass_runs_at_the_same_version(self, monkeypatch, suite_path):
+        versions: list[str | None] = []
+
+        async def fake_pass(suite, *, spec_version=None, sut_url=None, **_):
+            versions.append(spec_version)
+            if sut_url == 'http://main.sut:1':
+                return [skipped(
+                    'T-EVERY', 'agent card capability streaming=True, needs False',
+                )], {}
+            return [TestResult(
+                id='T-EVERY', name='x', level=Level.MUST,
+                result=Outcome.PASS, duration_ms=1,
+            )], {'capabilities': {'streaming': False}}
+
+        monkeypatch.setattr(acts_runner, '_run_pass', fake_pass)
+        asyncio.run(acts_runner.run(
+            transport=TransportBinding.JSONRPC,
+            spec_version='1.1',
+            sut_url='http://main.sut:1',
+            suite_path=suite_path,
+            gate_on_behaviors=False,
+            deviation_urls={REDUCED_CAPABILITIES_ENV: 'http://reduced.sut:2'},
+        ))
+        assert versions == ['1.1', '1.1']
+
+
+class TestOnePassSpeaksTheRunVersion:
+    """Inside a pass, the card fetch, the interface and the runner all take
+    the same version."""
+
+    def test_the_version_reaches_the_card_the_dispatcher_and_the_runner(
+        self, monkeypatch
+    ):
+        import contextlib
+
+        seen: dict[str, object] = {}
+
+        async def fake_fetch_card(base_url, *, spec_version, **kwargs):
+            seen['card'] = spec_version
+            return {'supportedInterfaces': [
+                _interface('1.0', 'http://sut/v10'),
+                _interface('1.1', 'http://sut/v11'),
+            ]}
+
+        class _Dispatcher:
+            binding = TransportBinding.JSONRPC
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        def fake_for_binding(binding, url, **kwargs):
+            seen['url'] = url
+            return _Dispatcher()
+
+        class _Runner:
+            def __init__(self, dispatcher, *, spec_version, **kwargs):
+                seen['runner'] = spec_version
+
+            async def run_suite(self, suite):
+                return []
+
+        @contextlib.asynccontextmanager
+        async def fake_webhook():
+            yield None, None
+
+        monkeypatch.setattr(acts_runner, 'fetch_agent_card', fake_fetch_card)
+        monkeypatch.setattr(acts_runner, 'for_binding', fake_for_binding)
+        monkeypatch.setattr(acts_runner, '_webhook_receiver', fake_webhook)
+        monkeypatch.setattr(acts_runner, 'Runner', _Runner)
+
+        asyncio.run(acts_runner._run_pass(
+            load_suite(MANIFEST),
+            transport=TransportBinding.JSONRPC,
+            variables=None,
+            capabilities=None,
+            declared=None,
+            log_dir=None,
+            log_name='acts_sut',
+            sut_url='http://external.sut:8788',
+            spec_version='1.1',
+        ))
+        assert seen == {'card': '1.1', 'url': 'http://sut/v11', 'runner': '1.1'}
+
+    def test_the_card_is_fetched_with_the_run_version(self, monkeypatch):
+        import httpx
+
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={'name': 'agent'})
+
+        real_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            acts_runner.httpx, 'AsyncClient',
+            lambda **kwargs: real_client(
+                transport=httpx.MockTransport(handler), **kwargs
+            ),
+        )
+        asyncio.run(acts_runner.fetch_agent_card('http://sut', spec_version='1.1'))
+        assert [r.headers['A2A-Version'] for r in requests] == ['1.1']
+
+
+class TestTheReportNamesTheVersion:
+    def _report(self, *, spec_version: str, card: dict) -> dict:
+        run = acts_runner.ActsRun(
+            results=[TestResult(
+                id='CORE-SEND-001', name='x', level=Level.MUST,
+                result=Outcome.PASS, duration_ms=1,
+            )],
+            suite=load_suite(MANIFEST),
+            transport=TransportBinding.JSONRPC,
+            duration_ms=1,
+            agent_card=card,
+            spec_version=spec_version,
+        )
+        return acts_runner.to_report(run, sdk_name='a2a-x')
+
+    def test_the_report_carries_the_run_version(self):
+        card = {'supportedInterfaces': [_interface('1.1', 'http://sut/v11')]}
+        report = self._report(spec_version='1.1', card=card)
+        assert report['spec_version'] == '1.1'
+        assert report['environment']['interface_protocol_version'] == '1.1'
+
+    def test_the_interface_version_is_recorded_when_it_differs(self):
+        """A 1.0 run against a 1.1 interface is a 1.0 result, and the report
+        says which interface produced it."""
+        card = {'supportedInterfaces': [_interface('1.1', 'http://sut/v11')]}
+        report = self._report(spec_version='1.0', card=card)
+        assert report['spec_version'] == '1.0'
+        assert report['environment']['interface_protocol_version'] == '1.1'
+
+    def test_a_run_without_a_card_records_no_interface(self):
+        report = self._report(spec_version='1.0', card={})
+        assert 'interface_protocol_version' not in report['environment']

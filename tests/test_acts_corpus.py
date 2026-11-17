@@ -56,6 +56,11 @@ class TestCorpusLoads:
         the corpus moved; update the pin in PROVENANCE.md deliberately."""
         assert len(corpus) == 113
 
+    def test_a_run_at_1_0_takes_every_test(self, corpus):
+        """Nothing in this snapshot is bounded to another version, so the
+        default run is scored on the whole corpus."""
+        assert len(corpus.for_spec_version('1.0')) == len(corpus)
+
     def test_every_included_file_is_read(self, corpus):
         """14 suite files plus the manifest itself."""
         assert len(corpus.sources) == 15

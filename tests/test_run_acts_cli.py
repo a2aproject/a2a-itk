@@ -126,3 +126,28 @@ class TestDeviationInstances:
         _refused([
             '--sut-url', EXTERNAL, '--auth-sut-url', '127.0.0.1:3', '--sdk', 'x',
         ], capsys)
+
+
+class TestTheRunVersion:
+    def test_it_defaults_to_1_0(self, captured):
+        assert run_acts.main(['--sut-url', EXTERNAL, '--sdk', 'x', '--json']) == 0
+        assert captured['spec_version'] == '1.0'
+
+    def test_it_is_forwarded(self, captured):
+        rc = run_acts.main([
+            '--sut-url', EXTERNAL, '--spec-version', '1.1', '--sdk', 'x', '--json',
+        ])
+        assert rc == 0
+        assert captured['spec_version'] == '1.1'
+
+    @pytest.mark.parametrize('bad', ['', 'latest', '1.1.0'])
+    def test_a_value_that_is_not_a_version_is_refused_before_any_work(
+        self, captured, tmp_path, capsys, bad
+    ):
+        """Before codegen too, which the fixture turns into an error. An empty
+        value is what an unset CI variable passes, and must not mean 1.0."""
+        err = _refused(
+            ['--mount', str(tmp_path), '--spec-version', bad, '--sdk', 'x'], capsys,
+        )
+        assert 'Major.Minor' in err
+        assert captured == {}

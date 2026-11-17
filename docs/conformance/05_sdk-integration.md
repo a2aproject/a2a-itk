@@ -8,9 +8,9 @@ Reference implementations: a2a-python (`itk/main.py`, `itk/acts_behaviors.py`, `
 
 ## 1. The agent card
 
-The runner fetches the card once per pass, with `A2A-Version: 1.0`, without following redirects, and derives everything else from it:
+The runner fetches the card once per pass, with `A2A-Version` set to the version the run targets (`1.0` unless the run asks for another), without following redirects, and derives everything else from it:
 
-- **Binding URLs** come from `supportedInterfaces`. The entry with `protocolVersion: "1.0"` is preferred for each binding. There is no fallback convention: no JSON-RPC interface in the card means `the agent card advertises no jsonrpc interface` and no report for that binding.
+- **Binding URLs** come from `supportedInterfaces`. For each binding the runner dials the entry whose `protocolVersion` is the run version, failing that the newest entry of the same major version that is newer, failing that an entry with no `protocolVersion`. A card whose entries for the binding are all for older versions or another major version is a configuration error, and the run stops before it sends a request. An agent that serves several versions lists one entry per version; they may share a URL. There is no fallback convention: no JSON-RPC interface in the card means `the agent card advertises no jsonrpc interface` and no report for that binding.
 - **Preconditions** read `capabilities` (`streaming`, `pushNotifications`, `extendedAgentCard`), `securitySchemes` plus `securityRequirements`, `skills` and `supportedInterfaces`. A capability the agent has but does not advertise makes every test needing it skip silently; a capability it advertises but lacks makes them fail. Be honest in both directions.
 - `defaultInputModes` should include whatever the agent accepts. The ITK instruction envelope is a binary part, so the Python agent lists `application/x-protobuf` alongside `text/plain`.
 

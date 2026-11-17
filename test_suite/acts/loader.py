@@ -101,6 +101,10 @@ class LoadedSuite:
     variables: dict[str, str] = field(default_factory=dict)
     sources: list[Path] = field(default_factory=list)
     errors: list[LoadError] = field(default_factory=list)
+    #: Each document's own `spec_version`: the newest A2A version its tests
+    #: were written against. It does not select what a run tests; it is the
+    #: newest version a run may target with that document's tests.
+    spec_versions: dict[Path, str] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.tests)
@@ -117,6 +121,15 @@ class LoadedSuite:
         A test with no ``transport:`` restriction applies to all of them.
         """
         return [t for t in self.tests if t.test.applies_to(transport)]
+
+    def for_spec_version(self, spec_version: str) -> list[LoadedTest]:
+        """Tests that are part of a run targeting ``spec_version``.
+
+        A test with no version bounds applies to all of them.
+        """
+        return [
+            t for t in self.tests if t.test.applies_to_version(spec_version)
+        ]
 
     def by_level(self, level: Level) -> list[LoadedTest]:
         return [t for t in self.tests if t.level is level]
@@ -202,6 +215,7 @@ def load_suite(path: Path, strict: bool = True) -> LoadedSuite:
         # Later files win: a manifest sets defaults, an included file
         # overrides for its own tests.
         loaded.variables.update(doc.variables or {})
+        loaded.spec_versions[doc_path] = doc.spec_version
 
         for suite in doc.suites or ():
             _check_unique_suite(suite, doc_path, seen_suite_ids)

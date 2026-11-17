@@ -26,12 +26,37 @@ everything else through intact.
 from __future__ import annotations
 
 import enum
+import re
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 ACTS_VERSION = '1.0'
+
+#: The A2A version a run targets when its caller names none. Every place that
+#: needs a default reads this one, so the header a run sends, the tests it
+#: selects and the version its report claims cannot come apart.
+DEFAULT_SPEC_VERSION = '1.0'
+
+_SPEC_VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
+
+
+def parse_spec_version(text: str) -> tuple[int, int]:
+    """An A2A version as ``(major, minor)``.
+
+    Versions are compared as numbers, component by component: compared as
+    text, ``1.10`` would sort before ``1.9``.
+
+    Raises:
+        ValueError: ``text`` is not a ``Major.Minor`` string.
+    """
+    match = _SPEC_VERSION.fullmatch(text)
+    if match is None:
+        raise ValueError(
+            f'{text!r} is not an A2A version; expected "Major.Minor", such as "1.1"'
+        )
+    return int(match[1]), int(match[2])
 
 # A step's ``id`` is what ``{{step.var}}`` substitution resolves against, so
 # these are identifiers, not prose.
@@ -710,6 +735,16 @@ class Test(_Model):
                     'point is that lagging support stays visible.',
     )
     origin: str | None = None
+    min_spec_version: str | None = Field(
+        default=None,
+        description='Oldest A2A version the test applies to, inclusive. Omit '
+                    'for a requirement every version has.',
+    )
+    max_spec_version: str | None = Field(
+        default=None,
+        description='Newest A2A version the test applies to, inclusive. Omit '
+                    'for a requirement later versions keep.',
+    )
     runner_requirements: list[RunnerRequirement] | None = None
     steps: list[Step] = Field(min_length=1)
     assertions: list[NamedAssertion] | None = Field(
@@ -733,6 +768,33 @@ class Test(_Model):
                     f'{{{{{step.id}.x}}}} would be ambiguous'
                 )
             seen.add(step.id)
+        return self
+
+    @model_validator(mode='after')
+    def _version_range_is_well_formed(self) -> Test:
+        """Both bounds must be versions, and the range must not be empty.
+
+        A bound that does not parse cannot be compared with the run version,
+        and a range whose minimum is above its maximum selects the test for no
+        run at all, which would remove it from every report without a word.
+        """
+        low = self.min_spec_version
+        high = self.max_spec_version
+        for name, bound in (('min_spec_version', low), ('max_spec_version', high)):
+            if bound is not None:
+                try:
+                    parse_spec_version(bound)
+                except ValueError as exc:
+                    raise ValueError(f'`{name}`: {exc}') from None
+        if (
+            low is not None
+            and high is not None
+            and parse_spec_version(low) > parse_spec_version(high)
+        ):
+            raise ValueError(
+                f'`min_spec_version` {low} is newer than `max_spec_version` '
+                f'{high}, so the test would apply to no version'
+            )
         return self
 
     @model_validator(mode='after')
@@ -795,6 +857,34 @@ class Test(_Model):
         value of abstract operations.
         """
         return not self.transport or transport in self.transport
+
+    def applies_to_version(self, spec_version: str) -> bool:
+        """Is this test part of a run that targets ``spec_version``?
+
+        Both bounds are inclusive, and a test that declares neither applies to
+        every version.
+        """
+        version = parse_spec_version(spec_version)
+        if (
+            self.min_spec_version is not None
+            and version < parse_spec_version(self.min_spec_version)
+        ):
+            return False
+        return (
+            self.max_spec_version is None
+            or version <= parse_spec_version(self.max_spec_version)
+        )
+
+    def version_range(self) -> str:
+        """The declared range in words, for a message about a test left out."""
+        low, high = self.min_spec_version, self.max_spec_version
+        if low and high:
+            return f'A2A {low}' if low == high else f'A2A {low} to {high}'
+        if low:
+            return f'A2A {low} and newer'
+        if high:
+            return f'A2A {high} and older'
+        return 'every A2A version'
 
 
 class Suite(_Model):
@@ -872,6 +962,7 @@ def is_acts_document(raw: object) -> bool:
 
 __all__ = [
     'ACTS_VERSION',
+    'DEFAULT_SPEC_VERSION',
     'ERROR_TYPE_NAMES',
     'ActsDocument',
     'Assertion',
@@ -904,4 +995,5 @@ __all__ = [
     'Test',
     'TransportBinding',
     'is_acts_document',
+    'parse_spec_version',
 ]
