@@ -30,8 +30,10 @@ sources the script as its last statement.
 | `ITK_MATRIX_SDK` | `$ITK_SDK_NAME` | This SDK's key in `matrix.yaml`. a2a-js must override — it is `ts` there |
 | `ITK_COPY_PROTO` | `1` | Copy `protos/instruction.proto` into the itk dir. Java and Rust set `0` — their builds read it from the checkout |
 | `ITK_MOUNT_ITK_DIR` | `1` | Bind-mount the itk dir over `/app/agents/repo/itk`. Java sets `0` |
+| `ITK_SELINUX_MOUNT_LABEL` | `0` | Set to `1` to add Podman/Docker `:Z` private SELinux labels to bind mounts. This relabels host paths; use only when appropriate for the host and checkout. |
+| `ITK_NIGHTLY_RUN` | empty | Set to `true` for nightly scenarios and metrics |
 | `ITK_REMOVE_IMAGE` | `0` | Delete the `itk_service` image on exit |
-| `ITK_EXTRA_DOCKER_ARGS` | `()` | Bash array of extra `docker run` arguments |
+| `ITK_EXTRA_DOCKER_ARGS` | `()` | Bash array of extra `docker run` arguments. Mounts supplied here are not automatically labeled by `ITK_SELINUX_MOUNT_LABEL`; add a label to those mounts explicitly if needed. |
 | `ITK_CONTAINER_RT` | autodetect | Force `docker` or `podman` |
 | `ITK_SCENARIO_SET` | `local` | `local` = the SDK's own `scenarios*.json`; `shared` = the role-based sets in a2a-itk |
 | `SCENARIO_FILE` | see below | An explicit file, overriding both |

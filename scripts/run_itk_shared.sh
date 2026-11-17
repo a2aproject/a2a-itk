@@ -15,6 +15,7 @@
 # here.
 
 set -ex
+ITK_NIGHTLY_RUN="${ITK_NIGHTLY_RUN:-}"
 
 : "${ITK_SDK_NAME:?ITK_SDK_NAME must be set before sourcing run_itk_shared.sh}"
 : "${A2A_ITK_REVISION:?A2A_ITK_REVISION environment variable must be set}"
@@ -32,6 +33,7 @@ ITK_ACTS_RUN="${ITK_ACTS_RUN:-0}"
 ITK_ACTS_TRANSPORTS="${ITK_ACTS_TRANSPORTS:-jsonrpc}"
 ITK_ACTS_LANGUAGE="${ITK_ACTS_LANGUAGE:-${ITK_SDK_NAME}}"
 ITK_MOUNT_ITK_DIR="${ITK_MOUNT_ITK_DIR:-1}"
+ITK_SELINUX_MOUNT_LABEL="${ITK_SELINUX_MOUNT_LABEL:-0}"
 ITK_REMOVE_IMAGE="${ITK_REMOVE_IMAGE:-0}"
 export ITK_LOG_LEVEL="${ITK_LOG_LEVEL:-INFO}"
 
@@ -112,17 +114,25 @@ fi
 $CONTAINER_RT rm -f itk-service || true
 
 RUN_ARGS=(-d --name itk-service)
-RUN_ARGS+=(-v "$SDK_ROOT:/app/agents/repo")
+case "$ITK_SELINUX_MOUNT_LABEL" in
+  0) ITK_MOUNT_SUFFIX="" ;;
+  1)
+    ITK_MOUNT_SUFFIX=":Z"
+    echo "Warning: SELinux :Z relabels launcher bind mounts, including the SDK checkout and cache; this may affect access by host processes or other containers." >&2
+    ;;
+  *) echo "Error: ITK_SELINUX_MOUNT_LABEL must be 0 or 1" >&2; exit 1 ;;
+esac
+RUN_ARGS+=(-v "$SDK_ROOT:/app/agents/repo$ITK_MOUNT_SUFFIX")
 if [ "$ITK_MOUNT_ITK_DIR" = "1" ]; then
-  RUN_ARGS+=(-v "$ITK_DIR:/app/agents/repo/itk")
+  RUN_ARGS+=(-v "$ITK_DIR:/app/agents/repo/itk$ITK_MOUNT_SUFFIX")
 fi
 
 mkdir -p "$HOME/.cache/a2a-itk-launcher"
-RUN_ARGS+=(-v "$HOME/.cache/a2a-itk-launcher:/root/.cache/a2a-itk")
+RUN_ARGS+=(-v "$HOME/.cache/a2a-itk-launcher:/root/.cache/a2a-itk$ITK_MOUNT_SUFFIX")
 
 if [ "${ITK_LOG_LEVEL^^}" = "DEBUG" ]; then
   mkdir -p "$ITK_DIR/logs"
-  RUN_ARGS+=(-v "$ITK_DIR/logs:/app/logs")
+  RUN_ARGS+=(-v "$ITK_DIR/logs:/app/logs$ITK_MOUNT_SUFFIX")
 fi
 
 RUN_ARGS+=(-e ITK_LOG_LEVEL="$ITK_LOG_LEVEL")
