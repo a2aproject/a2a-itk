@@ -492,7 +492,14 @@ class Runner:
                     failure=result.failure, steps=steps,
                 )
 
-        outcome = self._evaluate_named(test.assertions, scope, step_id=None)
+        try:
+            outcome = self._evaluate_named(test.assertions, scope, step_id=None)
+        except (UnresolvedVariable, PathError) as exc:
+            # As in `_run_step`: the test names something nothing defines.
+            return self._result(
+                test, Outcome.ERROR, started,
+                failure=FailureDetail(message=str(exc)), steps=steps,
+            )
         if outcome is not None:
             return self._result(test, Outcome.FAIL, started, failure=outcome, steps=steps)
 
@@ -646,6 +653,11 @@ class Runner:
             # non-conformant. `UnsupportedByBinding` arrives here too, which is
             # right: a raw step on gRPC is a test that should have declared a
             # transport, not a defect in the agent.
+            return self._step(step, Outcome.ERROR, started, message=str(exc))
+        except (UnresolvedVariable, PathError) as exc:
+            # An assertion names a variable nothing defines, or a path that
+            # cannot be read: the test is wrong, not the SUT. Left to escape,
+            # it would end the whole run and lose every other result.
             return self._step(step, Outcome.ERROR, started, message=str(exc))
 
     async def _run_webhook_step(
@@ -852,14 +864,15 @@ class Runner:
                 )
 
         scope.record_response(step.id, response.payload)
-        captured = self._capture(step, scope, response.payload)
-        if captured is not None:
-            return self._step(
-                step, Outcome.FAIL, started, attempts=attempts, message=captured
-            )
-
-        result = self._evaluate_outcome(step, response, scope)
-        return self._finish(step, scope, result, started, attempts)
+        missed = self._capture(step, scope, response.payload, error=response.error)
+        try:
+            result = self._evaluate_outcome(step, response, scope)
+        except UnresolvedVariable:
+            if missed is None:
+                raise
+            # The step's own assertions use a value its capture could not read.
+            result = AssertionResult()
+        return self._finish(step, scope, result, started, attempts, missed=missed)
 
     async def _run_streaming_step(
         self, step: Step, scope: Scope, started: float
@@ -920,13 +933,23 @@ class Runner:
                     ),
                 )
 
-        # The first stream stands for the step; `capture` alongside `streams`
-        # is rejected by the schema, so only an `assertion` step reads this.
-        payloads = [event.payload for event in collected[0][0]]
-        scope.record_response(step.id, payloads)
-        captured = self._capture(step, scope, payloads)
-        if captured is not None:
-            return self._step(step, Outcome.FAIL, started, message=captured)
+        # The first stream stands for the step, for `{{id.response}}` and for
+        # `capture`. The schema rejects `capture` on a step that opens several.
+        first_stream = collected[0][0]
+        scope.record_response(step.id, [event.payload for event in first_stream])
+        missed = self._capture_from_stream(step, scope, first_stream)
+
+        if block is not None:
+            # `expect_stream` compares events with values earlier steps
+            # captured, and with this step's own, like any other assertion.
+            try:
+                block = _resolved(block, scope)
+            except UnresolvedVariable:
+                if missed is None:
+                    raise
+                return self._step(step, Outcome.FAIL, started, message=missed)
+            if block.streams:
+                plans = tuple(block.streams)
 
         result = AssertionResult()
         for index, (plan, (events, status, timed_out)) in enumerate(
@@ -948,7 +971,7 @@ class Runner:
             one += self._evaluate_stream_status(step, scope, status, len(events))
             result += one if len(plans) == 1 else _within_stream(one, index, plan)
 
-        return self._finish(step, scope, result, started, attempts=1)
+        return self._finish(step, scope, result, started, attempts=1, missed=missed)
 
     def _stream_refusal(
         self, step: Step, scope: Scope, started: float, exc: BaseException
@@ -1061,19 +1084,68 @@ class Runner:
             )
         return evaluate_status(scope.substitute(step.expect.status), status)
 
-    def _capture(self, step: Step, scope: Scope, response: Any) -> str | None:
+    def _capture(
+        self,
+        step: Step,
+        scope: Scope,
+        response: Any,
+        *,
+        error: WireError | None = None,
+    ) -> str | None:
         """Apply a step's `capture`; returns a failure message, or ``None``.
 
         A miss is a failure rather than an error: the path is well-formed and
         the SUT simply answered with a shape the test did not expect.
+
+        The caller reports the message only if the step's own assertions
+        passed (see :meth:`_finish`). A value is usually captured on the step
+        that also asserts it, and "the generation should be >= 1 and is
+        missing" says what the SUT got wrong where "cannot capture" does not.
         """
         if not step.capture:
             return None
         try:
             scope.capture(step.id, step.capture, response)
         except UnresolvedVariable as exc:
+            if error is not None and step.kind() is not StepKind.RAW:
+                # An error has no result to read from, so every path misses.
+                # Saying which error it was is what explains the miss.
+                return (
+                    f'{exc}: the SUT returned {_name_of(error)}: {error.message}'
+                )
             return str(exc)
         return None
+
+    def _capture_from_stream(
+        self, step: Step, scope: Scope, events: list[StreamedEvent]
+    ) -> str | None:
+        """Apply `capture` on a step that opens a stream.
+
+        Read from the **first** event, with its kind named first:
+        `task.id`, `status_update.taskId`. The first event is the one a later
+        step can rely on, whatever follows it and however long the stream
+        stays open. The kind is found under the name a test writes
+        (`status_update`) and the name the wire uses (`statusUpdate`); an
+        event of a kind the runner does not know is read as it arrived.
+        """
+        if not step.capture:
+            return None
+        if not events:
+            names = ', '.join(repr(name) for name in step.capture)
+            return (
+                f'step {step.id!r} cannot capture {names}: '
+                f'the stream produced no event'
+            )
+        first = events[0]
+        if first.kind is None:
+            view, kind = first.raw, 'an event of an unknown kind'
+        else:
+            view = {**first.raw, first.kind: first.payload}
+            kind = f'a {first.kind} event'
+        missed = self._capture(step, scope, view)
+        if missed is not None:
+            missed += f'; only the first event is read, and it is {kind}'
+        return missed
 
     def _finish(
         self,
@@ -1082,13 +1154,27 @@ class Runner:
         result: AssertionResult,
         started: float,
         attempts: int,
+        *,
+        missed: str | None = None,
     ) -> StepResult:
-        """Turn an evaluated step into its result, running `assertions` last."""
+        """Turn an evaluated step into its result, running `assertions` last.
+
+        ``missed`` is what :meth:`_capture` returned. A failed assertion is
+        reported in preference to it; a step whose assertions all passed still
+        fails on it, because a later step needs the value. A step whose own
+        assertions use the value never gets here: its caller reports the miss.
+        """
         if not result.ok:
             return self._step(
                 step, Outcome.FAIL, started, attempts=attempts,
                 failure=FailureDetail.from_assertion(result.first, step.id),
                 checks=result.checks,
+            )
+
+        if missed is not None:
+            return self._step(
+                step, Outcome.FAIL, started, attempts=attempts,
+                message=missed, checks=result.checks,
             )
 
         named = self._evaluate_named(step.assertions, scope, step_id=step.id)
