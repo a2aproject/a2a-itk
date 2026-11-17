@@ -9,7 +9,7 @@ not injective.
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Mapping
+from typing import Any, AsyncIterator, Callable, Mapping
 
 import httpx
 
@@ -55,6 +55,8 @@ class RestDispatcher(HttpDispatcher):
         operation: Operation,
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        *,
+        on_sent: Callable[[], None] | None = None,
     ) -> WireResponse:
         operation = resolve_operation(operation, params)
         binding = binding_for_operation(operation)
@@ -71,6 +73,7 @@ class RestDispatcher(HttpDispatcher):
             headers=self._headers(headers, content_type=self.content_type),
             params=_stringify(query) if query else None,
             json=body if body else None,
+            on_sent=on_sent,
         )
         parsed, text = parse_json_body(response)
         return WireResponse(

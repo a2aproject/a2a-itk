@@ -43,6 +43,11 @@ from test_suite.acts.wire_map import (
 #: ``timeout_ms`` is the assertion — the transport should not pre-empt it.
 STREAM_READ_TIMEOUT = 300.0
 
+#: What the HTTP client reports, through its `trace` extension, when the last
+#: byte of a request has been handed to the connection. Prefixed with the
+#: protocol in use (`http11.`, `http2.`).
+REQUEST_WRITTEN = 'send_request_body.complete'
+
 #: Redirects are never followed. A conformance run asserts on the response the
 #: SUT gave to the request as sent, and following a redirect replaces it with
 #: the response to a *different* request: httpx rewrites POST to GET and drops
@@ -208,12 +213,26 @@ class HttpDispatcher(Dispatcher):
         merged.update(headers or {})
         return merged
 
-    async def _request(self, *args: Any, **kwargs: Any) -> httpx.Response:
+    async def _request(
+        self,
+        *args: Any,
+        on_sent: Callable[[], None] | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
         """Send, translating transport failure into :class:`DispatchError`.
 
         An HTTP error *status* is a result, not a failure, and is returned as
         a response. Only never reaching the SUT raises.
+
+        ``on_sent`` is called when the request has been written out.
         """
+        if on_sent is not None:
+
+            async def trace(event: str, info: Mapping[str, Any]) -> None:
+                if event.endswith(REQUEST_WRITTEN):
+                    on_sent()
+
+            kwargs['extensions'] = {'trace': trace}
         try:
             return await self._client.request(*args, **kwargs)
         except httpx.HTTPError as exc:

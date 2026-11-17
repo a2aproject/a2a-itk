@@ -72,7 +72,7 @@ Checked in this order, before any step runs:
 
 1. **Binding.** A backstop - the pipeline already scoped the corpus.
 2. **Step kinds.** The one kind the runner does not execute is a bare `assertion` step; the corpus contains none.
-3. **Runner requirements.** A test may declare it needs `header_inspection`, `auth_credentials`, `concurrent_streams`, `stream_disconnect` or `webhook_endpoint` (section 12.1). This runner has the first four by construction and the fifth whenever the receiver started.
+3. **Runner requirements.** A test may declare it needs `header_inspection`, `auth_credentials`, `concurrent_streams`, `stream_disconnect`, `concurrent_requests` or `webhook_endpoint` (section 12.1). This runner has the first five by construction and the last whenever the receiver started.
 4. **Preconditions** (section 12.5), evaluated against the agent card:
    - `capabilities: {streaming: true}` - the card must advertise it (a card that omits a capability has not advertised it). A capability name that A2A does not define at all is reported as `PRECONDITION CANNOT BE SATISFIED`, a distinct skip that `run_acts.py` lists separately, because no SUT could ever clear it and it would otherwise look like "not applicable here".
    - `authentication: true` - the card must declare both `securitySchemes` and a non-empty `securityRequirements`. Schemes alone are an offer, not a requirement.
@@ -103,6 +103,17 @@ Every abstract operation carries `A2A-Version` set to the run version (section 1
 `min_duration_ms` and `max_duration_ms` on an operation step bound the time from sending the request to the complete response. They are how a test observes that the SUT held a request open (the A2A 1.1 long poll) or answered at once; `delay_ms` before the step is not counted. A request that is still unanswered at `max_duration_ms` is abandoned and the step fails. They cannot be combined with `repeat` or `expect_stream`.
 
 `stays_open_ms` in `expect_stream` is for a stream the SUT must not close. After each event the runner waits that long for the next one; if none comes and the stream has not ended, the runner hangs up and evaluates the other assertions on the events it has. A stream the SUT closes fails the step. Where the step and one of its streams both set it, the longer wait applies. It cannot be combined with `disconnect_after`, and `timeout_ms` has to be longer than it.
+
+### Background steps
+
+Steps run one after another, with one exception. `background: true` on an operation step sends the request, leaves it open and goes on to the next step. It is how a test sends a message to a task while a subscription to that task is being read, or while a read of it is being held. A test that uses it declares `runner_requirements: [concurrent_requests]`.
+
+- **When the next step starts.** For a streaming operation, when the first event of the stream has arrived, which shows the SUT has the stream in place. For any other operation, when the request has been written out; the response is not waited for. A test that needs the SUT to be working on such a request puts `delay_ms` on the next step.
+- **When it is evaluated.** After the last step of the test, once its response has arrived or the read of its stream has ended. `expect`, `expect_error`, `expect_stream` and the duration bounds are evaluated then, so they may name what a later step captured. The duration bounds are held against the step's own exchange, from its request to its response, and a request still unanswered at `max_duration_ms` is abandoned then. The `duration_ms` the report gives for the step runs until it was evaluated.
+- **Capture.** On a background stream `capture` reads the first event, so the steps that follow can use the value. On any other background step it reads the response, which arrives later: the value is available to the test's `assertions` and not to the steps that follow.
+- **Reporting.** A failure is reported against the background step, and steps are listed in the order the test writes them. Where several steps did not pass, the first of them in that order is the test's verdict.
+- **A test that stops early.** When a step does not pass, the test ends, and a background request that is still open is closed without being evaluated: it was waiting for steps that never ran. A background step is still reported if it went wrong before the next step started, because it is then the likely cause of the later failure: its request could not be sent, its stream was refused or ended without an event, or its first event did not give its `capture`.
+- **Not combined with `repeat`.** A repeated step sends its request again once it is answered, and a background step is answered after the steps that follow it.
 
 A streaming step with no `timeout_ms` of its own gets 30 seconds. Not one streaming step in the corpus declares a timeout, and without a backstop a SUT that never closes a stream would hang the run and produce no report at all.
 

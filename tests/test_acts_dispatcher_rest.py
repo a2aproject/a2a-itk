@@ -355,3 +355,50 @@ class TestStreaming:
         with pytest.raises(StreamNotOpened) as refused:
             self._collect(make(handler), Operation.SUBSCRIBE_TO_TASK, {'id': 't1'})
         assert refused.value.response.error.error_type is ErrorType.UNSUPPORTED_OPERATION
+
+
+class TestRequestWritten:
+    """`on_sent`: the caller is told when the request has been written out.
+
+    A step that stays open while later steps run starts the next step then,
+    and not when the reply arrives.
+    """
+
+    def test_it_is_called_before_the_reply_arrives(self):
+        order: list[str] = []
+
+        class Connection(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request):
+                # What the HTTP client does on a real connection: it reports
+                # each stage of the exchange to the request's `trace` hook.
+                trace = request.extensions['trace']
+                await trace('http11.send_request_headers.complete', {})
+                order.append('headers written')
+                await trace('http11.send_request_body.complete', {})
+                order.append('reply')
+                return httpx.Response(200, json={'id': 't1'})
+
+        dispatcher = RestDispatcher(
+            'http://sut.test', client=httpx.AsyncClient(transport=Connection())
+        )
+        response = asyncio.run(dispatcher.dispatch(
+            Operation.GET_TASK, {'id': 't1'}, on_sent=lambda: order.append('sent')
+        ))
+        assert order == ['headers written', 'sent', 'reply']
+        assert response.payload == {'id': 't1'}
+
+    def test_a_request_that_never_left_is_not_reported_as_sent(self):
+        def handler(request):
+            raise httpx.ConnectError('refused', request=request)
+
+        sent: list[bool] = []
+        with pytest.raises(DispatchError):
+            asyncio.run(make(handler).dispatch(
+                Operation.GET_TASK, {'id': 't1'}, on_sent=lambda: sent.append(True)
+            ))
+        assert sent == []
+
+    def test_a_call_that_does_not_ask_is_sent_as_before(self):
+        handler = replying({'id': 't1'})
+        asyncio.run(make(handler).dispatch(Operation.GET_TASK, {'id': 't1'}))
+        assert 'trace' not in handler.seen[0].extensions
