@@ -185,7 +185,7 @@ Request:
 | `sdk_version`, `language`, `repository` | `unknown` / `unknown` / omitted | More report metadata |
 | `tests` | all | Restrict to these test ids |
 | `variables` | `{}` | Override or add runner variables. The two the corpus needs (`insufficientAuthToken`, `otherUserTaskId`) are supplied by the runner already |
-| `capabilities` | `[]` | Extra runner requirements to claim. The runner already declares the four it has |
+| `capabilities` | `[]` | Extra runner requirements to claim. The runner already declares the five it has |
 | `gate_on_behaviors` | `true` | Fail tests whose `tck-*` prefixes the SUT does not declare |
 | `sut_url` | omitted | Run against an agent already running at this URL instead of the mounted SDK, as `--sut-url` does. The URL must be reachable from inside the container, so run it with `--network host` for an agent on the host. There is no field for the contract file, so such a run is ungated; use the CLI's `--behaviors` when gating matters |
 | `reduced_sut_url`, `auth_sut_url` | omitted | With `sut_url`: the instances that stand in for the two deviation SUTs |

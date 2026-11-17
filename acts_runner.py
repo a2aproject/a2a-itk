@@ -164,11 +164,13 @@ RUNNER_VARIABLES: dict[str, Any] = {
 #:
 #: `concurrent_streams` and `stream_disconnect` are `expect_stream.streams`
 #: and `disconnect_after`, which the runner implements on all three bindings.
+#: `concurrent_requests` is a `background` step, likewise on all three.
 RUNNER_CAPABILITIES: tuple[RunnerRequirement, ...] = (
     RunnerRequirement.HEADER_INSPECTION,
     RunnerRequirement.AUTH_CREDENTIALS,
     RunnerRequirement.CONCURRENT_STREAMS,
     RunnerRequirement.STREAM_DISCONNECT,
+    RunnerRequirement.CONCURRENT_REQUESTS,
 )
 
 class ActsRunError(RuntimeError):

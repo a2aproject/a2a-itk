@@ -13,6 +13,7 @@ those confused would put our own bugs into somebody else's conformance record.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 import sys
 from pathlib import Path
@@ -102,8 +103,12 @@ class FakeDispatcher(Dispatcher):
         self.raw_calls: list[tuple[RawBlock, Mapping[str, str]]] = []
         self.streamed: list[str] = []
 
-    async def dispatch(self, operation, params=None, headers=None) -> WireResponse:
+    async def dispatch(
+        self, operation, params=None, headers=None, *, on_sent=None
+    ) -> WireResponse:
         self.calls.append((operation, dict(params or {}), dict(headers or {})))
+        if on_sent is not None:
+            on_sent()
         if self._raises is not None:
             raise self._raises
         index = min(len(self.calls) - 1, len(self._replies) - 1)
@@ -616,7 +621,11 @@ class SlowDispatcher(FakeDispatcher):
         super().__init__(*args, **kwargs)
         self.takes = takes
 
-    async def dispatch(self, operation, params=None, headers=None) -> WireResponse:
+    async def dispatch(
+        self, operation, params=None, headers=None, *, on_sent=None
+    ) -> WireResponse:
+        if on_sent is not None:
+            on_sent()
         await asyncio.sleep(self.takes)
         return await super().dispatch(operation, params, headers)
 
@@ -1895,7 +1904,7 @@ class StreamRecorder(Dispatcher):
             self.hung_up_at.append(list(self.delivered))
             raise
 
-    async def dispatch(self, operation, params=None, headers=None):
+    async def dispatch(self, operation, params=None, headers=None, *, on_sent=None):
         return WireResponse(status=200, payload={})
 
     async def dispatch_raw(self, raw, headers=None):
@@ -2085,6 +2094,646 @@ class TestStreamDisconnect:
         )
         assert result.result is Outcome.ERROR
         assert 'cannot disconnect mid-stream' in result.failure.message
+
+
+#: Ends a scripted stream that the SUT then leaves open.
+HOLD = object()
+
+
+class Schedule(Dispatcher):
+    """Answers on a schedule, on the loop's clock, and logs what happened when.
+
+    ``replies`` maps an operation to ``(seconds until the reply, the reply)``.
+    ``streams`` maps one to ``(seconds before the event, the event)`` pairs; a
+    pair whose event is ``HOLD`` leaves the stream open from then on.
+    ``later_streams`` scripts the second and later streams opened for an
+    operation, where they are to differ from the first. ``send_takes`` is how
+    long a request takes to be written out, and ``raises`` what an operation
+    fails with instead of being answered.
+
+    Run on virtual time (`run_virtual`), so the log is exact.
+    """
+
+    binding = TransportBinding.JSONRPC
+
+    def __init__(
+        self, *, replies=None, streams=None, later_streams=None, send_takes=0.0,
+        raises=None,
+    ):
+        self.replies = replies or {}
+        self.streams = streams or {}
+        self.later_streams = later_streams or {}
+        self.send_takes = send_takes
+        self.raises = raises or {}
+        self.log: list[tuple[float, str, str]] = []
+        self.requests: list[tuple[Operation, Mapping[str, Any], Mapping[str, str]]] = []
+
+    def _note(self, what: str, operation: Operation) -> None:
+        now = round(asyncio.get_running_loop().time(), 3)
+        self.log.append((now, what, operation.value))
+
+    async def dispatch(self, operation, params=None, headers=None, *, on_sent=None):
+        self.requests.append((operation, dict(params or {}), dict(headers or {})))
+        try:
+            await asyncio.sleep(self.send_takes)
+            if operation in self.raises:
+                raise self.raises[operation]
+            self._note('sent', operation)
+            if on_sent is not None:
+                on_sent()
+            takes, reply = self.replies.get(operation, (0.0, ok()))
+            await asyncio.sleep(takes)
+        except asyncio.CancelledError:
+            self._note('cancelled', operation)
+            raise
+        self._note('answered', operation)
+        return reply
+
+    async def stream(self, operation, params=None, headers=None):
+        opened_before = any(request[0] is operation for request in self.requests)
+        self.requests.append((operation, dict(params or {}), dict(headers or {})))
+        if operation in self.raises:
+            raise self.raises[operation]
+        script = self.streams.get(operation, ())
+        if opened_before and operation in self.later_streams:
+            script = self.later_streams[operation]
+        self._note('opened', operation)
+        try:
+            for index, (after, data) in enumerate(script):
+                await asyncio.sleep(after)
+                if data is HOLD:
+                    await asyncio.sleep(86_400)
+                self._note('event', operation)
+                yield StreamEvent(index=index, data=data, status=200)
+        except (GeneratorExit, asyncio.CancelledError):
+            self._note('hung up', operation)
+            raise
+        self._note('closed', operation)
+
+    async def dispatch_raw(self, raw, headers=None):
+        raise UnsupportedByBinding('not used')
+
+    async def stream_raw(self, raw, headers=None):
+        raise UnsupportedByBinding('not used')
+        yield  # pragma: no cover - makes this a generator
+
+
+class TestBackgroundSteps:
+    """`background: true`: a request that stays open while later steps run.
+
+    What lets a test act on a task while a subscription to it, or a held read
+    of it, is open.
+    """
+
+    TASK = {'task': {'id': 'T7', 'status': {'state': 'TASK_STATE_WORKING'}}}
+    DONE = status_update('TASK_STATE_COMPLETED')
+
+    def held(self, step_id='held', **kwargs):
+        """A read of the task, left open."""
+        return get_task(step_id, background=True, **kwargs)
+
+    def watch(self, step_id='watch', **kwargs):
+        """A subscription to the task, left open."""
+        kwargs.setdefault('expect_stream', {'min_count': 1})
+        return Step(
+            id=step_id, operation=Operation.SUBSCRIBE_TO_TASK, params={'id': 'T1'},
+            background=True, **kwargs,
+        )
+
+    def then(self, step_id='next', **kwargs):
+        """An ordinary step that follows."""
+        kwargs.setdefault('params', {'id': 'T1'})
+        return Step(id=step_id, operation=Operation.CANCEL_TASK, **kwargs)
+
+    def play(self, dispatcher, *steps, **kwargs):
+        runner = runner_for(
+            dispatcher,
+            clock=virtual_clock,
+            sleep=asyncio.sleep,
+            capabilities=[RunnerRequirement.CONCURRENT_REQUESTS],
+            **kwargs,
+        )
+        test = a_test(*steps, runner_requirements=['concurrent_requests'])
+        return run_virtual(runner.run_test(test))
+
+    # -- when the next step starts ---------------------------------------------
+
+    def test_the_steps_after_it_run_while_its_request_is_open(self):
+        dispatcher = Schedule(replies={
+            Operation.GET_TASK: (5.0, ok({'id': 'T1'})),
+            Operation.CANCEL_TASK: (0.1, ok()),
+        })
+        result = self.play(
+            dispatcher, self.held(expect={'body': {'id': 'T1'}}), self.then()
+        )
+        assert dispatcher.log == [
+            (0.0, 'sent', 'get_task'),
+            (0.0, 'sent', 'cancel_task'),
+            (0.1, 'answered', 'cancel_task'),
+            # Waited for after the last step, and only then evaluated.
+            (5.0, 'answered', 'get_task'),
+        ]
+        assert result.result is Outcome.PASS
+        # Reported in the order the test writes them.
+        assert [(s.id, s.result, s.checks) for s in result.steps] == [
+            ('held', Outcome.PASS, 1), ('next', Outcome.PASS, 0),
+        ]
+
+    def test_the_next_step_waits_until_the_request_has_been_sent(self):
+        dispatcher = Schedule(
+            send_takes=2.0, replies={Operation.GET_TASK: (5.0, ok())}
+        )
+        self.play(dispatcher, self.held(), self.then())
+        assert dispatcher.log[:2] == [
+            (2.0, 'sent', 'get_task'),
+            # Its own two seconds, after the first request was out.
+            (4.0, 'sent', 'cancel_task'),
+        ]
+
+    def test_the_next_step_waits_for_the_first_event_of_a_stream(self):
+        """The first event shows the SUT has the stream in place. The step
+        does not wait for the stream to end."""
+        dispatcher = Schedule(streams={
+            Operation.SUBSCRIBE_TO_TASK: [(3.0, self.TASK), (4.0, self.DONE)],
+        })
+        result = self.play(dispatcher, self.watch(), self.then())
+        assert dispatcher.log == [
+            (0.0, 'opened', 'subscribe_to_task'),
+            (3.0, 'event', 'subscribe_to_task'),
+            (3.0, 'sent', 'cancel_task'),
+            (3.0, 'answered', 'cancel_task'),
+            (7.0, 'event', 'subscribe_to_task'),
+            (7.0, 'closed', 'subscribe_to_task'),
+        ]
+        assert result.result is Outcome.PASS
+
+    def play_set(self, dispatcher, expect_stream):
+        """A background step that opens two streams, and a step after it."""
+        runner = runner_for(
+            dispatcher, clock=virtual_clock, sleep=asyncio.sleep,
+            capabilities=[
+                RunnerRequirement.CONCURRENT_REQUESTS,
+                RunnerRequirement.CONCURRENT_STREAMS,
+            ],
+        )
+        test = a_test(
+            self.watch(expect_stream=expect_stream),
+            self.then(),
+            runner_requirements=['concurrent_requests', 'concurrent_streams'],
+        )
+        return run_virtual(runner.run_test(test))
+
+    def test_every_stream_of_a_set_has_to_be_in_place(self):
+        """The second stream's first event comes two seconds after the
+        first's. The next step waits for both."""
+        dispatcher = Schedule(
+            streams={Operation.SUBSCRIBE_TO_TASK: [(3.0, self.TASK), (4.0, self.DONE)]},
+            later_streams={
+                Operation.SUBSCRIBE_TO_TASK: [(5.0, self.TASK), (2.0, self.DONE)],
+            },
+        )
+        result = self.play_set(dispatcher, {'min_count': 2, 'streams': [{}, {}]})
+        assert result.result is Outcome.PASS
+        assert [entry for entry in dispatcher.log if entry[1] == 'opened'] == [
+            (0.0, 'opened', 'subscribe_to_task')
+        ] * 2
+        assert [entry for entry in dispatcher.log if entry[2] == 'cancel_task'] == [
+            (5.0, 'sent', 'cancel_task'), (5.0, 'answered', 'cancel_task'),
+        ]
+
+    def test_a_set_with_one_stream_still_open_is_closed_when_the_test_stops(self):
+        """One stream of the set ended without an event and the other is in
+        place. The step is not over, so it is closed like any open request
+        when a later step does not pass."""
+        dispatcher = Schedule(
+            streams={Operation.SUBSCRIBE_TO_TASK: [(0.0, self.TASK), (0.0, HOLD)]},
+            later_streams={Operation.SUBSCRIBE_TO_TASK: []},
+        )
+        runner = runner_for(
+            dispatcher, clock=virtual_clock, sleep=asyncio.sleep,
+            capabilities=[
+                RunnerRequirement.CONCURRENT_REQUESTS,
+                RunnerRequirement.CONCURRENT_STREAMS,
+            ],
+        )
+        test = a_test(
+            self.watch(expect_stream={'timeout_ms': 60_000, 'streams': [{}, {}]}),
+            self.then(expect={'status': 500}),
+            runner_requirements=['concurrent_requests', 'concurrent_streams'],
+        )
+        result = run_virtual(runner.run_test(test))
+        assert [s.id for s in result.steps] == ['next']
+        assert dispatcher.log[-1] == (0.0, 'hung up', 'subscribe_to_task')
+
+    def test_a_stream_of_a_set_that_ends_empty_is_not_waited_for(self):
+        """It will never have a first event. The other stream is in place
+        after three seconds, and the next step starts then, not when that
+        stream ends."""
+        dispatcher = Schedule(
+            streams={Operation.SUBSCRIBE_TO_TASK: [(3.0, self.TASK), (4.0, self.DONE)]},
+            later_streams={Operation.SUBSCRIBE_TO_TASK: []},
+        )
+        self.play_set(dispatcher, {'streams': [{}, {}]})
+        assert (3.0, 'sent', 'cancel_task') in dispatcher.log
+
+    def test_delay_ms_is_waited_before_it_is_sent(self):
+        dispatcher = Schedule()
+        self.play(dispatcher, self.held(delay_ms=2000), self.then())
+        assert dispatcher.log[:2] == [
+            (2.0, 'sent', 'get_task'), (2.0, 'answered', 'get_task'),
+        ]
+
+    def test_two_requests_can_be_open_at_once(self):
+        dispatcher = Schedule(
+            replies={Operation.GET_TASK: (5.0, ok())},
+            streams={Operation.SUBSCRIBE_TO_TASK: [(1.0, self.TASK), (2.0, self.DONE)]},
+        )
+        result = self.play(dispatcher, self.held(), self.watch(), self.then())
+        assert result.result is Outcome.PASS
+        assert [s.id for s in result.steps] == ['held', 'watch', 'next']
+        assert (1.0, 'sent', 'cancel_task') in dispatcher.log
+        assert dispatcher.log[-1] == (5.0, 'answered', 'get_task')
+
+    # -- when it is evaluated ------------------------------------------------------
+
+    def test_it_is_evaluated_after_the_last_step(self):
+        """So its assertions can name what a later step captured."""
+        dispatcher = Schedule(replies={
+            Operation.GET_TASK: (0.0, ok({'id': 'T9'})),
+            Operation.CANCEL_TASK: (0.0, ok({'id': 'T9'})),
+        })
+        result = self.play(
+            dispatcher,
+            self.held(expect={'body': {'id': '{{next.id}}'}}),
+            self.then(capture={'id': 'id'}),
+        )
+        assert result.result is Outcome.PASS
+
+    def test_a_failure_is_reported_against_the_background_step(self):
+        dispatcher = Schedule(replies={Operation.GET_TASK: (5.0, ok({'id': 'OTHER'}))})
+        result = self.play(
+            dispatcher, self.held(expect={'body': {'id': 'T1'}}), self.then()
+        )
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'held'
+        assert result.failure.assertion_path == 'body.id'
+        assert [(s.id, s.result) for s in result.steps] == [
+            ('held', Outcome.FAIL), ('next', Outcome.PASS),
+        ]
+
+    def test_a_failed_background_stream_is_reported_against_it_too(self):
+        dispatcher = Schedule(streams={
+            Operation.SUBSCRIBE_TO_TASK: [(0.0, self.TASK), (1.0, self.DONE)],
+        })
+        watch = self.watch(expect_stream={
+            'final_event': {'status': {'state': 'TASK_STATE_FAILED'}},
+        })
+        result = self.play(dispatcher, watch, self.then())
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'watch'
+        assert result.failure.assertion_path == 'final_event.status.state'
+
+    def test_its_duration_is_that_of_its_own_exchange(self):
+        """From its request to its response, however long the steps after it
+        and the wait for them take."""
+        held = self.held(min_duration_ms=300)
+        slow = Schedule(replies={Operation.GET_TASK: (0.5, ok())})
+        assert self.play(slow, held, self.then()).result is Outcome.PASS
+
+        quick = Schedule(replies={Operation.GET_TASK: (0.1, ok())})
+        result = self.play(quick, held, self.then(delay_ms=5000))
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'held'
+        assert result.failure.assertion_path == 'duration'
+        assert result.failure.actual == '100ms'
+
+        # The wait before it is sent is the runner's, and is not counted.
+        quick = Schedule(replies={Operation.GET_TASK: (0.1, ok())})
+        waited = self.held(delay_ms=1000, min_duration_ms=300)
+        assert self.play(quick, waited, self.then()).failure.actual == '100ms'
+
+    def test_a_request_held_past_its_bound_is_abandoned(self):
+        """As for a step that is not in the background: the step fails at the
+        bound, and the SUT is not waited for."""
+        dispatcher = Schedule(replies={Operation.GET_TASK: (500.0, ok())})
+        result = self.play(dispatcher, self.held(max_duration_ms=3000), self.then())
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'held'
+        assert result.failure.assertion_path == 'duration'
+        assert result.failure.actual == 'no response'
+        assert dispatcher.log[-1] == (3.0, 'cancelled', 'get_task')
+
+    def test_a_stream_the_sut_never_ends_is_bounded_by_its_timeout(self):
+        dispatcher = Schedule(streams={
+            Operation.SUBSCRIBE_TO_TASK: [(0.0, self.TASK), (0.0, HOLD)],
+        })
+        watch = self.watch(expect_stream={'timeout_ms': 10_000})
+        result = self.play(dispatcher, watch, self.then())
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'watch'
+        assert 'did not complete within 10000ms' in result.failure.message
+        assert dispatcher.log[-1] == (10.0, 'hung up', 'subscribe_to_task')
+
+    def test_a_request_that_did_not_get_through_is_an_error_on_that_step(self):
+        dispatcher = Schedule(raises={Operation.GET_TASK: DispatchError('ConnectError')})
+        result = self.play(dispatcher, self.held(), self.then())
+        assert result.result is Outcome.ERROR
+        assert result.failure.step_id == 'held'
+        assert [(s.id, s.result) for s in result.steps] == [
+            ('held', Outcome.ERROR), ('next', Outcome.PASS),
+        ]
+
+    def test_a_refused_background_stream_can_be_what_the_step_expects(self):
+        refusal = StreamNotOpened('the SUT refused the stream', failed())
+        dispatcher = Schedule(raises={Operation.SUBSCRIBE_TO_TASK: refusal})
+        watch = self.watch(
+            expect_stream=None, expect_error={'error_type': 'TaskNotFoundError'}
+        )
+        result = self.play(dispatcher, watch, self.then())
+        assert result.result is Outcome.PASS
+        assert [s.id for s in result.steps] == ['watch', 'next']
+
+    # -- capture -------------------------------------------------------------------
+
+    def test_capture_on_a_background_stream_is_there_for_the_next_step(self):
+        """It reads the first event, which has arrived by then."""
+        dispatcher = Schedule(streams={
+            Operation.SUBSCRIBE_TO_TASK: [(0.0, self.TASK), (1.0, self.DONE)],
+        })
+        result = self.play(
+            dispatcher,
+            self.watch(capture={'taskId': 'task.id'}),
+            self.then(params={'id': '{{watch.taskId}}'}),
+        )
+        assert result.result is Outcome.PASS
+        assert dispatcher.requests[1][1]['id'] == 'T7'
+
+    def test_capture_on_any_other_background_step_is_read_when_it_ends(self):
+        """Its response is not there yet when the next step starts."""
+        held = self.held(capture={'id': 'id'})
+        answered_later = Schedule(replies={Operation.GET_TASK: (5.0, ok({'id': 'T1'}))})
+
+        result = self.play(
+            answered_later, held, self.then(params={'id': '{{held.id}}'})
+        )
+        assert result.result is Outcome.ERROR
+        assert result.failure.step_id == 'next'
+        assert "no variable is named 'held.id'" in result.failure.message
+
+        runner = runner_for(
+            Schedule(replies={Operation.GET_TASK: (5.0, ok({'id': 'T1'}))}),
+            clock=virtual_clock, sleep=asyncio.sleep,
+            capabilities=[RunnerRequirement.CONCURRENT_REQUESTS],
+        )
+        test = a_test(
+            held, self.then(),
+            runner_requirements=['concurrent_requests'],
+            assertions=[{'source': '{{held.id}}', 'match': 'T1'}],
+        )
+        assert run_virtual(runner.run_test(test)).result is Outcome.PASS
+
+    def test_a_capture_the_stream_never_gave_fails_the_step_at_the_end(self):
+        dispatcher = Schedule(streams={
+            Operation.SUBSCRIBE_TO_TASK: [(0.0, {'task': {}}), (1.0, self.DONE)],
+        })
+        result = self.play(
+            dispatcher, self.watch(capture={'taskId': 'task.id'}), self.then()
+        )
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'watch'
+        assert "cannot capture 'taskId'" in result.failure.message
+
+    # -- a test that stops early ---------------------------------------------------
+
+    def test_a_step_that_does_not_pass_ends_the_test_and_closes_the_request(self):
+        """The open request was waiting for the rest of the test. Evaluating
+        it would only repeat, as a second failure, the one that ended it."""
+        dispatcher = Schedule(
+            replies={Operation.GET_TASK: (5.0, ok({'id': 'OTHER'}))},
+            streams={Operation.SUBSCRIBE_TO_TASK: [(0.0, self.TASK), (0.0, HOLD)]},
+        )
+        result = self.play(
+            dispatcher,
+            self.held(expect={'body': {'id': 'T1'}}),
+            self.watch(expect_stream={'min_count': 9}),
+            self.then(expect={'status': 500}),
+        )
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'next'
+        assert [s.id for s in result.steps] == ['next']
+        assert dispatcher.log[-2:] == [
+            (0.0, 'cancelled', 'get_task'),
+            (0.0, 'hung up', 'subscribe_to_task'),
+        ]
+
+    def test_a_refused_background_stream_is_the_verdict_and_not_the_step_it_broke(self):
+        """The stream gave no first event, so the step that needed its capture
+        could not be sent. The refusal is the cause and is what is reported."""
+        refusal = StreamNotOpened('the SUT refused the stream', failed())
+        dispatcher = Schedule(raises={Operation.SUBSCRIBE_TO_TASK: refusal})
+        result = self.play(
+            dispatcher,
+            self.watch(capture={'taskId': 'task.id'}),
+            self.then(params={'id': '{{watch.taskId}}'}),
+        )
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'watch'
+        assert result.failure.message == 'the SUT refused the stream'
+        assert [(s.id, s.result) for s in result.steps] == [
+            ('watch', Outcome.FAIL), ('next', Outcome.ERROR),
+        ]
+
+    def test_a_first_event_without_the_captured_value_is_the_verdict(self):
+        dispatcher = Schedule(streams={
+            Operation.SUBSCRIBE_TO_TASK: [(0.0, {'task': {}}), (0.0, HOLD)],
+        })
+        result = self.play(
+            dispatcher,
+            self.watch(capture={'taskId': 'task.id'}),
+            self.then(params={'id': '{{watch.taskId}}'}),
+        )
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'watch'
+        assert "cannot capture 'taskId'" in result.failure.message
+        assert dispatcher.log[-1] == (0.0, 'hung up', 'subscribe_to_task')
+
+    def test_a_request_that_could_not_be_sent_is_reported_with_the_step_that_failed(self):
+        """It went wrong before the next step began, so nothing that step did
+        or did not do changed how it went."""
+        dispatcher = Schedule(raises={Operation.GET_TASK: DispatchError('ConnectError')})
+        result = self.play(
+            dispatcher, self.held(), self.then(expect={'status': 500})
+        )
+        assert result.result is Outcome.ERROR
+        assert result.failure.step_id == 'held'
+        assert [(s.id, s.result) for s in result.steps] == [
+            ('held', Outcome.ERROR), ('next', Outcome.FAIL),
+        ]
+
+    def test_a_reply_that_beat_the_request_being_seen_out_is_still_a_reply(self):
+        """A SUT may refuse a call before the runner has seen the request
+        leave. That is an answer, and whether it came before or after that
+        moment is a matter of timing: the report is the same either way."""
+        class RepliesFirst(Schedule):
+            async def dispatch(self, operation, params=None, headers=None, *, on_sent=None):
+                return await super().dispatch(operation, params, headers)
+
+        for dispatcher_type in (Schedule, RepliesFirst):
+            dispatcher = dispatcher_type(replies={Operation.GET_TASK: (0.0, failed())})
+            result = self.play(
+                dispatcher,
+                self.held(expect={'status': 200}),
+                self.then(expect={'status': 500}),
+            )
+            assert result.failure.step_id == 'next', dispatcher_type.__name__
+            assert [s.id for s in result.steps] == ['next'], dispatcher_type.__name__
+
+    def test_a_request_that_was_answered_is_not_reported_when_the_test_stops(self):
+        """However soon the answer came. Whether it beat the next step is a
+        matter of timing, and a report must not depend on that."""
+        dispatcher = Schedule(replies={Operation.GET_TASK: (0.0, ok({'id': 'OTHER'}))})
+        result = self.play(
+            dispatcher,
+            self.held(expect={'body': {'id': 'T1'}}),
+            self.then(expect={'status': 500}),
+        )
+        assert result.failure.step_id == 'next'
+        assert [s.id for s in result.steps] == ['next']
+
+    def test_assertions_that_name_a_step_never_reached_are_not_reported(self):
+        """The stream was refused, which is reported even when the test
+        stops. But what the step expects of the refusal names a step that
+        never ran, so there is nothing to compare it with."""
+        refusal = StreamNotOpened('the SUT refused the stream', failed())
+        dispatcher = Schedule(raises={Operation.SUBSCRIBE_TO_TASK: refusal})
+        result = self.play(
+            dispatcher,
+            self.watch(expect_stream=None, expect_error={'message': '{{last.id}}'}),
+            self.then(expect={'status': 500}),
+            self.then('last', capture={'id': 'id'}),
+        )
+        assert result.failure.step_id == 'next'
+        assert [s.id for s in result.steps] == ['next']
+
+    def test_a_request_that_cannot_be_built_ends_the_test(self):
+        dispatcher = Schedule()
+        held = Step(
+            id='held', operation=Operation.GET_TASK, background=True,
+            params={'id': '{{nothing.id}}'},
+        )
+        result = self.play(dispatcher, held, self.then())
+        assert result.result is Outcome.ERROR
+        assert result.failure.step_id == 'held'
+        assert dispatcher.requests == []
+
+    def test_an_interrupted_run_closes_what_it_left_open(self):
+        dispatcher = Schedule(
+            replies={
+                Operation.GET_TASK: (3600.0, ok()),
+                Operation.CANCEL_TASK: (3600.0, ok()),
+            },
+            streams={Operation.SUBSCRIBE_TO_TASK: [(0.0, self.TASK), (0.0, HOLD)]},
+        )
+        runner = runner_for(
+            dispatcher, clock=virtual_clock, sleep=asyncio.sleep,
+            capabilities=[RunnerRequirement.CONCURRENT_REQUESTS],
+        )
+        test = a_test(
+            self.held(),
+            # Bounded well past the interruption, so the read is still going.
+            self.watch(expect_stream={'timeout_ms': 600_000}),
+            self.then(),
+            runner_requirements=['concurrent_requests'],
+        )
+
+        async def interrupted():
+            with pytest.raises((asyncio.TimeoutError, TimeoutError)):
+                await asyncio.wait_for(runner.run_test(test), 60.0)
+            # Long enough to tell the runner closing them at the interruption
+            # from the event loop cancelling what is left when it shuts down.
+            await asyncio.sleep(5.0)
+
+        run_virtual(interrupted())
+        assert sorted(dispatcher.log[-3:]) == [
+            (60.0, 'cancelled', 'cancel_task'),
+            (60.0, 'cancelled', 'get_task'),
+            (60.0, 'hung up', 'subscribe_to_task'),
+        ]
+
+    # -- the rest ----------------------------------------------------------------
+
+    def test_it_is_sent_as_the_version_it_names(self):
+        """With that version's header, to the interface for that version."""
+        streams = {Operation.SUBSCRIBE_TO_TASK: [(0.0, self.TASK), (1.0, self.DONE)]}
+        main, other = Schedule(streams=streams), Schedule(streams=streams)
+        self.play(
+            main, self.watch(a2a_version='1.0'), self.held(a2a_version='1.0'),
+            self.then(), spec_version='1.1',
+            dispatcher_for_version=lambda version: other if version == '1.0' else None,
+        )
+        assert [(r[0], r[2][VERSION_HEADER]) for r in other.requests] == [
+            (Operation.SUBSCRIBE_TO_TASK, '1.0'), (Operation.GET_TASK, '1.0'),
+        ]
+        assert [(r[0], r[2][VERSION_HEADER]) for r in main.requests] == [
+            (Operation.CANCEL_TASK, '1.1'),
+        ]
+
+    def test_a_test_cancelled_while_its_request_is_being_written_closes_it(self):
+        """Nothing else holds the request yet, so nothing else would."""
+        dispatcher = Schedule(send_takes=10.0)
+
+        async def cancelled_early():
+            runner = runner_for(
+                dispatcher, clock=virtual_clock, sleep=asyncio.sleep,
+                capabilities=[RunnerRequirement.CONCURRENT_REQUESTS],
+            )
+            test = a_test(
+                self.held(), self.then(), runner_requirements=['concurrent_requests']
+            )
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(runner.run_test(test), 0.2)
+            await asyncio.sleep(20)
+
+        run_virtual(cancelled_early())
+        assert dispatcher.log == [(0.2, 'cancelled', 'get_task')]
+
+    def test_a_capture_path_that_cannot_be_read_is_its_own_error(self):
+        """The test is wrong, and the step that is wrong is the one named.
+        Its stream, which the SUT would keep open, is hung up."""
+        dispatcher = Schedule(streams={
+            Operation.SUBSCRIBE_TO_TASK: [(0.0, self.TASK), (0.0, HOLD)],
+        })
+
+        async def played():
+            runner = runner_for(
+                dispatcher, clock=virtual_clock, sleep=asyncio.sleep,
+                capabilities=[RunnerRequirement.CONCURRENT_REQUESTS],
+            )
+            test = a_test(
+                self.watch(capture={'taskId': 'task[*].id'}), self.then(),
+                runner_requirements=['concurrent_requests'],
+            )
+            result = await runner.run_test(test)
+            # Read while the loop still runs: when it ends it cancels
+            # whatever is left, which would hide a stream left open.
+            await asyncio.sleep(1)
+            return result, list(dispatcher.log)
+
+        result, log = run_virtual(played())
+        assert result.result is Outcome.ERROR
+        assert result.failure.step_id == 'watch'
+        assert log[-1] == (0.0, 'hung up', 'subscribe_to_task')
+        assert [request[0] for request in dispatcher.requests] == [Operation.SUBSCRIBE_TO_TASK]
+
+    def test_a_runner_that_cannot_hold_a_request_open_skips_the_test(self):
+        dispatcher = Schedule()
+        test = a_test(
+            self.held(), self.then(), runner_requirements=['concurrent_requests']
+        )
+        result = run_virtual(runner_for(dispatcher).run_test(test))
+        assert result.result is Outcome.SKIP
+        assert result.skip_reason == 'runner does not provide concurrent_requests'
+        assert dispatcher.requests == []
 
 
 class TestClientSteps:

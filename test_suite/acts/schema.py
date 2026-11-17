@@ -158,6 +158,8 @@ class RunnerRequirement(str, enum.Enum):
     STREAM_DISCONNECT = 'stream_disconnect'
     AUTH_CREDENTIALS = 'auth_credentials'
     HEADER_INSPECTION = 'header_inspection'
+    #: Keep one request open while issuing another: a `background` step.
+    CONCURRENT_REQUESTS = 'concurrent_requests'
 
 
 class HttpMethod(str, enum.Enum):
@@ -689,6 +691,12 @@ class Step(_Model):
         description='The response must arrive within this long. Shows that '
                     'the SUT answered at once.',
     )
+    background: bool | None = Field(
+        default=None,
+        description='Send the request, leave it open and go on to the next '
+                    'step. The step is evaluated after the last step of the '
+                    'test.',
+    )
 
     def kind(self) -> StepKind:
         """Which form this step takes. Total, given validation passed."""
@@ -836,6 +844,18 @@ class Step(_Model):
                 f'satisfy both'
             )
 
+        if self.background is not None and kind is not StepKind.OPERATION:
+            raise ValueError(
+                f'`background` keeps the request of an operation open; not '
+                f'valid on a {kind.value} step'
+            )
+        if self.background and self.repeat is not None:
+            raise ValueError(
+                '`repeat` sends a request again once it is answered, and a '
+                'background step is answered after the steps that follow it; '
+                'set one or the other'
+            )
+
         return self
 
 
@@ -955,7 +975,7 @@ class Test(_Model):
 
     @model_validator(mode='after')
     def _declares_the_runner_features_it_uses(self) -> Test:
-        """Spec §7.2 and §7.3: these three MUST be declared, not left implied.
+        """These four MUST be declared, not left implied.
 
         §3.2 leaves `runner_requirements` optional in general; these are its
         exceptions, because here the alternative is silent. Declared in prose
@@ -976,6 +996,8 @@ class Test(_Model):
                 (RunnerRequirement.STREAM_DISCONNECT,
                  any(plan.disconnect_after is not None for plan in plans),
                  'disconnects mid-stream'),
+                (RunnerRequirement.CONCURRENT_REQUESTS, bool(step.background),
+                 'stays open while the steps after it run'),
             ):
                 if used and requirement not in declared:
                     raise ValueError(
