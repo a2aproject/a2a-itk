@@ -20,8 +20,14 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 # The A2A specification revision these stubs are generated from. Moving this
-# is a deliberate act: regenerate, run the tests, and commit the result.
-A2A_SPEC_REF="v1.0.0"
+# is a deliberate act: regenerate, run the tests, and commit the result. CI
+# regenerates and fails when the committed stubs differ.
+#
+# One set of stubs serves A2A 1.0 and 1.1 runs: the 1.1 proto keeps every 1.0
+# field, enum value and RPC with its number and type, so these stubs encode
+# and decode 1.0 traffic unchanged. This is a release candidate: move the pin
+# to the final 1.1 tag once it exists.
+A2A_SPEC_REF="v1.1.0-rc"
 A2A_PROTO_URL="https://raw.githubusercontent.com/a2aproject/A2A/${A2A_SPEC_REF}/specification/a2a.proto"
 
 mkdir -p pyproto
@@ -49,7 +55,7 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 
 # The file must be named a2a.proto at the include root: protoc records the
 # path it was compiled under, and the generated module identifies itself by it.
-curl -sSfL "${A2A_PROTO_URL}" -o "${WORK_DIR}/a2a.proto"
+curl -sSfL --retry 3 "${A2A_PROTO_URL}" -o "${WORK_DIR}/a2a.proto"
 
 uv run --with grpcio-tools python -m grpc_tools.protoc \
 	-I"${WORK_DIR}" \

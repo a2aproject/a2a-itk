@@ -46,5 +46,15 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check --isolated test_suite tests scripts
 
+      # The stubs in pyproto/ are committed. Regenerating them here catches an
+      # edited proto or a moved A2A_SPEC_REF whose stubs were not committed.
+      # The intent-to-add makes a generated file that was never committed show
+      # up in the diff too.
+      - name: Check generated stubs are up to date
+        run: |
+          ./build_protos.sh
+          git add --intent-to-add pyproto
+          git diff --exit-code -- pyproto
+
       - name: Run tests
         run: uv run pytest --tb=short
