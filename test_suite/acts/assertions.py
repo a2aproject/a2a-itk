@@ -28,6 +28,13 @@ One ambiguity survives and cannot be resolved: a field named `type` whose
 expected value is literally one of the six type names. Nothing in A2A hits it,
 and the format offers no escape, so it is documented rather than handled.
 
+**Numbers that arrive as strings.** ProtoJSON writes a 64-bit integer as a
+string, so `generation` reaches an assertion as `"5"` on every binding, where
+a test writes the number `5`. The ordering operators (`gt`, `gte`, `lt`,
+`lte`) read a string of digits as the integer it spells, on both sides of the
+comparison. Exact match does not convert: `generation: 5` does not match
+`"5"`, and the way to say "equals 5" is `{gte: 5, lte: 5}`.
+
 Nothing here performs I/O or knows about a transport; the runner supplies
 already-unwrapped values (spec §4.2's assertion root) and turns the results
 into report entries.
@@ -35,6 +42,7 @@ into report entries.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -147,6 +155,32 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+#: A 64-bit integer as ProtoJSON writes it: a string of decimal digits.
+_INTEGER_TEXT: Final = re.compile(r'-?[0-9]+')
+
+
+def _as_number(value: Any) -> int | float | None:
+    """``value`` as something the numeric comparisons can order, or ``None``.
+
+    A string of digits is read as the integer it spells, and never as a
+    float: a 64-bit value does not fit a float exactly, and two generations
+    one apart must not compare equal.
+    """
+    if _is_number(value):
+        return value
+    if isinstance(value, str) and _INTEGER_TEXT.fullmatch(value):
+        try:
+            return int(value)
+        except ValueError:
+            # Python refuses to parse a string of several thousand digits.
+            return None
+    return None
+
+
+def _is_comparable(value: Any) -> bool:
+    return _as_number(value) is not None
+
+
 def _is_array(value: Any) -> bool:
     return isinstance(value, (list, tuple))
 
@@ -197,7 +231,8 @@ def _count_op(compare: Callable[[int, int], bool]) -> Callable[[Any, Any], bool]
 
 def _compare(op: Callable[[Any, Any], bool]) -> Callable[[Any, Any], bool]:
     def holds(argument: Any, actual: Any) -> bool:
-        return _is_number(actual) and op(actual, argument)
+        value = _as_number(actual)
+        return value is not None and op(value, _as_number(argument))
 
     return holds
 
@@ -279,10 +314,18 @@ LEAF_OPERATORS: Final[Mapping[str, _Leaf]] = {
         holds=lambda a, v: isinstance(v, str) and v.endswith(a),
         describe='end with',
     ),
-    'gte': _Leaf(accepts=_is_number, holds=_compare(lambda v, a: v >= a), describe='be >='),
-    'lte': _Leaf(accepts=_is_number, holds=_compare(lambda v, a: v <= a), describe='be <='),
-    'gt': _Leaf(accepts=_is_number, holds=_compare(lambda v, a: v > a), describe='be >'),
-    'lt': _Leaf(accepts=_is_number, holds=_compare(lambda v, a: v < a), describe='be <'),
+    'gte': _Leaf(
+        accepts=_is_comparable, holds=_compare(lambda v, a: v >= a), describe='be >='
+    ),
+    'lte': _Leaf(
+        accepts=_is_comparable, holds=_compare(lambda v, a: v <= a), describe='be <='
+    ),
+    'gt': _Leaf(
+        accepts=_is_comparable, holds=_compare(lambda v, a: v > a), describe='be >'
+    ),
+    'lt': _Leaf(
+        accepts=_is_comparable, holds=_compare(lambda v, a: v < a), describe='be <'
+    ),
     'count': _Leaf(
         accepts=_is_int, holds=_count_op(lambda n, a: n == a), describe='have length'
     ),
@@ -364,6 +407,25 @@ def _evaluate_exact(expected: Any, actual: Any, path: str) -> AssertionResult:
         return _fail(path, 'exact', expected, actual, f'{path or "value"} is missing')
     if _same(actual, expected):
         return _ok()
+    if _show(expected) == _show(actual):
+        # `5` against `"5"`: printed plainly the two sides read the same, and
+        # the message would say a value should equal itself. As JSON they
+        # differ.
+        hint = ''
+        if _is_comparable(expected) and _is_comparable(actual):
+            hint = (
+                '; a 64-bit integer arrives as a string, so compare it with '
+                '`{gte: N, lte: N}`'
+            )
+        return _fail(
+            path,
+            'exact',
+            expected,
+            actual,
+            f'{path or "value"} should equal {json.dumps(expected, default=str)}, '
+            f'got {json.dumps(actual, default=str)}; an exact match does not '
+            f'convert between types{hint}',
+        )
     return _fail(
         path,
         'exact',
