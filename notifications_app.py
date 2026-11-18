@@ -18,12 +18,28 @@ class Notification(BaseModel):
     headers: dict[str, str] = {}
 
 
-def _extract_task_id_v10(data: dict) -> str | None:
-    # Handles v1.0 StreamResponse wrapped messages
-    if 'task' in data and isinstance(data['task'], dict):
-        return data['task'].get('id')
-    if 'statusUpdate' in data and isinstance(data['statusUpdate'], dict):
-        return data['statusUpdate'].get('taskId')
+#: Where a payload of each kind names its task. An A2A 1.x payload is a
+#: StreamResponse: one member, named for the kind. `messageUpdate` is the kind
+#: A2A 1.1 added.
+#:
+#: A2A also delivers `artifactUpdate` and `message`, and those are refused.
+#: Storing them changes what the conformance test `PUSH-DELIV-003`
+#: reads, and that test accepts only a task or a status update, so it has to
+#: be corrected in the corpus first.
+_TASK_ID_FIELD_V1 = {
+    'task': 'id',
+    'statusUpdate': 'taskId',
+    'messageUpdate': 'taskId',
+}
+
+
+def _extract_task_id_v1(data: dict) -> str | None:
+    # Handles A2A 1.x payloads
+    for kind, field in _TASK_ID_FIELD_V1.items():
+        if isinstance(data.get(kind), dict):
+            task_id = data[kind].get(field)
+            # Notifications are stored and read by the id as a string.
+            return task_id if isinstance(task_id, str) else None
     return None
 
 
@@ -85,7 +101,7 @@ def create_notifications_app() -> FastAPI:
                     detail='Notification payload must be a dictionary.',
                 )
 
-            task_id = _extract_task_id_v10(json_data)
+            task_id = _extract_task_id_v1(json_data)
             if not task_id:
                 task_id = _extract_task_id_v03(json_data)
 

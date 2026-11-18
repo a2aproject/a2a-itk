@@ -2807,6 +2807,143 @@ class TestClientSteps:
         )
         assert run(runner_for(dispatcher), test).result is Outcome.PASS
 
+    # -- a canned stream --------------------------------------------------------
+
+    STREAM = [
+        {'jsonrpc': '2.0', 'id': '1', 'result': {'task': {'id': 'T9'}}},
+        {'jsonrpc': '2.0', 'id': '1', 'result': {'futureEvent': {'taskId': 'T9'}}},
+        {'jsonrpc': '2.0', 'id': '1', 'result': {'statusUpdate': {
+            'taskId': 'T9', 'generation': '3',
+            'status': {'state': 'TASK_STATE_COMPLETED'},
+        }}},
+    ]
+    #: What a client that skips the event it does not know surfaces.
+    SURFACED = {'events': [
+        {'task': {'id': 'T9'}},
+        {'statusUpdate': {
+            'taskId': 'T9', 'generation': '3',
+            'status': {'state': 'TASK_STATE_COMPLETED'},
+        }},
+    ]}
+
+    def a_stream_test(self, expect_parsed, wire_stream=None, **step):
+        return a_test(
+            Step(
+                id='parse',
+                client_response={
+                    'operation': 'send_streaming_message',
+                    'wire_stream': self.STREAM if wire_stream is None else wire_stream,
+                },
+                expect_parsed=expect_parsed,
+                **step,
+            )
+        )
+
+    def test_a_canned_stream_goes_out_as_its_events_in_order(self):
+        dispatcher = self.replying_with(self.SURFACED)
+        run(runner_for(dispatcher), self.a_stream_test({'events': {'count': 2}}))
+        operation, params, _ = dispatcher.calls[0]
+        assert operation is Operation.SEND_MESSAGE
+        text, data = params['message']['parts']
+        assert text == {'text': CLIENT_PARSE_BEHAVIOR}
+        # `wire_stream` in place of `wire_payload`, and not next to it.
+        assert data == {'data': {
+            'operation': 'send_streaming_message', 'wire_stream': self.STREAM,
+        }}
+
+    def test_one_canned_payload_still_goes_out_as_wire_payload(self):
+        dispatcher = self.replying_with({'task': {}})
+        run(runner_for(dispatcher), self.a_client_test({'task': {'exists': True}}))
+        data = dispatcher.calls[0][1]['message']['parts'][1]['data']
+        assert set(data) == {'operation', 'wire_payload'}
+
+    @pytest.mark.parametrize('kind', ['status_update', 'statusUpdate'])
+    def test_a_surfaced_event_is_addressed_like_an_event_of_a_stream(self, kind):
+        """By the name of its kind in either spelling, or straight through to
+        the fields of its payload."""
+        test = self.a_stream_test({'events': {
+            'type': 'array',
+            'count': 2,
+            'items': [
+                {'task': {'id': 'T9'}},
+                {
+                    kind: {'taskId': 'T9', 'generation': {'gte': 3, 'lte': 3}},
+                    'status': {'state': 'TASK_STATE_COMPLETED'},
+                },
+            ],
+        }})
+        result = run(runner_for(self.replying_with(self.SURFACED)), test)
+        assert result.result is Outcome.PASS
+
+    def test_a_wrong_event_fails_and_locates_itself(self):
+        test = self.a_stream_test({'events': {'items': [
+            {'task': {'id': 'T9'}},
+            {'status_update': {'status': {'state': 'TASK_STATE_FAILED'}}},
+        ]}})
+        result = run(runner_for(self.replying_with(self.SURFACED)), test)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == (
+            'parsed.events[1].status_update.status.state'
+        )
+
+    def test_a_client_that_surfaces_what_it_should_have_skipped_fails(self):
+        everything = {'events': [
+            self.SURFACED['events'][0],
+            {'futureEvent': {'taskId': 'T9'}},
+            self.SURFACED['events'][1],
+        ]}
+        test = self.a_stream_test({'events': {'count': 2}})
+        result = run(runner_for(self.replying_with(everything)), test)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'parsed.events'
+
+    def test_a_client_that_stops_at_the_unknown_event_fails(self):
+        stopped = {'events': self.SURFACED['events'][:1]}
+        test = self.a_stream_test({'events': {'count': 2}})
+        assert run(runner_for(self.replying_with(stopped)), test).result is Outcome.FAIL
+
+    def test_a_reply_without_a_list_of_events_fails_on_the_assertion(self):
+        """An agent that parsed the stream as one payload. A finding about the
+        agent, and not something that may break the run."""
+        for parsed in ({'task': {'id': 'T9'}}, {'events': 'two'}):
+            test = self.a_stream_test({'events': {'type': 'array', 'count': 2}})
+            result = run(runner_for(self.replying_with(parsed)), test)
+            assert result.result is Outcome.FAIL
+            assert result.failure.assertion_path == 'parsed.events'
+
+    def test_the_step_response_is_the_object_with_the_events(self):
+        test = self.a_stream_test(
+            {'events': {'count': 2}},
+            assertions=[{
+                'source': '{{parse.response}}',
+                'any': {
+                    'path': 'events[*]',
+                    'match': {'status_update': {'taskId': 'T9'}},
+                },
+            }],
+        )
+        result = run(runner_for(self.replying_with(self.SURFACED)), test)
+        assert result.result is Outcome.PASS
+
+    def test_what_else_the_agent_reports_is_kept(self):
+        parsed = {**self.SURFACED, 'closed': True}
+        test = self.a_stream_test({'events': {'count': 2}, 'closed': True})
+        assert run(runner_for(self.replying_with(parsed)), test).result is Outcome.PASS
+
+    def test_only_a_canned_stream_is_read_as_events(self):
+        """A single payload that happens to have a member called `events` is
+        left exactly as the client parsed it."""
+        parsed = {'events': [{'statusUpdate': {'taskId': 'T9'}}]}
+        by_kind = {'events': {'items': [{'status_update': {'taskId': 'T9'}}]}}
+        dispatcher = self.replying_with(parsed)
+        assert run(
+            runner_for(dispatcher), self.a_client_test(by_kind)
+        ).result is Outcome.FAIL
+        assert run(
+            runner_for(dispatcher),
+            self.a_client_test({'events': {'items': [{'statusUpdate': {'taskId': 'T9'}}]}}),
+        ).result is Outcome.PASS
+
 
 class TestImportWeight:
     def test_importing_the_package_does_not_load_grpc(self):
@@ -3058,3 +3195,194 @@ class TestWebhookSteps:
         result = run(self.runner(), self.a_webhook_test())
         assert result.result is Outcome.ERROR
         assert 'webhook_endpoint' in (result.failure.message or '')
+
+
+class TestWebhookEvents:
+    """`expect_webhook.events`: the step reads deliveries until each of these
+    has been matched.
+
+    Without it a step stops at `min_count`, which is the first delivery. A
+    test of what is delivered later, or of what must never be delivered, then
+    asserts on a task that has barely started.
+    """
+
+    WORKING = {'statusUpdate': {'taskId': 'T1', 'status': {'state': 'TASK_STATE_WORKING'}}}
+    COMPLETED = {'statusUpdate': {'taskId': 'T1', 'status': {'state': 'TASK_STATE_COMPLETED'}}}
+    ADDED = {'messageUpdate': {'taskId': 'T1', 'message': {'messageId': 'm1'}}}
+    #: "Read deliveries up to the one that reports the completed task."
+    UNTIL_COMPLETED = [
+        {'match': 'any_position', 'status': {'state': 'TASK_STATE_COMPLETED'}}
+    ]
+
+    @staticmethod
+    def arriving(*timed):
+        """A receiver to which each `(seconds, payload)` is delivered at that
+        time on the loop's clock."""
+        async def read(task_id):
+            assert task_id == 'T1'
+            now = asyncio.get_running_loop().time()
+            return [{'event': payload} for at, payload in timed if at <= now]
+        return read
+
+    def play(self, read_webhook, *before, **block):
+        """Run a webhook step on virtual time, after the steps in ``before``."""
+        block.setdefault('task_id', 'T1')
+        runner = runner_for(
+            FakeDispatcher(ok({'id': 'T1'})),
+            capabilities=[RunnerRequirement.WEBHOOK_ENDPOINT],
+            read_webhook=read_webhook,
+            clock=virtual_clock,
+            sleep=asyncio.sleep,
+        )
+        test = a_test(
+            *before,
+            Step(id='delivered', expect_webhook=block),
+            runner_requirements=[RunnerRequirement.WEBHOOK_ENDPOINT],
+        )
+        return run_virtual(runner.run_test(test))
+
+    def test_the_step_reads_on_until_the_event_has_arrived(self):
+        """`min_count` is met by the first delivery. The one the step names
+        comes three seconds later."""
+        receiver = self.arriving((0.0, self.WORKING), (3.0, self.COMPLETED))
+        result = self.play(receiver, events=self.UNTIL_COMPLETED)
+        assert result.result is Outcome.PASS
+        assert result.steps[-1].duration_ms == 3000
+
+    def test_it_does_not_wait_out_the_timeout_once_the_event_is_there(self):
+        receiver = self.arriving((0.0, self.COMPLETED))
+        result = self.play(receiver, events=self.UNTIL_COMPLETED, timeout_ms=60_000)
+        assert result.result is Outcome.PASS
+        assert result.steps[-1].duration_ms == 0
+
+    def test_each_event_applies_to_everything_read_up_to_then(self):
+        """How a test shows that a kind is never delivered: it names a
+        delivery that comes after the one it rules out."""
+        receiver = self.arriving(
+            (0.0, self.WORKING), (1.0, self.ADDED), (3.0, self.COMPLETED)
+        )
+        never = {'message_update': {'absent': True}}
+
+        result = self.play(receiver, events=self.UNTIL_COMPLETED, each_event=never)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'webhook.each_event[1].message_update'
+
+        # Without `events` the step stops at the first delivery and never
+        # sees the one it was written to rule out.
+        assert self.play(receiver, each_event=never).result is Outcome.PASS
+
+    def test_final_event_is_the_last_delivery_read(self):
+        receiver = self.arriving((0.0, self.WORKING), (3.0, self.COMPLETED))
+        completed = {'status': {'state': 'TASK_STATE_COMPLETED'}}
+        result = self.play(receiver, events=self.UNTIL_COMPLETED, final_event=completed)
+        assert result.result is Outcome.PASS
+        assert self.play(receiver, final_event=completed).result is Outcome.FAIL
+
+    def test_an_event_that_never_arrives_fails_at_the_timeout(self):
+        receiver = self.arriving((0.0, self.WORKING))
+        result = self.play(receiver, events=self.UNTIL_COMPLETED, timeout_ms=5000)
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'delivered'
+        assert result.failure.assertion_path == 'webhook.events[*]'
+        assert result.failure.message == (
+            'events[0]: no event among the 1 received matched; '
+            'the step read deliveries for 5000ms'
+        )
+        assert result.steps[-1].duration_ms == 5000
+
+    def test_the_description_names_the_event_in_the_failure(self):
+        receiver = self.arriving((0.0, self.WORKING))
+        wanted = [{**self.UNTIL_COMPLETED[0], 'description': 'the completed task'}]
+        result = self.play(receiver, events=wanted, timeout_ms=1000)
+        assert result.failure.message.startswith('the completed task: no event among')
+
+    def test_an_event_at_a_position_is_waited_for_and_then_decided(self):
+        """The second delivery is not there yet, so the step waits for it.
+        Once it is there the assertion is decided, and waiting longer cannot
+        change a delivery that was made."""
+        second_is_completed = [{'index': 1, 'status': {'state': 'TASK_STATE_COMPLETED'}}]
+
+        arrives = self.arriving((0.0, self.WORKING), (2.0, self.COMPLETED))
+        result = self.play(arrives, events=second_is_completed, timeout_ms=60_000)
+        assert result.result is Outcome.PASS
+        assert result.steps[-1].duration_ms == 2000
+
+        another = self.arriving((0.0, self.WORKING), (2.0, self.ADDED))
+        result = self.play(another, events=second_is_completed, timeout_ms=60_000)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'webhook.events[1].status.state'
+        # Decided when the delivery arrived, so the wait is not mentioned.
+        assert 'read deliveries for' not in result.failure.message
+        assert result.steps[-1].duration_ms == 2000
+
+    def test_an_entry_that_has_failed_is_not_waited_past(self):
+        """The first delivery already fails the first entry. Waiting for the
+        second cannot change that, and the failure is not about the wait."""
+        receiver = self.arriving((0.0, self.WORKING))
+        wanted = [
+            {'index': 0, 'status': {'state': 'TASK_STATE_COMPLETED'}},
+            *self.UNTIL_COMPLETED,
+        ]
+        result = self.play(receiver, events=wanted, timeout_ms=60_000)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'webhook.events[0].status.state'
+        assert 'read deliveries for' not in result.failure.message
+        assert result.steps[-1].duration_ms == 0
+
+    def test_a_delivery_missing_at_a_position_is_reported_as_missing(self):
+        receiver = self.arriving((0.0, self.WORKING))
+        wanted = [{'index': 2, 'task': {'exists': True}}]
+        result = self.play(receiver, events=wanted, timeout_ms=1000)
+        assert result.failure.assertion_path == 'webhook.events[2]'
+        assert result.failure.message == (
+            'events[0]: no event at index 2; the SUT delivered 1; '
+            'the step read deliveries for 1000ms'
+        )
+
+    def test_min_count_still_has_to_be_met(self):
+        """Both conditions end the read, and neither replaces the other."""
+        receiver = self.arriving((0.0, self.COMPLETED))
+        result = self.play(
+            receiver, events=self.UNTIL_COMPLETED, min_count=2, timeout_ms=3000
+        )
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'webhook.min_count'
+        assert result.steps[-1].duration_ms == 3000
+
+    @pytest.mark.parametrize('kind', ['status_update', 'statusUpdate'])
+    def test_an_event_is_named_in_either_spelling(self, kind):
+        receiver = self.arriving((0.0, self.WORKING), (1.0, self.COMPLETED))
+        wanted = [{
+            'match': 'any_position',
+            kind: {'status': {'state': 'TASK_STATE_COMPLETED'}},
+        }]
+        assert self.play(receiver, events=wanted).result is Outcome.PASS
+
+    def test_events_may_name_what_an_earlier_step_captured(self):
+        receiver = self.arriving((0.0, self.COMPLETED))
+        wanted = [{'match': 'any_position', 'status_update': {'taskId': '{{get.id}}'}}]
+        result = self.play(receiver, get_task(capture={'id': 'id'}), events=wanted)
+        assert result.result is Outcome.PASS
+
+        other = [{'match': 'any_position', 'status_update': {'taskId': 'T-OTHER'}}]
+        assert self.play(receiver, events=other, timeout_ms=0).result is Outcome.FAIL
+
+    def test_a_variable_nothing_defines_is_an_error_and_reads_nothing(self):
+        reads: list[str] = []
+
+        async def read(task_id):
+            reads.append(task_id)
+            return []
+
+        wanted = [{'match': 'any_position', 'task': {'id': '{{nothing.id}}'}}]
+        result = self.play(read, events=wanted)
+        assert result.result is Outcome.ERROR
+        assert "'nothing.id'" in result.failure.message
+        assert reads == []
+
+    def test_the_events_are_counted_as_checks(self):
+        receiver = self.arriving((0.0, self.COMPLETED))
+        two = [*self.UNTIL_COMPLETED, {'index': 0, 'status_update': {'exists': True}}]
+        with_events = self.play(receiver, events=two)
+        without = self.play(receiver)
+        assert with_events.steps[-1].checks == without.steps[-1].checks + 2

@@ -162,6 +162,27 @@ The runner takes the first data part on any artifact of the returned task and ev
 
 Use the real client with a mock transport, not a bare deserialiser. Calling `FromJson` directly skips the envelope handling and error mapping that the tests are about.
 
+### A streaming response
+
+A test of how the client reads a stream carries `wire_stream` in place of `wire_payload`: the events of the response in order, each as it appears on the wire. `operation` is then `send_streaming_message`, `subscribe_to_task` or `send_live_message`.
+
+```json
+{"data": {"operation": "send_streaming_message", "wire_stream": [
+  {"jsonrpc": "2.0", "id": "req-008", "result": {"task": {"...": "..."}}},
+  {"jsonrpc": "2.0", "id": "req-008", "result": {"statusUpdate": {"...": "..."}}}
+]}}
+```
+
+The agent should:
+
+1. Give its client a transport that answers the call with these events as one event stream, each event rewritten to echo the `id` of the request, as for a single payload. On JSON-RPC and REST that is a `text/event-stream` response with one `data:` line per event.
+2. Perform the operation with that client and read the stream to its end. For `send_live_message` the client opens the exchange with a single message and sends nothing further.
+3. Return a completed task with one artifact holding a data part `{"events": [...]}`: the events the client surfaced, in order, each written as a stream event is on the wire (`{"statusUpdate": {...}}`). An event the client skipped is left out. A stream error the client surfaced is an event like any other and goes in `events` (`{"error": {...}}`). When the client failed the call instead, return `{"error": ...}` alone, as for a single payload, without the events read before it.
+
+The runner evaluates `expect_parsed` against that object. Each entry of `events` can be addressed by the name of its kind in either spelling (`status_update` or `statusUpdate`) or straight through to the fields of its payload, like an event of a stream.
+
+`wire_stream` comes from a change to the ACTS specification that is still under review ([A2A #2468](https://github.com/a2aproject/A2A/pull/2468)), and the form of the reply may change with it. The events of `send_live_message` are tentative for a second reason: the A2A specification does not define the bindings of that operation yet ([A2A #2411](https://github.com/a2aproject/A2A/pull/2411)).
+
 ## 8. Checking the work
 
 Iterate locally against the SDK checkout; every flag is described in [01_running.md](01_running.md):

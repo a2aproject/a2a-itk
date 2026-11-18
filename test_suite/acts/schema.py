@@ -101,6 +101,9 @@ class Operation(str, enum.Enum):
 
     SEND_MESSAGE = 'send_message'
     SEND_STREAMING_MESSAGE = 'send_streaming_message'
+    #: A two-way exchange, from A2A 1.1. An operation step cannot name it,
+    #: because such a step sends one request and reads one response.
+    SEND_LIVE_MESSAGE = 'send_live_message'
     GET_TASK = 'get_task'
     LIST_TASKS = 'list_tasks'
     CANCEL_TASK = 'cancel_task'
@@ -361,10 +364,31 @@ class ClientResponseBlock(_Model):
     Inverts the usual direction: nothing is sent, and the assertion is about
     what the *client* parsed. Catches the interop bugs where two SDKs
     disagree about a payload neither server ever emits.
+
+    The response is one payload (``wire_payload``), or for an operation that
+    is answered with a stream, the events of that stream in order
+    (``wire_stream``).
     """
 
     operation: Operation
-    wire_payload: Any
+    wire_payload: Any = None
+    wire_stream: Annotated[list[Any], Field(min_length=1)] | None = Field(
+        default=None,
+        description='The events of a streaming response, in order, each as it '
+                    'appears on the wire.',
+    )
+
+    @model_validator(mode='after')
+    def _one_canned_response(self) -> ClientResponseBlock:
+        given = sorted({'wire_payload', 'wire_stream'} & self.model_fields_set)
+        if len(given) != 1:
+            raise ValueError(
+                f'needs exactly one of `wire_payload` and `wire_stream`; '
+                f'got {given or "neither"}'
+            )
+        if given == ['wire_stream'] and self.wire_stream is None:
+            raise ValueError('`wire_stream` lists the events of a stream; got null')
+        return self
 
 
 class Repeat(_Model):
@@ -602,12 +626,17 @@ class ExpectWebhook(_Model):
     can only register a config and hope.
 
     The runner polls its receiver until `min_count` notifications for
-    `task_id` arrive or `timeout_ms` elapses.
+    `task_id` arrive or `timeout_ms` elapses. With `events` it also polls
+    until every entry of `events` is decided.
     """
 
     task_id: str
     min_count: int = Field(default=1, ge=1)
     timeout_ms: int = Field(default=10_000, ge=0)
+    #: Asserted against individual deliveries, in the forms `expect_stream`
+    #: uses for the events of a stream. How a step waits for one particular
+    #: delivery, such as the one that reports the task completed.
+    events: Annotated[list[EventAssertion], Field(min_length=1)] | None = None
     #: Asserted against every delivered notification's payload.
     each_event: dict[str, Assertion] | None = None
     #: Asserted against the most recent delivery only.
@@ -737,6 +766,12 @@ class Step(_Model):
         than one that fails.
         """
         kind = self.kind()
+
+        if self.operation is Operation.SEND_LIVE_MESSAGE:
+            raise ValueError(
+                '`send_live_message` is a two-way exchange; an operation step '
+                'sends one request and reads one response, and cannot drive it'
+            )
 
         if kind is not StepKind.OPERATION and self.params is not None:
             raise ValueError(f'`params` belongs to an operation step, not a {kind.value} step')

@@ -120,12 +120,24 @@ class TestOperationsMatchA2ASpec:
         assert binding.jsonrpc_method == ''
         assert binding.grpc_method == ''
 
-    def test_only_the_two_streaming_operations_stream(self):
+    def test_only_the_streaming_operations_stream(self):
         streaming = {o for o, b in OPERATIONS.items() if b.streaming}
         assert streaming == {
             Operation.SEND_STREAMING_MESSAGE,
             Operation.SUBSCRIBE_TO_TASK,
+            Operation.SEND_LIVE_MESSAGE,
         }
+
+    def test_the_live_message_row(self):
+        """From A2A 1.1. The RPC and its HTTP route are the proto's."""
+        binding = binding_for_operation(Operation.SEND_LIVE_MESSAGE)
+        assert binding.jsonrpc_method == 'SendLiveMessage'
+        assert binding.grpc_method == 'SendLiveMessage'
+        assert binding.rest_method is HttpMethod.POST
+        assert binding.rest_path == '/message:live'
+        assert (binding.grpc_request, binding.grpc_response) == (
+            'StreamRequest', 'StreamResponse',
+        )
 
 
 class TestOperationsMatchGeneratedService:
