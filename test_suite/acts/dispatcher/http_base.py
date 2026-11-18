@@ -338,10 +338,15 @@ class HttpDispatcher(Dispatcher):
         payload: Any,
         headers: Mapping[str, str] | None,
         content: str | None = None,
+        query: Mapping[str, str] | None = None,
         unwrap: bool = True,
         defaults: bool = True,
     ) -> AsyncIterator[StreamEvent]:
-        """Yield parsed SSE events from a streaming endpoint."""
+        """Yield parsed SSE events from a streaming endpoint.
+
+        ``query`` is sent as the query string, for a request whose method
+        carries no body.
+        """
         merged = self._headers(
             headers,
             content_type=self.content_type,
@@ -364,6 +369,7 @@ class HttpDispatcher(Dispatcher):
                 self._url(path),
                 headers=merged,
                 content=content,
+                params=query,
             ) as response:
                 if not self._is_sse(response):
                     await response.aread()

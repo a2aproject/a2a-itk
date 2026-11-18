@@ -23,6 +23,7 @@ from test_suite.acts.schema import (
     NamedAssertion,
     Operation,
     Ordering,
+    RunnerRequirement,
     Step,
     StepKind,
     Suite,
@@ -560,6 +561,168 @@ class TestWebhookEvents:
 
     def test_a_step_without_them_is_unchanged(self):
         assert self._webhook(min_count=2).expect_webhook.events is None
+
+
+class TestLiveStep:
+    """A two-way exchange (`SendLiveMessage`, from A2A 1.1): one request
+    opens it, further requests follow, and the SUT streams events."""
+
+    OPEN = {'send_message': {'message': {'role': 'ROLE_USER', 'parts': [{'text': 'hi'}]}}}
+
+    def _live(self, live=None, **fields):
+        return {'id': 'exchange', 'live': live or {'open': self.OPEN}, **fields}
+
+    def _a_test(self, *steps, **overrides):
+        overrides.setdefault('runner_requirements', ['live_stream'])
+        return Test.model_validate(_test(steps=list(steps), **overrides))
+
+    def test_the_whole_form(self):
+        step = Step.model_validate(self._live(
+            {
+                'open': self.OPEN,
+                'uplink': [
+                    {
+                        'id': 'rejected',
+                        'description': 'A message the agent rejects',
+                        'send_message': {'message': {'taskId': '{{exchange.taskId}}'}},
+                        'expect_ack': {'id': '{{exchange.taskId}}'},
+                    },
+                    {
+                        'after_event': {'error': {'referenceId': 'm-1'}},
+                        'subscribe': {'id': '{{exchange.taskId}}', 'lastSeenGeneration': 3},
+                    },
+                    {'unrecognized': True},
+                ],
+            },
+            a2a_version='1.1',
+            capture={'taskId': 'task.id'},
+            expect_stream={'timeout_ms': 20000, 'final_event': {'status': {'state': 'X'}}},
+        ))
+        assert step.kind() is StepKind.LIVE
+        rejected, resumed, unknown = step.live.uplink
+        assert step.live.open.send_message == self.OPEN['send_message']
+        assert rejected.id == 'rejected'
+        assert rejected.expect_ack == {'id': '{{exchange.taskId}}'}
+        assert resumed.after_event == {'error': {'referenceId': 'm-1'}}
+        assert resumed.subscribe.id == '{{exchange.taskId}}'
+        assert resumed.subscribe.lastSeenGeneration == 3
+        assert unknown.unrecognized is True
+
+    def test_an_exchange_the_sut_must_refuse(self):
+        step = Step.model_validate(self._live(
+            {'open': {'subscribe': {'id': 'no-such-task'}}},
+            expect_error={'error_type': 'TaskNotFoundError'},
+        ))
+        assert step.kind() is StepKind.LIVE
+
+    @pytest.mark.parametrize('request_', [
+        {},
+        {'send_message': {'message': {}}, 'subscribe': {'id': 'T1'}},
+        {'send_message': {'message': {}}, 'unrecognized': True},
+    ])
+    def test_a_request_is_exactly_one_kind(self, request_):
+        with pytest.raises(ValidationError, match='a live request is exactly one of'):
+            Step.model_validate(self._live({'open': request_}))
+        with pytest.raises(ValidationError, match='a live request is exactly one of'):
+            Step.model_validate(self._live({'open': self.OPEN, 'uplink': [request_]}))
+
+    @pytest.mark.parametrize('written', [False, 1, 'true', None])
+    def test_unrecognized_is_only_ever_true(self, written):
+        with pytest.raises(ValidationError):
+            Step.model_validate(self._live({'open': {'unrecognized': written}}))
+
+    def test_a_subscription_may_carry_other_request_fields(self):
+        step = Step.model_validate(
+            self._live({'open': {'subscribe': {'id': 'T1', 'tenant': 'acme'}}})
+        )
+        assert step.live.open.subscribe.model_extra == {'tenant': 'acme'}
+
+    @pytest.mark.parametrize('generation', [[3], {'at': 3}, 3.5])
+    def test_a_generation_is_an_integer_or_a_string(self, generation):
+        subscribe = {'id': 'T1', 'lastSeenGeneration': generation}
+        with pytest.raises(ValidationError):
+            Step.model_validate(self._live({'open': {'subscribe': subscribe}}))
+
+    @pytest.mark.parametrize(
+        'field', [{'id': 'first'}, {'after_event': {}}, {'expect_ack': {}}]
+    )
+    def test_the_request_that_opens_it_takes_no_field_of_a_later_one(self, field):
+        with pytest.raises(ValidationError):
+            Step.model_validate(self._live({'open': {**self.OPEN, **field}}))
+        Step.model_validate(
+            self._live({'open': self.OPEN, 'uplink': [{**self.OPEN, **field}]})
+        )
+
+    def test_a_later_request_that_is_named_has_a_name(self):
+        with pytest.raises(ValidationError):
+            Step.model_validate(
+                self._live({'open': self.OPEN, 'uplink': [{**self.OPEN, 'id': ''}]})
+            )
+
+    def test_a_subscription_names_its_task(self):
+        with pytest.raises(ValidationError, match='id'):
+            Step.model_validate(self._live({'open': {'subscribe': {'lastSeenGeneration': 3}}}))
+
+    def test_it_needs_the_request_that_opens_it(self):
+        with pytest.raises(ValidationError, match='open'):
+            Step.model_validate(self._live({'uplink': [self.OPEN]}))
+
+    def test_an_empty_uplink_is_rejected(self):
+        with pytest.raises(ValidationError):
+            Step.model_validate(self._live({'open': self.OPEN, 'uplink': []}))
+
+    def test_a_misspelled_member_is_rejected(self):
+        with pytest.raises(ValidationError):
+            Step.model_validate(self._live({'open': self.OPEN, 'uplinks': [self.OPEN]}))
+        with pytest.raises(ValidationError):
+            Step.model_validate(self._live({
+                'open': self.OPEN, 'uplink': [{**self.OPEN, 'after_events': {}}],
+            }))
+
+    @pytest.mark.parametrize(('field', 'value'), [
+        ('expect', {'status': 200}),
+        ('params', {'id': 'T1'}),
+        ('repeat', {'until': 'status.state == X'}),
+        ('delay_ms', 100),
+        ('min_duration_ms', 100),
+        ('background', True),
+        ('expect_parsed', {'id': 'T1'}),
+        ('assertions', [{'source': '{{a.response}}', 'match': {'type': 'object'}}]),
+    ])
+    def test_fields_of_other_step_kinds_are_rejected(self, field, value):
+        with pytest.raises(ValidationError):
+            Step.model_validate(self._live(**{field: value}))
+
+    def test_a_refused_exchange_is_sent_nothing_further(self):
+        with pytest.raises(ValidationError, match='either `expect_error` or `live.uplink`'):
+            Step.model_validate(self._live(
+                {'open': self.OPEN, 'uplink': [self.OPEN]},
+                expect_error={'error_type': 'UnsupportedOperationError'},
+            ))
+
+    def test_a_refusal_and_a_stream_cannot_both_be_expected(self):
+        with pytest.raises(ValidationError, match='either `expect_error` or `expect_stream`'):
+            Step.model_validate(self._live(
+                expect_error={'error_type': 'UnsupportedOperationError'},
+                expect_stream={'min_count': 1},
+            ))
+
+    def test_it_is_one_kind_of_step_and_not_two(self):
+        with pytest.raises(ValidationError, match='exactly one kind'):
+            Step.model_validate(self._live(operation='send_message'))
+
+    def test_the_test_has_to_declare_the_runner_requirement(self):
+        with pytest.raises(ValidationError, match='live_stream'):
+            Test.model_validate(_test(steps=[self._live()]))
+        assert self._a_test(self._live()).runner_requirements == [
+            RunnerRequirement.LIVE_STREAM
+        ]
+
+    def test_a_version_override_is_still_refused_on_the_other_kinds(self):
+        with pytest.raises(ValidationError, match='operation step or a live step'):
+            Step.model_validate({
+                'id': 'w', 'expect_webhook': {'task_id': 'T1'}, 'a2a_version': '1.0',
+            })
 
 
 class TestProtocolVersionsPrecondition:

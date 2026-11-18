@@ -19,7 +19,9 @@ from test_suite.acts.dispatcher.params import adapt
 from test_suite.acts.schema import HttpMethod, Operation, TransportBinding
 from test_suite.acts.wire_map import (
     REST_CONTENT_TYPE,
+    OperationBinding,
     binding_for_operation,
+    declared_version,
     error_for_reason,
     resolve_operation,
 )
@@ -38,7 +40,9 @@ class RestDispatcher(HttpDispatcher):
 
     @staticmethod
     def _split_params(
-        operation: Operation, params: Mapping[str, Any] | None
+        binding: OperationBinding,
+        operation: Operation,
+        params: Mapping[str, Any] | None,
     ) -> tuple[str, dict[str, Any]]:
         """Fill the path template, returning the path and the leftover params.
 
@@ -46,9 +50,7 @@ class RestDispatcher(HttpDispatcher):
         the path *and* flattens the nested config into the body, so splitting
         before reshaping would look for ``taskId`` in the wrong place.
         """
-        return binding_for_operation(operation).format_path(
-            adapt(operation, params)
-        )
+        return binding.format_path(adapt(operation, params))
 
     async def dispatch(
         self,
@@ -59,18 +61,19 @@ class RestDispatcher(HttpDispatcher):
         on_sent: Callable[[], None] | None = None,
     ) -> WireResponse:
         operation = resolve_operation(operation, params)
-        binding = binding_for_operation(operation)
+        sent = self._headers(headers, content_type=self.content_type)
+        binding = binding_for_operation(operation, declared_version(sent))
         if binding.http_only:
             return await self._get_agent_card(headers)
 
-        path, rest = self._split_params(operation, params)
+        path, rest = self._split_params(binding, operation, params)
         query = rest if binding.rest_method in _QUERY_METHODS else None
         body = None if binding.rest_method in _QUERY_METHODS else rest
 
         response = await self._request(
             binding.rest_method.value,
             self._url(path),
-            headers=self._headers(headers, content_type=self.content_type),
+            headers=sent,
             params=_stringify(query) if query else None,
             json=body if body else None,
             on_sent=on_sent,
@@ -127,12 +130,16 @@ class RestDispatcher(HttpDispatcher):
         headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         self._streaming_binding(operation)
-        binding = binding_for_operation(operation)
-        path, rest = self._split_params(operation, params)
+        binding = binding_for_operation(
+            operation, declared_version(self._headers(headers))
+        )
+        path, rest = self._split_params(binding, operation, params)
+        in_query = binding.rest_method in _QUERY_METHODS
         async for event in self._stream_sse(
             binding.rest_method.value,
             path,
-            payload=rest,
+            payload=None if in_query else rest,
+            query=_stringify(rest) if in_query and rest else None,
             headers=headers,
         ):
             yield event

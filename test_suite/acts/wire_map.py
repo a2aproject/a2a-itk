@@ -35,7 +35,7 @@ a row to accommodate one is not a fix.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -44,7 +44,11 @@ from test_suite.acts.schema import (
     HttpMethod,
     Operation,
     TransportBinding,
+    parse_spec_version,
 )
+
+#: The header in which a request says which A2A version it is written in.
+VERSION_HEADER = 'A2A-Version'
 
 
 #: Media type for JSON-RPC requests and responses (A2A §9.1).
@@ -203,8 +207,10 @@ _OPERATIONS: dict[Operation, OperationBinding] = {
         grpc_request='StreamRequest',
         grpc_response='StreamResponse',
     ),
-    # ACTS §4.1 says `GET` here. A2A §5.3 and §11.3.2 both say POST, and a GET
-    # cannot carry the subscribe body, so POST it is.
+    # The A2A 1.0 row. A2A 1.0 disagrees with itself here: its method tables
+    # say POST and the HTTP rule in its proto says GET. This follows the
+    # tables, as the rest of the map does. A2A 1.1 corrected them to GET; see
+    # `_FROM_1_1`.
     Operation.SUBSCRIBE_TO_TASK: OperationBinding(
         jsonrpc_method='SubscribeToTask',
         grpc_method='SubscribeToTask',
@@ -272,7 +278,18 @@ _OPERATIONS: dict[Operation, OperationBinding] = {
     ),
 }
 
-#: Abstract operation -> its wire binding on all three transports.
+#: Rows that are different from A2A 1.1 on. A request written for 1.1 or a
+#: newer version uses the row given here in place of the one above.
+_FROM_1_1: Mapping[Operation, OperationBinding] = MappingProxyType({
+    # The A2A 1.1 method tables agree with the proto: GET. Every request field
+    # other than the task id is then a query parameter.
+    Operation.SUBSCRIBE_TO_TASK: replace(
+        _OPERATIONS[Operation.SUBSCRIBE_TO_TASK], rest_method=HttpMethod.GET
+    ),
+})
+
+#: Abstract operation -> its wire binding on all three transports, as A2A 1.0
+#: has it. :func:`binding_for_operation` gives the row for another version.
 OPERATIONS: Mapping[Operation, OperationBinding] = MappingProxyType(_OPERATIONS)
 
 
@@ -439,9 +456,37 @@ def http_status_for_grpc(grpc_status: str) -> int:
     return GRPC_STATUS_TO_HTTP.get(grpc_status, 500)
 
 
-def binding_for_operation(operation: Operation) -> OperationBinding:
-    """The wire binding for ``operation``. Total over the enum."""
-    return OPERATIONS[operation]
+def binding_for_operation(
+    operation: Operation, version: str | None = None
+) -> OperationBinding:
+    """The wire binding for ``operation``. Total over the enum.
+
+    ``version`` is the A2A version the request is written for, as
+    ``Major.Minor``. A row that changed in or before that version is given as
+    that version has it. Without a version, or with one that is not a
+    ``Major.Minor`` string, the row is the A2A 1.0 one.
+    """
+    binding = OPERATIONS[operation]
+    if version is None:
+        return binding
+    try:
+        written_for = parse_spec_version(version)
+    except ValueError:
+        return binding
+    return _FROM_1_1.get(operation, binding) if written_for >= (1, 1) else binding
+
+
+def declared_version(headers: Mapping[str, str] | None) -> str | None:
+    """The A2A version a request declares in its `A2A-Version` header.
+
+    The header is what tells the agent how to read the request, so it is also
+    what decides how the request is written. Pass the headers as they are
+    sent, so that the two cannot disagree.
+    """
+    for name, value in (headers or {}).items():
+        if name.lower() == VERSION_HEADER.lower():
+            return value
+    return None
 
 
 def resolve_operation(
