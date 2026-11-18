@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 from test_suite.acts.dispatcher import DispatchError, RestDispatcher
-from test_suite.acts.dispatcher.base import StreamNotOpened
+from test_suite.acts.dispatcher.base import MalformedResponse, StreamNotOpened
 from test_suite.acts.schema import (
     ErrorType,
     HttpMethod,
@@ -564,3 +564,136 @@ class TestSubscribeVerbByVersion:
         with pytest.raises(StreamNotOpened) as refused:
             asyncio.run(run())
         assert refused.value.response.error.error_type is ErrorType.TASK_NOT_FOUND
+
+
+class _MustNotBeRead(httpx.AsyncByteStream):
+    """A response body that fails the test if any of it is read."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def __aiter__(self):
+        raise AssertionError('the event stream was read')
+        yield b''  # pragma: no cover - makes this an async generator
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class TestLiveExchange:
+    """`SendLiveMessage` over REST: `POST /message:live` opens the exchange
+    and is answered with the event stream that stays open, and every later
+    request is one more `POST /message:live`, answered with the task."""
+
+    OPENING = {'sendMessage': {'message': {'messageId': 'm1', 'role': 'ROLE_USER'}}}
+    LATER = {'sendMessage': {'message': {'messageId': 'm2', 'taskId': 'T1'}}}
+    TASK = {'id': 'T1', 'status': {'state': 'TASK_STATE_WORKING'}}
+
+    @staticmethod
+    def serving(later: Callable[[httpx.Request], httpx.Response]):
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            body = json.loads(request.content)
+            if 'taskId' in body.get('sendMessage', {}).get('message', {}):
+                return later(request)
+            return httpx.Response(
+                200,
+                text='data: {"task": {"id": "T1"}}\n\ndata: {"statusUpdate": {"taskId": "T1"}}\n\n',
+                headers={'Content-Type': 'text/event-stream'},
+            )
+
+        handler.seen = seen  # type: ignore[attr-defined]
+        return handler
+
+    def acknowledging(self):
+        return self.serving(lambda request: httpx.Response(200, json=self.TASK))
+
+    def test_nothing_is_sent_until_the_downlink_is_read(self):
+        handler = self.acknowledging()
+        make(handler).live(self.OPENING, {'A2A-Version': '1.1'})
+        assert handler.seen == []
+
+    def test_the_opening_request_is_a_post_answered_with_the_events(self):
+        handler = self.acknowledging()
+
+        async def run():
+            exchange = make(handler).live(self.OPENING, {'A2A-Version': '1.1'})
+            return [event async for event in exchange.events()]
+
+        events = asyncio.run(run())
+        (request,) = handler.seen
+        assert request.method == 'POST'
+        assert request.url.path == '/message:live'
+        # The body is the request itself; this binding has no envelope.
+        assert json.loads(request.content) == self.OPENING
+        assert request.headers['a2a-version'] == '1.1'
+        assert request.headers['accept'].startswith('text/event-stream')
+        assert [event.data for event in events] == [
+            {'task': {'id': 'T1'}}, {'statusUpdate': {'taskId': 'T1'}},
+        ]
+
+    def test_a_later_request_is_a_post_of_its_own_answered_with_the_task(self):
+        handler = self.acknowledging()
+
+        async def run():
+            dispatcher = make(handler, default_headers={'Authorization': 'Bearer t'})
+            exchange = dispatcher.live(self.OPENING, {'A2A-Version': '1.1'})
+            return await exchange.send(self.LATER)
+
+        answer = asyncio.run(run())
+        (request,) = handler.seen
+        assert request.headers['authorization'] == 'Bearer t'
+        assert request.method == 'POST'
+        assert request.url.path == '/message:live'
+        assert json.loads(request.content) == self.LATER
+        assert request.headers['a2a-version'] == '1.1'
+        assert request.headers['accept'].startswith('text/event-stream')
+        assert answer.status == 200
+        assert answer.error is None
+        assert answer.payload == self.TASK
+
+    def test_a_later_request_answered_with_an_event_stream_is_refused_unread(self):
+        body = _MustNotBeRead()
+        handler = self.serving(
+            lambda request: httpx.Response(
+                200, headers={'Content-Type': 'text/event-stream'}, stream=body
+            )
+        )
+
+        async def run():
+            return await make(handler).live(self.OPENING).send(self.LATER)
+
+        with pytest.raises(MalformedResponse, match='with an event stream'):
+            asyncio.run(run())
+        assert body.closed
+
+    def test_a_later_request_answered_with_an_error_is_returned_with_it(self):
+        handler = self.serving(
+            lambda request: httpx.Response(
+                404,
+                json=status_error(404, 'NOT_FOUND', 'no such task', reason='TASK_NOT_FOUND'),
+            )
+        )
+
+        async def run():
+            return await make(handler).live(self.OPENING).send(self.LATER)
+
+        answer = asyncio.run(run())
+        assert answer.status == 404
+        assert answer.error.error_type is ErrorType.TASK_NOT_FOUND
+
+    def test_an_agent_that_refuses_to_open_the_exchange(self):
+        handler = replying(
+            status_error(400, 'FAILED_PRECONDITION', reason='UNSUPPORTED_OPERATION'),
+            status=400,
+        )
+
+        async def run():
+            exchange = make(handler).live(self.OPENING)
+            return [event async for event in exchange.events()]
+
+        with pytest.raises(StreamNotOpened) as refused:
+            asyncio.run(run())
+        assert refused.value.response.error.error_type is ErrorType.UNSUPPORTED_OPERATION

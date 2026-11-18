@@ -569,10 +569,6 @@ class TestUpstreamFixesArePinned:
         # is absent from `RUNNER_CAPABILITIES` without being unarrangeable.
         cannot_arrange = {
             RunnerRequirement.WEBHOOK_ENDPOINT,
-            # The runner does not drive a live exchange yet. The ten tests
-            # that need one are skipped, which is what a runner without the
-            # requirement owes them.
-            RunnerRequirement.LIVE_STREAM,
         }
         # A requirement in both lists is a contradiction: `auth_credentials`
         # sat in `cannot_arrange` after the harness gained it, so declaring it

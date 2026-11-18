@@ -21,6 +21,7 @@ from httpx_sse import EventSource, SSEError
 
 from test_suite.acts.dispatcher.base import (
     DispatchError,
+    LiveExchange,
     MalformedResponse,
     Dispatcher,
     StreamEvent,
@@ -55,6 +56,12 @@ REQUEST_WRITTEN = 'send_request_body.complete'
 #: through the suite on the strength of replies it never made. A 3xx is a
 #: result like any other and is handed to the assertions as one.
 FOLLOW_REDIRECTS = False
+
+
+#: What a streaming call says it accepts. A refusal (`CORE-CAP-002`,
+#: `STREAM-SUB-003`) is an ordinary error document, not a stream. Admitting the
+#: JSON types lets a SUT that honours Accept send it rather than a 406.
+STREAM_ACCEPT = f'{SSE_CONTENT_TYPE}, {JSONRPC_CONTENT_TYPE}, {REST_CONTENT_TYPE}'
 
 
 def parse_json_body(response: httpx.Response) -> tuple[Any, str]:
@@ -350,10 +357,7 @@ class HttpDispatcher(Dispatcher):
         merged = self._headers(
             headers,
             content_type=self.content_type,
-            # A refusal (`CORE-CAP-002`, `STREAM-SUB-003`) is an ordinary error
-            # document, not a stream. Admitting the JSON types lets a SUT that
-            # honours Accept send it rather than a 406.
-            accept=SSE_CONTENT_TYPE+', '+JSONRPC_CONTENT_TYPE+', '+REST_CONTENT_TYPE,
+            accept=STREAM_ACCEPT,
             defaults=defaults,
         )
         if content is None and payload is not None:
@@ -401,6 +405,60 @@ class HttpDispatcher(Dispatcher):
             # replied with the wrong Content-Type — an answer, not a failure
             # to get one.
             raise MalformedResponse(str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise DispatchError(f'{type(exc).__name__}: {exc}') from exc
+
+    # -- live exchanges -----------------------------------------------------
+
+    def live(
+        self,
+        request: Mapping[str, Any],
+        headers: Mapping[str, str] | None = None,
+    ) -> LiveExchange:
+        return _HttpLiveExchange(self, request, headers)
+
+    async def _live_uplink(
+        self, request: Mapping[str, Any], headers: Mapping[str, str] | None
+    ) -> WireResponse:
+        """Send one later request of a live exchange, as a call of its own.
+
+        Implemented by each subclass with :meth:`_one_document`.
+        """
+        raise NotImplementedError
+
+    async def _one_document(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: Any,
+        headers: Mapping[str, str] | None,
+    ) -> tuple[httpx.Response, Any, str]:
+        """Make a call that has to be answered with one document.
+
+        Returns the response, its parsed body and the body as text. A later
+        request of a live exchange is the same operation as the one that
+        opened it, so it is sent with the same headers, and only what the SUT
+        answers tells the two apart. An answer that is an event stream is
+        refused here without being read: the stream would stay open for as
+        long as the SUT keeps the exchange it has started.
+        """
+        merged = self._headers(
+            headers, content_type=self.content_type, accept=STREAM_ACCEPT
+        )
+        try:
+            async with self._client.stream(
+                method, self._url(path), headers=merged, content=json.dumps(payload)
+            ) as response:
+                if self._is_sse(response):
+                    raise MalformedResponse(
+                        'the SUT answered a later request of a live exchange '
+                        'with an event stream; it is answered with the current '
+                        'task and no events'
+                    )
+                await response.aread()
+                parsed, text = parse_json_body(response)
+                return response, parsed, text
         except httpx.HTTPError as exc:
             raise DispatchError(f'{type(exc).__name__}: {exc}') from exc
 
@@ -465,3 +523,29 @@ class HttpDispatcher(Dispatcher):
                 f'{operation.value} is not a streaming operation; '
                 f'use dispatch()'
             )
+
+
+class _HttpLiveExchange(LiveExchange):
+    """A live exchange over an HTTP binding.
+
+    The response to the opening call is the downlink and stays open. Each
+    later request is a short call of its own to the same operation.
+    """
+
+    def __init__(
+        self,
+        dispatcher: HttpDispatcher,
+        request: Mapping[str, Any],
+        headers: Mapping[str, str] | None,
+    ) -> None:
+        self._dispatcher = dispatcher
+        self._opening = request
+        self._headers = headers
+
+    def events(self) -> AsyncIterator[StreamEvent]:
+        return self._dispatcher.stream(
+            Operation.SEND_LIVE_MESSAGE, self._opening, self._headers
+        )
+
+    async def send(self, request: Mapping[str, Any]) -> WireResponse | None:
+        return await self._dispatcher._live_uplink(request, self._headers)

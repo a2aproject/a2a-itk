@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from pathlib import Path
 from typing import Any, Iterator
 
 import grpc
 import httpx
 import pytest
+from google.protobuf import unknown_fields
 from google.protobuf.any_pb2 import Any as ProtoAny
 from google.rpc import error_details_pb2, status_pb2
 
@@ -25,16 +27,24 @@ from test_suite.acts.dispatcher import (
     GrpcDispatcher,
     UnsupportedByBinding,
 )
-from test_suite.acts.dispatcher.base import MalformedResponse
+from test_suite.acts import load_suite
+from test_suite.acts.dispatcher.base import (
+    ExchangeEnded,
+    MalformedResponse,
+    StreamNotOpened,
+)
 from test_suite.acts.dispatcher.grpc import STATUS_DETAILS_KEY, _to_dict
+from test_suite.acts.dispatcher.params import stream_request
+from test_suite.acts.runner import Outcome, Runner
 from test_suite.acts.schema import (
     ErrorType,
     HttpMethod,
     Operation,
     RawBlock,
+    RunnerRequirement,
     TransportBinding,
 )
-from test_suite.acts.wire_map import GRPC_SERVICE
+from test_suite.acts.wire_map import GRPC_SERVICE, binding_for_error
 
 
 def error_trailers(
@@ -806,3 +816,481 @@ class TestStreamRawIsRefused:
 
         with pytest.raises(UnsupportedByBinding, match='raw-request form'):
             asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Live exchanges
+# ---------------------------------------------------------------------------
+
+#: The member of a `StreamRequest` that carries a message, by the name the
+#: generated stub gives it.
+LIVE_SEND = next(
+    member.name
+    for member in a2a_pb2.StreamRequest.DESCRIPTOR.oneofs_by_name['payload'].fields
+    if member.message_type.name == 'SendMessageRequest'
+)
+
+
+def _said(message: a2a_pb2.Message) -> str:
+    return ''.join(part.text for part in message.parts).strip()
+
+
+class LiveAgent(a2a_pb2_grpc.A2AServiceServicer):
+    """An agent that serves the live exchange over gRPC.
+
+    It plays `tck-live-echo` and `tck-live-reject` on the exchange, and
+    serves the two unary operations the live tests use beside it, with
+    `tck-multi-turn` for a task outside the exchange.
+
+    ``on_rejection`` says what it does with a later request it has to reject:
+    `'reject'` reports it as a `StreamError` and keeps the exchange open,
+    which is what A2A asks. `'close'` ends the exchange, and `'abort'` ends
+    it with an error status. `'apply'` reports it and applies the request all
+    the same.
+    """
+
+    def __init__(self, *, streaming: bool = True, on_rejection: str = 'reject') -> None:
+        self.streaming = streaming
+        self.on_rejection = on_rejection
+        self.tasks: dict[str, a2a_pb2.Task] = {}
+        #: Every request received on a live exchange, in order.
+        self.received: list[a2a_pb2.StreamRequest] = []
+        self.metadata: list[tuple[str, str]] = []
+        #: The agent's side of an exchange is over: it ended the exchange, or
+        #: the client did. A client that hangs up ends the agent's requests,
+        #: or cancels the agent while it is sending an event.
+        self.ended = asyncio.Event()
+
+    # -- the task store ---------------------------------------------------------
+
+    def _create(self) -> a2a_pb2.Task:
+        task = a2a_pb2.Task(
+            id=f'task-{len(self.tasks) + 1}', context_id='ctx-1', generation=1
+        )
+        task.status.state = a2a_pb2.TASK_STATE_SUBMITTED
+        self.tasks[task.id] = task
+        return task
+
+    def _move(self, task: a2a_pb2.Task, state: int, text: str = '') -> a2a_pb2.StreamResponse:
+        """Change the task's status, and return the event that reports it."""
+        task.generation += 1
+        task.status.Clear()
+        task.status.state = state
+        if text:
+            task.status.message.message_id = f'{task.id}-{task.generation}'
+            task.status.message.role = a2a_pb2.ROLE_AGENT
+            task.status.message.parts.add(text=text)
+        event = a2a_pb2.StreamResponse()
+        event.status_update.task_id = task.id
+        event.status_update.context_id = task.context_id
+        event.status_update.status.CopyFrom(task.status)
+        event.status_update.generation = task.generation
+        return event
+
+    async def _refuse(self, context, error: ErrorType, message: str) -> None:
+        binding = binding_for_error(error)
+        code = grpc.StatusCode[binding.grpc_status]
+        context.set_trailing_metadata(error_trailers(code.value[0], binding.reason, message))
+        await context.abort(code, message)
+
+    # -- unary operations ----------------------------------------------------------
+
+    async def SendMessage(self, request, context):
+        message = request.message
+        if message.task_id:
+            task = self.tasks.get(message.task_id)
+            if task is None:
+                await self._refuse(context, ErrorType.TASK_NOT_FOUND, 'no such task')
+            done = _said(message).lower() == 'done'
+            self._move(
+                task,
+                a2a_pb2.TASK_STATE_COMPLETED if done else a2a_pb2.TASK_STATE_INPUT_REQUIRED,
+            )
+        else:
+            task = self._create()
+            self._move(task, a2a_pb2.TASK_STATE_WORKING)
+            self._move(task, a2a_pb2.TASK_STATE_INPUT_REQUIRED)
+        return a2a_pb2.SendMessageResponse(task=task)
+
+    async def GetTask(self, request, context):
+        task = self.tasks.get(request.id)
+        if task is None:
+            await self._refuse(context, ErrorType.TASK_NOT_FOUND, 'no such task')
+        return task
+
+    # -- the live exchange -----------------------------------------------------------
+
+    async def SendLiveMessage(self, request_iterator, context):
+        self.metadata = [
+            (key, value) for key, value in context.invocation_metadata()
+            if isinstance(value, str)
+        ]
+        if not self.streaming:
+            await self._refuse(
+                context, ErrorType.UNSUPPORTED_OPERATION, 'streaming is not supported'
+            )
+        try:
+            async for event in self._exchange(request_iterator, context):
+                yield event
+        finally:
+            self.ended.set()
+
+    async def _exchange(self, request_iterator, context):
+        """The events of one live exchange, in answer to its requests."""
+        opening = await request_iterator.__anext__()
+        self.received.append(opening)
+        kind = opening.WhichOneof('payload')
+
+        if kind == 'subscribe':
+            task = self.tasks.get(opening.subscribe.id)
+            if task is None:
+                await self._refuse(context, ErrorType.TASK_NOT_FOUND, 'no such task')
+            yield a2a_pb2.StreamResponse(task=task)
+            async for later in request_iterator:
+                self.received.append(later)
+            return
+
+        if kind != LIVE_SEND:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'not a request this agent knows')
+
+        task = self._create()
+        declines = _said(getattr(opening, LIVE_SEND).message).startswith('tck-live-reject')
+        yield a2a_pb2.StreamResponse(task=task)
+        yield self._move(task, a2a_pb2.TASK_STATE_WORKING)
+
+        answered = 0
+        async for later in request_iterator:
+            self.received.append(later)
+            rejection = self._rejection_of(later, task, declines)
+            if rejection is not None:
+                if self.on_rejection == 'close':
+                    return
+                if self.on_rejection == 'abort':
+                    await context.abort(
+                        grpc.StatusCode.INVALID_ARGUMENT, 'not a request for this exchange'
+                    )
+                yield rejection
+                if self.on_rejection != 'apply':
+                    continue
+                if later.WhichOneof('payload') != LIVE_SEND:
+                    continue
+                named = self.tasks.get(getattr(later, LIVE_SEND).message.task_id)
+                if named is not None and named is not task:
+                    self._move(named, a2a_pb2.TASK_STATE_COMPLETED)
+                    continue
+
+            if _said(getattr(later, LIVE_SEND).message).lower() == 'done':
+                yield self._move(task, a2a_pb2.TASK_STATE_COMPLETED)
+                return
+            answered += 1
+            yield self._move(task, a2a_pb2.TASK_STATE_WORKING, f'live-echo:{answered}')
+
+    def _rejection_of(
+        self, request: a2a_pb2.StreamRequest, task: a2a_pb2.Task, declines: bool
+    ) -> a2a_pb2.StreamResponse | None:
+        """The `StreamError` for a later request this agent does not take."""
+        rejection = a2a_pb2.StreamResponse()
+        rejection.error.task_id = task.id
+        kind = request.WhichOneof('payload')
+        if kind is None:
+            rejection.error.code = 'UNIMPLEMENTED'
+            rejection.error.message = 'a request of a kind this agent does not know'
+            return rejection
+        if kind == 'subscribe':
+            rejection.error.code = 'FAILED_PRECONDITION'
+            rejection.error.message = 'subscribe is only valid as the first request'
+            return rejection
+        message = getattr(request, LIVE_SEND).message
+        rejection.error.reference_id = message.message_id
+        if message.task_id != task.id:
+            rejection.error.code = 'INVALID_ARGUMENT'
+            rejection.error.message = 'the message names another task'
+            return rejection
+        if declines and _said(message).startswith('reject'):
+            rejection.error.code = 'UNAVAILABLE'
+            rejection.error.message = 'the agent declined this message, as asked'
+            return rejection
+        return None
+
+
+def live(agent: LiveAgent, coro_factory):
+    """Run one coroutine against ``agent``, given a dispatcher for it."""
+    return call(agent, coro_factory)
+
+
+def message(text: str, **fields: Any) -> dict:
+    """The JSON form of a `StreamRequest` that carries one message."""
+    return stream_request('send_message', {
+        'message': {
+            'messageId': fields.pop('message_id', f'm-{text}'),
+            'role': 'ROLE_USER',
+            'parts': [{'text': text}],
+            **fields,
+        },
+    })
+
+
+class TestLiveExchange:
+    """`SendLiveMessage` over gRPC: one bidirectional stream. Every request
+    is a message on it, and none has a response of its own."""
+
+    def test_requests_are_sent_while_the_downlink_is_read(self):
+        """The second and third request are written only after events that
+        the agent sends in answer to the ones before them have been read."""
+        agent = LiveAgent()
+
+        async def exchange_of(dispatcher):
+            exchange = dispatcher.live(message('tck-live-echo'), {'A2A-Version': '1.1'})
+            events = []
+            async for event in exchange.events():
+                events.append(event.data)
+                if len(events) == 1:
+                    task_id = event.data['task']['id']
+                elif len(events) == 2:
+                    assert await exchange.send(message('first', taskId=task_id)) is None
+                elif len(events) == 3:
+                    assert await exchange.send(message('done', taskId=task_id)) is None
+            return events
+
+        events = live(agent, exchange_of)
+        assert [next(iter(event)) for event in events] == [
+            'task', 'statusUpdate', 'statusUpdate', 'statusUpdate',
+        ]
+        assert events[2]['statusUpdate']['status']['message']['parts'] == [
+            {'text': 'live-echo:1'}
+        ]
+        assert events[3]['statusUpdate']['status']['state'] == 'TASK_STATE_COMPLETED'
+        assert [_said(getattr(r, LIVE_SEND).message) for r in agent.received] == [
+            'tck-live-echo', 'first', 'done',
+        ]
+        assert ('a2a-version', '1.1') in agent.metadata
+
+    def test_a_request_of_a_kind_no_version_defines_reaches_the_agent_unnamed(self):
+        """The agent gets a `StreamRequest` with no payload it can name, and a
+        field its proto does not have: what a request from a later minor
+        version looks like to it."""
+        agent = LiveAgent()
+
+        async def exchange_of(dispatcher):
+            exchange = dispatcher.live(message('tck-live-echo'))
+            events = []
+            async for event in exchange.events():
+                events.append(event.data)
+                if len(events) == 2:
+                    await exchange.send(stream_request('unrecognized'))
+                elif len(events) == 3:
+                    await exchange.send(message('done', taskId=events[0]['task']['id']))
+            return events
+
+        events = live(agent, exchange_of)
+        unknown = agent.received[1]
+        assert unknown.WhichOneof('payload') is None
+        assert [f.field_number for f in unknown_fields.UnknownFieldSet(unknown)] == [15999]
+        assert events[2] == {'error': {
+            'taskId': events[0]['task']['id'],
+            'code': 'UNIMPLEMENTED',
+            'message': 'a request of a kind this agent does not know',
+        }}
+
+    def test_an_agent_that_refuses_to_open_the_exchange(self):
+        async def exchange_of(dispatcher):
+            exchange = dispatcher.live(stream_request('subscribe', {'id': 'no-such-task'}))
+            return [event async for event in exchange.events()]
+
+        with pytest.raises(StreamNotOpened) as refused:
+            live(LiveAgent(), exchange_of)
+        error = refused.value.response.error
+        assert error.error_type is ErrorType.TASK_NOT_FOUND
+        assert error.status == 'NOT_FOUND'
+        assert 'refused the live exchange' in str(refused.value)
+
+    def test_closing_the_downlink_ends_the_exchange_for_the_agent(self):
+        """The sending side is kept open for as long as the downlink is
+        read, so the agent is still waiting for requests. Closing the
+        downlink cancels the call, which is how the agent learns that the
+        client is gone."""
+        agent = LiveAgent()
+
+        async def exchange_of(dispatcher):
+            exchange = dispatcher.live(message('tck-live-echo'))
+            downlink = exchange.events()
+            first = await anext(downlink)
+            await downlink.aclose()
+            await asyncio.wait_for(agent.ended.wait(), 10)
+            return first.data
+
+        assert 'task' in live(agent, exchange_of)
+
+    def test_a_request_after_the_agent_has_ended_the_exchange(self):
+        agent = LiveAgent()
+
+        async def exchange_of(dispatcher):
+            exchange = dispatcher.live(message('tck-live-echo'))
+            events = []
+            async for event in exchange.events():
+                events.append(event.data)
+                if len(events) == 2:
+                    await exchange.send(message('done', taskId=events[0]['task']['id']))
+            # The agent completed the task and closed the stream.
+            with pytest.raises(ExchangeEnded):
+                await exchange.send(message('too late', taskId=events[0]['task']['id']))
+            await exchange.aclose()
+
+        live(agent, exchange_of)
+
+    def test_a_request_before_the_exchange_is_open(self):
+        async def exchange_of(dispatcher):
+            exchange = dispatcher.live(message('tck-live-echo'))
+            with pytest.raises(DispatchError, match='not open yet'):
+                await exchange.send(message('early'))
+
+        live(LiveAgent(), exchange_of)
+
+    def test_a_request_that_does_not_fit_the_message_is_refused_here(self):
+        async def exchange_of(dispatcher):
+            exchange = dispatcher.live({'sendMesage': {}})
+            return [event async for event in exchange.events()]
+
+        with pytest.raises(DispatchError, match='does not fit StreamRequest'):
+            live(LiveAgent(), exchange_of)
+
+
+class TestTheLiveCorpusTestsOverGrpc:
+    """The corpus tests of the live exchange, run by the runner over gRPC.
+
+    Four of them are for gRPC only, because they send a later request that
+    an HTTP binding has no way to relate to its exchange. This is where
+    those run against an agent that does what they ask, and against agents
+    that do not.
+    """
+
+    CORPUS = Path(__file__).resolve().parent.parent / 'scenarios' / 'acts' / 'suite.acts.yaml'
+
+    def run(self, test_id: str, agent: LiveAgent):
+        test = load_suite(self.CORPUS).by_id(test_id).test
+
+        def run_with(dispatcher):
+            runner = Runner(
+                dispatcher,
+                spec_version='1.1',
+                agent_card={'capabilities': {'streaming': agent.streaming}},
+                capabilities=[RunnerRequirement.LIVE_STREAM],
+            )
+            return runner.run_test(test)
+
+        return live(agent, run_with)
+
+    @pytest.mark.parametrize('test_id', [
+        'STREAM-LIVE-001', 'STREAM-LIVE-002',
+        # For gRPC only.
+        'STREAM-LIVE-005', 'STREAM-LIVE-006', 'STREAM-LIVE-007', 'STREAM-LIVE-008',
+        'STREAM-LIVE-010',
+    ])
+    def test_an_agent_that_conforms_passes(self, test_id):
+        result = self.run(test_id, LiveAgent())
+        assert result.result is Outcome.PASS, result.failure
+        assert all(step.checks > 0 for step in result.steps)
+
+    def test_an_agent_without_streaming_refuses_the_exchange(self):
+        result = self.run('STREAM-LIVE-009', LiveAgent(streaming=False))
+        assert result.result is Outcome.PASS, result.failure
+
+    def test_an_agent_that_opens_an_exchange_it_should_refuse_is_caught(self):
+        """The card says no streaming, and the agent serves the exchange."""
+        agent = LiveAgent()
+        test = load_suite(self.CORPUS).by_id('STREAM-LIVE-009').test
+
+        def run_with(dispatcher):
+            runner = Runner(
+                dispatcher, spec_version='1.1',
+                agent_card={'capabilities': {'streaming': False}},
+                capabilities=[RunnerRequirement.LIVE_STREAM],
+            )
+            return runner.run_test(test)
+
+        result = live(agent, run_with)
+        # Its first event shows the exchange opened. The agent keeps it open,
+        # and the runner does not wait for more.
+        assert result.result is Outcome.FAIL
+        assert result.failure.message == (
+            'expected an error, but the stream opened and produced 1 event(s)'
+        )
+
+    @pytest.mark.parametrize('test_id', ['STREAM-LIVE-005', 'STREAM-LIVE-007'])
+    def test_an_agent_that_ends_the_exchange_at_a_rejection_is_caught(self, test_id):
+        """The request after the rejected one is held for the `StreamError`,
+        which never comes: the agent closed the downlink in its place."""
+        result = self.run(test_id, LiveAgent(on_rejection='close'))
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'exchange'
+        assert result.failure.assertion_path == "uplink['after-rejection']"
+        assert result.failure.message == (
+            "uplink request 'after-rejection' was never sent: no downlink event "
+            "matched its `after_event` (2 event(s) received)"
+        )
+
+    @pytest.mark.parametrize('test_id', ['STREAM-LIVE-005', 'STREAM-LIVE-007'])
+    def test_an_agent_that_fails_the_exchange_at_a_rejection_is_caught(self, test_id):
+        """It answers the rejected request by ending the call with an error
+        status. That is the agent's doing and not a broken run, so it fails
+        the test and is not reported as an error."""
+        result = self.run(test_id, LiveAgent(on_rejection='abort'))
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'exchange'
+        assert result.failure.message == (
+            'the SUT ended the live exchange after 2 event(s) with '
+            'INVALID_ARGUMENT: not a request for this exchange'
+        )
+
+    def test_a_connection_lost_mid_exchange_is_not_held_against_the_agent(self):
+        """It reads as `UNAVAILABLE`. The run broke; the agent said nothing."""
+        class Unreachable(LiveAgent):
+            async def _exchange(self, request_iterator, context):
+                await request_iterator.__anext__()
+                yield a2a_pb2.StreamResponse(task=self._create())
+                await context.abort(grpc.StatusCode.UNAVAILABLE, 'connection reset')
+
+        async def exchange_of(dispatcher):
+            exchange = dispatcher.live(message('tck-live-echo'), {'A2A-Version': '1.1'})
+            with pytest.raises(DispatchError) as raised:
+                [event async for event in exchange.events()]
+            return raised.value
+
+        error = live(Unreachable(), exchange_of)
+        assert not isinstance(error, MalformedResponse)
+        assert str(error) == 'the live exchange was lost after 1 event(s): connection reset'
+
+    def test_a_request_written_as_the_agent_fails_the_exchange_was_not_sent(self):
+        """The write is refused, with the status the agent ended the call
+        with or without it, depending on what reached the client first.
+        Either way the exchange was over, which is what the caller is told."""
+        class FailsAfterItsFirstEvent(LiveAgent):
+            async def _exchange(self, request_iterator, context):
+                await request_iterator.__anext__()
+                yield a2a_pb2.StreamResponse(task=self._create())
+                await context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'gone')
+
+        async def exchange_of(dispatcher):
+            exchange = dispatcher.live(message('tck-live-echo'), {'A2A-Version': '1.1'})
+            downlink = exchange.events()
+            await anext(downlink)
+            try:
+                with pytest.raises(ExchangeEnded, match='the SUT had ended the exchange'):
+                    for _ in range(2000):
+                        await exchange.send(message('more'))
+            finally:
+                await downlink.aclose()
+
+        live(FailsAfterItsFirstEvent(), exchange_of)
+
+    def test_an_agent_that_applies_a_message_for_another_task_is_caught(self):
+        """It reports the rejection, and completes the other task all the
+        same. The exchange itself looks right; the step after it reads the
+        other task."""
+        result = self.run('STREAM-LIVE-006', LiveAgent(on_rejection='apply'))
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'other-unchanged'
+        assert [(step.id, step.result) for step in result.steps] == [
+            ('other', Outcome.PASS), ('exchange', Outcome.PASS),
+            ('other-unchanged', Outcome.FAIL),
+        ]

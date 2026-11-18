@@ -17,8 +17,10 @@ Anything needing judgement belongs upstream as a spec question, not here.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from types import MappingProxyType
+from typing import Any, Final, Mapping
 
+from pyproto import a2a_pb2
 from test_suite.acts.schema import Operation
 
 
@@ -43,6 +45,47 @@ NESTED_PUSH_CONFIG_PARAM = 'pushNotificationConfig'
 #: ``tenant`` — leaving it in makes a strict ProtoJSON parser reject the whole
 #: request for an unknown field.
 OPERATION_SELECTING_PARAM = 'extended'
+
+
+def _stream_request_member(carries: str) -> str:
+    """The JSON name of the `StreamRequest` member that carries ``carries``."""
+    for field in a2a_pb2.StreamRequest.DESCRIPTOR.oneofs_by_name['payload'].fields:
+        if field.message_type.name == carries:
+            return field.json_name
+    raise LookupError(  # pragma: no cover - the proto and this module disagree
+        f'StreamRequest has no member that carries a {carries}'
+    )
+
+
+#: The kinds of request a client sends on a live exchange, under the names a
+#: test gives them, and the `StreamRequest` member each is sent as.
+#:
+#: A member is found by the type of message it carries and is not written out
+#: here. A2A renamed the member for a message between its 1.1 release
+#: candidate and the text that followed, so the name has to come from the
+#: proto the stubs were generated from. A test names the kind and not the
+#: member, and does not change with it.
+LIVE_REQUEST_MEMBERS: Final[Mapping[str, str]] = MappingProxyType({
+    'send_message': _stream_request_member('SendMessageRequest'),
+    'subscribe': _stream_request_member('SubscribeToTaskRequest'),
+})
+
+#: A `StreamRequest` member that no A2A version defines, as its JSON name and
+#: its field number. It is what a request of a kind added by a later minor
+#: version looks like to a SUT that does not know that version.
+UNRECOGNIZED_LIVE_REQUEST: Final[tuple[str, int]] = ('actsUnrecognizedRequest', 15999)
+
+
+def stream_request(kind: str, body: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """One request of a live exchange, as the JSON form of a `StreamRequest`.
+
+    ``kind`` is the name a test gives it: `send_message`, `subscribe` or
+    `unrecognized`. ``body`` is the request message the member carries, and is
+    not used for `unrecognized`.
+    """
+    if kind == 'unrecognized':
+        return {UNRECOGNIZED_LIVE_REQUEST[0]: {'note': 'a kind no A2A version defines'}}
+    return {LIVE_REQUEST_MEMBERS[kind]: dict(body or {})}
 
 
 def adapt(operation: Operation, params: Mapping[str, Any] | None) -> dict[str, Any]:

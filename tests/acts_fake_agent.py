@@ -198,6 +198,9 @@ class _Subscriber:
     """One open stream on a task."""
 
     version: tuple[int, int]
+    #: The stream is the downlink of a live exchange. A request the agent
+    #: rejects on that exchange is reported here, and on no other stream.
+    live: bool = False
     #: Events to send, then ``None`` when the stream ends.
     queue: asyncio.Queue[pb.StreamResponse | None] = field(
         default_factory=asyncio.Queue
@@ -294,6 +297,23 @@ class _Sse(httpx.AsyncByteStream):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+#: The member of a `StreamRequest` that carries a message, by the name the
+#: generated stub gives it. Found by its type: A2A renamed the member after
+#: the 1.1 release candidate.
+_LIVE_SEND = next(
+    member.name
+    for member in pb.StreamRequest.DESCRIPTOR.oneofs_by_name['payload'].fields
+    if member.message_type.name == 'SendMessageRequest'
+)
+
+#: The code a `StreamError` carries for each error a send can be refused
+#: with: the name of the status the same refusal has on a unary call.
+_STREAM_ERROR_CODES = {
+    -32001: 'NOT_FOUND',
+    -32004: 'FAILED_PRECONDITION',
+    -32010: 'ABORTED',
+}
 
 #: A behavior name: `tck-` and hyphen-joined lowercase words. Greedy, so the
 #: longest name wins without an ordered table.
@@ -514,6 +534,8 @@ class FakeAgent:
             'tck-progress-update': self._progress_update,
             'tck-stream-input-required': self._stream_input_required,
             'tck-user-artifact-echo': self._user_artifact_echo,
+            'tck-live-echo': self._live_echo,
+            'tck-live-reject': self._live_echo,
         }
 
     # -- what the agent declares --------------------------------------------
@@ -668,6 +690,7 @@ class FakeAgent:
         'ListTasks': '_rpc_list_tasks',
         'CancelTask': '_rpc_cancel_task',
         'SubscribeToTask': '_rpc_subscribe_to_task',
+        'SendLiveMessage': '_rpc_send_live_message',
         'CreateTaskPushNotificationConfig': '_rpc_create_push_config',
         'GetTaskPushNotificationConfig': '_rpc_get_push_config',
         'ListTaskPushNotificationConfigs': '_rpc_list_push_configs',
@@ -749,6 +772,12 @@ class FakeAgent:
 
     async def _rpc_subscribe_to_task(self, params: Any, version: tuple[int, int]) -> Any:
         return self.subscribe_to_task(_parse(params, pb.SubscribeToTaskRequest), version)
+
+    async def _rpc_send_live_message(self, params: Any, version: tuple[int, int]) -> Any:
+        answer = self.send_live_message(_parse(params, pb.StreamRequest), version)
+        if isinstance(answer, pb.Task):
+            return MessageToDict(answer)
+        return answer
 
     async def _rpc_create_push_config(self, params: Any, version: tuple[int, int]) -> Any:
         config = _parse(params, pb.TaskPushNotificationConfig)
@@ -878,8 +907,87 @@ class FakeAgent:
             record.worker.cancel()
         return self._view(record)
 
+    def send_live_message(
+        self, request: pb.StreamRequest, version: tuple[int, int]
+    ) -> _Stream | pb.Task:
+        """One call of the two-way exchange A2A 1.1 adds.
+
+        Over HTTP the exchange is several calls to this operation. The call
+        that opens it is answered with the stream of the task's events, the
+        downlink, which stays open. Each later call carries one more message
+        and is answered with the task as it is, and with no events.
+
+        A2A does not say yet how a server tells the two kinds of call apart.
+        This agent goes by the task: a message that names a task with a live
+        exchange open is a later request of that exchange. A message for any
+        other task, or for none, opens an exchange.
+        """
+        if version < V1_1:
+            raise AgentError(
+                METHOD_NOT_FOUND, 'Method not found: SendLiveMessage is not in A2A 1.0'
+            )
+        if self.reduced_capabilities:
+            raise AgentError(UNSUPPORTED_OPERATION, 'this agent does not support streaming')
+
+        kind = request.WhichOneof('payload')
+        if kind == 'subscribe':
+            return self.subscribe_to_task(request.subscribe, version, live=True)
+        if kind != _LIVE_SEND:
+            raise AgentError(
+                INVALID_PARAMS,
+                'Invalid parameters: a live request carries a message or a subscription',
+            )
+
+        send = getattr(request, _LIVE_SEND)
+        exchange = self._tasks.get(send.message.task_id) if send.HasField('message') else None
+        if exchange is not None and any(s.live for s in exchange.subscribers):
+            return self._live_uplink(exchange, send)
+
+        accepted = self._accept(send)
+        if isinstance(accepted, pb.Message):
+            return _Stream([pb.StreamResponse(message=accepted)], None, lambda: None)
+        # The snapshot that opens the downlink already has the message in it.
+        stream = self._follow(accepted, version, [self._snapshot(accepted)], live=True)
+        self._hand_over(accepted, send)
+        return stream
+
+    def _live_uplink(self, record: _Record, send: pb.SendMessageRequest) -> pb.Task:
+        """A later request of an open live exchange.
+
+        Answered with the task as it is now. A request the agent does not
+        take is reported as a `StreamError` on the downlink of the exchange,
+        and the call is still answered with the task: once an exchange is
+        open, a rejected request does not fail a call.
+        """
+        declined = record.behavior == 'tck-live-reject' and _text_of(
+            send.message
+        ).strip().startswith('reject')
+        try:
+            if declined:
+                raise AgentError(INVALID_PARAMS, 'the agent declined this message, as asked')
+            self._hand_over(self._accept(send), send)
+        except AgentError as exc:
+            rejection = pb.StreamResponse()
+            rejection.error.task_id = record.task.id
+            rejection.error.code = (
+                'UNAVAILABLE' if declined
+                else _STREAM_ERROR_CODES.get(exc.kind.code, 'INVALID_ARGUMENT')
+            )
+            rejection.error.message = str(exc)
+            rejection.error.reference_id = send.message.message_id
+            # Not a change to the task: no generation, no entry in the log,
+            # and nothing for another subscriber or a webhook.
+            for subscriber in record.subscribers:
+                if subscriber.live:
+                    subscriber.queue.put_nowait(rejection)
+        return self._view(record)
+
     def subscribe_to_task(
-        self, request: pb.SubscribeToTaskRequest, version: tuple[int, int]
+        self,
+        request: pb.SubscribeToTaskRequest,
+        version: tuple[int, int],
+        *,
+        live: bool = False,
     ) -> _Stream:
         if self.reduced_capabilities:
             raise AgentError(UNSUPPORTED_OPERATION, 'this agent does not support streaming')
@@ -905,7 +1013,7 @@ class FakeAgent:
         if state in INTERRUPTED and version < V1_1:
             # Before 1.1 a stream ends when the task waits for the client.
             return _Stream(first, None, lambda: None)
-        return self._follow(record, version, first)
+        return self._follow(record, version, first, live=live)
 
     def create_push_config(
         self, config: pb.TaskPushNotificationConfig, version: tuple[int, int]
@@ -1221,8 +1329,10 @@ class FakeAgent:
         record: _Record,
         version: tuple[int, int],
         first: list[pb.StreamResponse],
+        *,
+        live: bool = False,
     ) -> _Stream:
-        subscriber = _Subscriber(version)
+        subscriber = _Subscriber(version, live=live)
         record.subscribers.append(subscriber)
 
         def hang_up() -> None:
@@ -1494,6 +1604,23 @@ class FakeAgent:
             # status and its message stay as they were.
             first = False
             request = await self._next_request(record)
+
+    async def _live_echo(self, record: _Record, request: pb.SendMessageRequest) -> None:
+        """`tck-live-echo` and `tck-live-reject`.
+
+        Every message after the first is answered with a status update that
+        counts it, until one says `done`. A message `tck-live-reject` declines
+        never gets here, so it is neither answered nor counted.
+        """
+        self._set_status(record, pb.TASK_STATE_WORKING)
+        answered = 0
+        while True:
+            request = await self._next_request(record)
+            if _text_of(request.message).strip().lower() == 'done':
+                self._set_status(record, pb.TASK_STATE_COMPLETED, 'live exchange complete')
+                return
+            answered += 1
+            self._set_status(record, pb.TASK_STATE_WORKING, f'live-echo:{answered}')
 
     # -- shutdown -----------------------------------------------------------------
 
