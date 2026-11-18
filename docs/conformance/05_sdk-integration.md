@@ -52,7 +52,15 @@ A run at A2A 1.1 uses six more. An agent needs them only once it implements 1.1;
 | `tck-live-echo` | On a live exchange: keeps the task in `TASK_STATE_WORKING` and answers every client message after the opening one with a status update whose message text is `live-echo:<n>`, counting from 1. Completes when a client message has the text `done` |
 | `tck-live-reject` | As `tck-live-echo`, but rejects every client message whose text starts with `reject` with a `StreamError` that carries the message's `messageId` in `referenceId`, and keeps the exchange open |
 
-The exact wording is in section 11.2 of the ACTS specification as [A2A #2468](https://github.com/a2aproject/A2A/pull/2468) proposes it, and may change while that pull request is under review. The two live behaviors are used only by the live exchange tests, which this runner skips for now.
+The exact wording is in section 11.2 of the ACTS specification as [A2A #2468](https://github.com/a2aproject/A2A/pull/2468) proposes it, and may change while that pull request is under review. The two live behaviors are used only by the live exchange tests.
+
+**The live exchange over JSON-RPC and REST.** A2A does not say yet how a server tells a later call of an exchange from a call that opens one, and the tests follow the ACTS specification here, which is tentative. What they expect of an agent:
+
+- A `SendLiveMessage` call (`POST /message:live` over REST) whose message names no task, or a task with no live exchange open, opens an exchange. It is answered with an event stream that starts with the task and stays open until the task is finished.
+- A call whose message names a task that has a live exchange open is a later request of that exchange. It is answered with the task as it is, as one JSON document and not as a stream, and its effect is delivered on the open stream.
+- A call that opens with `subscribe` for a task that does not exist is refused with `TaskNotFoundError`, and every call is refused with `UnsupportedOperationError` when the card does not advertise `streaming`.
+
+The tests of rejected requests (a late `subscribe`, a message for another task, a request of an unknown kind, a declined message) run over gRPC only, where a rejection is a `StreamError` on the stream and the stream stays open.
 
 Things that bite:
 

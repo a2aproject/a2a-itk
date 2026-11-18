@@ -26,6 +26,8 @@ from test_suite.acts import LoadedSuite, LoadedTest, load_suite
 from test_suite.acts.dispatcher.base import (
     DispatchError,
     Dispatcher,
+    ExchangeEnded,
+    LiveExchange,
     MalformedResponse,
     StreamEvent,
     StreamNotOpened,
@@ -33,6 +35,7 @@ from test_suite.acts.dispatcher.base import (
     WireError,
     WireResponse,
 )
+from test_suite.acts.dispatcher.params import stream_request
 from test_suite.acts.runner import (
     CLIENT_PARSE_BEHAVIOR,
     DEFAULT_DELAY_MS,
@@ -3007,36 +3010,63 @@ class TestAgainstTheCorpus:
         assert all(r.result in tuple(Outcome) for r in results)
 
     @pytest.mark.parametrize('binding', list(TransportBinding))
-    def test_only_the_live_tests_are_deferred(self, suite, binding):
-        """Operation, raw, client and webhook steps all execute.
+    def test_nothing_is_deferred(self, suite, binding):
+        """Operation, raw, client, webhook and live steps all execute.
 
-        Two kinds are outside `EXECUTABLE_KINDS`. The corpus has no bare
-        `assertion` step. It has ten tests with a `live` step, all for A2A
-        1.1, and a run at 1.1 defers exactly those of them that target the
-        binding.
+        `assertion` is the one kind outside `EXECUTABLE_KINDS`, so this holds
+        because the corpus contains none of them, and not because every kind
+        has an execution path. Hence the first assertion.
         """
-        not_executable = {
-            loaded.test.id: {step.kind() for step in loaded.test.steps} - EXECUTABLE_KINDS
-            for loaded in suite.tests
-        }
-        live = {test_id for test_id, kinds in not_executable.items() if kinds}
-        assert all(not_executable[test_id] == {StepKind.LIVE} for test_id in live)
-        assert len(live) == 10
-
-        def deferred(spec_version):
-            return {
+        assert not any(
+            step.kind() not in EXECUTABLE_KINDS
+            for loaded in suite.tests for step in loaded.test.steps
+        )
+        for spec_version in self.VERSIONS:
+            deferred = [
                 r.id for r in self._run_all(suite, binding, spec_version)
                 if r.result is Outcome.SKIP and 'not yet supported' in (r.skip_reason or '')
-            }
+            ]
+            assert deferred == []
 
-        # A run at 1.0 does not take them at all.
-        assert deferred('1.0') == set()
-        at_1_1 = deferred('1.1')
-        assert at_1_1
-        assert at_1_1 == {
-            loaded.test.id for loaded in suite.tests
-            if loaded.test.id in live and loaded.test.applies_to(binding)
+    @pytest.mark.parametrize('binding', list(TransportBinding))
+    def test_the_live_tests_reach_a_verdict_too(self, suite, binding):
+        """The run above grants no runner requirement, so the tests with a
+        live step are skipped there. Here they run, against a SUT that opens
+        an exchange, sends one event that fits nothing, and closes it."""
+        live = [
+            loaded.test for loaded in suite.tests
+            if loaded.test.applies_to(binding)
+            and any(step.kind() is StepKind.LIVE for step in loaded.test.steps)
+        ]
+        # Four of the ten are for gRPC only, and one for the HTTP bindings.
+        assert len(live) == (9 if binding is TransportBinding.GRPC else 6)
+
+        outcomes = {}
+        for test in live:
+            sut = LiveSut([status_update('TASK_STATE_FAILED'), CLOSE], binding=binding)
+            runner = runner_for(
+                sut,
+                clock=virtual_clock,
+                sleep=asyncio.sleep,
+                spec_version='1.1',
+                agent_card={'capabilities': {'streaming': True}},
+                capabilities=[RunnerRequirement.LIVE_STREAM],
+            )
+            result = run_virtual(runner.run_test(test))
+            outcomes[test.id] = (
+                result.result, result.failure.message if result.failure else result.skip_reason
+            )
+
+        assert [o for o in outcomes.items() if o[1][0] is Outcome.ERROR] == []
+        # The test for an agent without streaming does not apply to this
+        # card. Every other one has something to say about this SUT.
+        assert {i for i, (outcome, _) in outcomes.items() if outcome is Outcome.SKIP} == {
+            'STREAM-LIVE-009'
         }
+        assert all(
+            outcome is Outcome.FAIL
+            for test_id, (outcome, _) in outcomes.items() if test_id != 'STREAM-LIVE-009'
+        )
 
     @pytest.mark.parametrize('binding', list(TransportBinding))
     def test_no_raw_test_reaches_the_grpc_dispatcher(self, suite, binding):
@@ -3407,41 +3437,805 @@ class TestWebhookEvents:
         assert with_events.steps[-1].checks == without.steps[-1].checks + 2
 
 
-class TestLiveStepsAreSkipped:
-    """The runner does not drive a live exchange yet. A test with a live step
-    is skipped, and says why; nothing is sent."""
+#: Among the events a live SUT sends: it closes the downlink here.
+CLOSE = object()
 
-    def a_live_test(self):
-        return a_test(
-            get_task(),
-            Step(
-                id='exchange',
-                live={'open': {'send_message': {'message': {'role': 'ROLE_USER'}}}},
-                expect_stream={'min_count': 1},
-            ),
-            runner_requirements=[RunnerRequirement.LIVE_STREAM],
+
+class LiveSut(FakeDispatcher):
+    """A SUT for one live exchange, played from a script on the loop's clock.
+
+    ``opens_with`` is what it sends when the exchange opens, or the exception
+    it refuses with. ``reacts`` is given the text of each later message (or
+    the name of the member, for a request that is not a message) and returns
+    what that causes on the downlink; ``CLOSE`` among it ends the downlink.
+    ``acks`` is given the same and returns what the request is answered with,
+    for a binding where a later request has an answer of its own.
+
+    Run on virtual time (`run_virtual`), so the times in ``sent`` are exact.
+    """
+
+    def __init__(
+        self,
+        opens_with=(),
+        reacts=None,
+        *,
+        binding: TransportBinding = TransportBinding.JSONRPC,
+        acks=None,
+        opens_after: float = 0.0,
+        reacts_after: float = 0.0,
+        answers_after: float = 0.0,
+    ) -> None:
+        super().__init__(binding=binding)
+        self._opens_with = opens_with
+        self._reacts = reacts or (lambda said: ())
+        self._acks = acks or (lambda said: ok({'id': 'T7'}))
+        self._opens_after = opens_after
+        self._reacts_after = reacts_after
+        self._answers_after = answers_after
+        self._downlink: asyncio.Queue[Any] = asyncio.Queue()
+        self._over = False
+        #: `(request, headers)` of each exchange opened.
+        self.opened: list[tuple[Mapping[str, Any], Mapping[str, str]]] = []
+        #: `(time, request)` of each later request.
+        self.sent: list[tuple[float, Mapping[str, Any]]] = []
+        self.closed = False
+        #: The runner stopped reading the downlink, or read it to its end.
+        self.downlink_closed = False
+
+    def live(self, request, headers=None):
+        self.opened.append((request, dict(headers or {})))
+        return _ScriptedExchange(self)
+
+    def said(self) -> list[str]:
+        """The text of each later request, in the order they were sent."""
+        return [_said_in(request) for _, request in self.sent]
+
+
+def _said_in(request: Mapping[str, Any]) -> str:
+    """The text of a live request's message, or the name of its member."""
+    (member, body), = request.items()
+    message = body.get('message') if isinstance(body, Mapping) else None
+    if not isinstance(message, Mapping):
+        return member
+    return ''.join(part.get('text', '') for part in message.get('parts', ()))
+
+
+class _ScriptedExchange(LiveExchange):
+    def __init__(self, sut: LiveSut) -> None:
+        self._sut = sut
+        # On gRPC a later request is one more message, with no answer.
+        self._answers = sut.binding is not TransportBinding.GRPC
+
+    async def events(self):
+        sut = self._sut
+        if isinstance(sut._opens_with, Exception):
+            raise sut._opens_with
+        await asyncio.sleep(sut._opens_after)
+        for event in sut._opens_with:
+            sut._downlink.put_nowait(event)
+        index = 0
+        try:
+            while True:
+                # Events that are ready are handed over without a pause, as
+                # the events of one network read are.
+                event = (
+                    await sut._downlink.get() if sut._downlink.empty()
+                    else sut._downlink.get_nowait()
+                )
+                if event is CLOSE:
+                    sut._over = True
+                    return
+                yield StreamEvent(index=index, data=event, status=200)
+                index += 1
+        finally:
+            sut.downlink_closed = True
+
+    async def send(self, request):
+        sut = self._sut
+        if sut._over:
+            raise ExchangeEnded('the SUT had ended the exchange')
+        sut.sent.append((round(asyncio.get_running_loop().time(), 3), request))
+        said = _said_in(request)
+
+        async def react() -> None:
+            await asyncio.sleep(sut._reacts_after)
+            for event in sut._reacts(said):
+                sut._downlink.put_nowait(event)
+
+        if sut._reacts_after:
+            asyncio.ensure_future(react())
+        else:
+            for event in sut._reacts(said):
+                sut._downlink.put_nowait(event)
+        answer = sut._acks(said)
+        if isinstance(answer, Exception):
+            raise answer
+        await asyncio.sleep(sut._answers_after)
+        return answer if self._answers else None
+
+    async def aclose(self) -> None:
+        self._sut.closed = True
+
+
+class TestLiveSteps:
+    """A `live` step: one two-way exchange. The runner reads the events the
+    SUT streams, the downlink, while it sends the requests of the test, the
+    uplink."""
+
+    TASK = {'task': {'id': 'T7', 'status': {'state': 'TASK_STATE_WORKING'}}}
+    DONE = status_update('TASK_STATE_COMPLETED')
+    START = {'send_message': {'message': {'role': 'ROLE_USER', 'parts': [{'text': 'start'}]}}}
+
+    @staticmethod
+    def echo(n: int) -> dict:
+        return {'statusUpdate': {
+            'taskId': 'T7',
+            'status': {
+                'state': 'TASK_STATE_WORKING',
+                'message': {'parts': [{'text': f'live-echo:{n}'}]},
+            },
+        }}
+
+    @staticmethod
+    def echoed(n: int) -> dict:
+        """An `after_event` that the n-th echo satisfies."""
+        return {'status_update': {
+            'status': {'message': {'parts': [{'text': f'live-echo:{n}'}]}},
+        }}
+
+    @staticmethod
+    def say(text: str, **extra: Any) -> dict:
+        """An uplink message for the task the first event names."""
+        return {
+            'send_message': {'message': {
+                'role': 'ROLE_USER',
+                'taskId': '{{exchange.taskId}}',
+                'parts': [{'text': text}],
+            }},
+            **extra,
+        }
+
+    def echoing(self, **kwargs: Any) -> LiveSut:
+        """A SUT that answers each message with an echo, until one says done."""
+        count = 0
+
+        def reacts(said: str):
+            nonlocal count
+            if said == 'done':
+                return [self.DONE, CLOSE]
+            count += 1
+            return [self.echo(count)]
+
+        return LiveSut([self.TASK], reacts, **kwargs)
+
+    def step(self, *uplink: dict, **fields: Any) -> Step:
+        live: dict[str, Any] = {'open': fields.pop('open', self.START)}
+        if uplink:
+            live['uplink'] = list(uplink)
+        fields.setdefault('capture', {'taskId': 'task.id'})
+        fields.setdefault('expect_stream', {'timeout_ms': 5000})
+        return Step(id='exchange', live=live, **fields)
+
+    def play(self, sut, step: Step, *before: Step, **kwargs: Any):
+        kwargs.setdefault('capabilities', [RunnerRequirement.LIVE_STREAM])
+        runner = runner_for(sut, clock=virtual_clock, sleep=asyncio.sleep, **kwargs)
+        test = a_test(*before, step, runner_requirements=['live_stream'])
+        return run_virtual(runner.run_test(test))
+
+    # -- the requests ---------------------------------------------------------------
+
+    def test_the_exchange_is_opened_and_the_requests_follow_in_order(self):
+        sut = self.echoing()
+        step = self.step(
+            self.say('first'), self.say('second'),
+            self.say('done', after_event=self.echoed(2)),
+            expect_stream={
+                'timeout_ms': 5000,
+                'final_event': {'status': {'state': 'TASK_STATE_COMPLETED'}},
+            },
+        )
+        result = self.play(sut, step, spec_version='1.1')
+        assert result.result is Outcome.PASS, result.failure
+        # One exchange, opened with the request as a `StreamRequest`: the
+        # member is the wire's, and the message has been given an id.
+        assert sut.opened == [(
+            {'sendMessage': {'message': {
+                'role': 'ROLE_USER', 'parts': [{'text': 'start'}],
+                'messageId': 'generated-id',
+            }}},
+            {VERSION_HEADER: '1.1'},
+        )]
+        assert sut.said() == ['first', 'second', 'done']
+        # Each names the task the first event gave, which `capture` read.
+        assert [
+            request['sendMessage']['message']['taskId'] for _, request in sut.sent
+        ] == ['T7', 'T7', 'T7']
+        assert sut.closed
+
+    def test_an_exchange_can_be_opened_with_a_subscription(self):
+        sut = LiveSut([self.TASK, CLOSE])
+        step = self.step(
+            open={'subscribe': {'id': 'T1', 'lastSeenGeneration': 3}}, capture=None
+        )
+        assert self.play(sut, step).result is Outcome.PASS
+        assert sut.opened[0][0] == {'subscribe': {'id': 'T1', 'lastSeenGeneration': 3}}
+
+    def test_nothing_is_sent_before_the_first_event(self):
+        """`capture` reads the first event, and the requests name what it
+        captured."""
+        sut = self.echoing(opens_after=3.0)
+        self.play(sut, self.step(self.say('done')))
+        assert [at for at, _ in sut.sent] == [3.0]
+
+    def test_a_request_without_after_event_follows_the_one_before_it_at_once(self):
+        sut = self.echoing(reacts_after=2.0)
+        self.play(sut, self.step(self.say('first'), self.say('second'), self.say('done')))
+        assert [at for at, _ in sut.sent] == [0.0, 0.0, 0.0]
+
+    def test_a_request_with_after_event_is_held_until_such_an_event_arrives(self):
+        sut = self.echoing(reacts_after=2.0)
+        step = self.step(self.say('first'), self.say('done', after_event=self.echoed(1)))
+        result = self.play(sut, step)
+        assert result.result is Outcome.PASS, result.failure
+        assert [(at, _said_in(request)) for at, request in sut.sent] == [
+            (0.0, 'first'), (2.0, 'done'),
+        ]
+
+    def test_where_a_request_is_acknowledged_the_next_waits_for_that(self):
+        sut = self.echoing(answers_after=1.5)
+        self.play(sut, self.step(self.say('first'), self.say('done')))
+        assert [at for at, _ in sut.sent] == [0.0, 1.5]
+
+    def test_an_event_releases_one_request_and_not_a_second(self):
+        """Two requests are each held for an echo. One echo arrives, so one
+        of them is sent."""
+        any_echo = {'status_update': {'status': {'message': {'exists': True}}}}
+        sut = LiveSut([self.TASK], lambda said: [self.echo(1)] if said == 'first' else [])
+        step = self.step(
+            self.say('first'),
+            {**self.say('second'), 'id': 'second', 'after_event': any_echo},
+            {**self.say('third'), 'id': 'third', 'after_event': any_echo},
+        )
+        result = self.play(sut, step)
+        assert sut.said() == ['first', 'second']
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == "uplink['third']"
+
+    def test_an_event_that_came_early_still_releases_the_request_held_for_it(self):
+        """The event the last request is held for arrives before the event
+        the one before it is held for. It has released nothing, so it
+        counts."""
+        late, early = self.echo(2), self.echo(1)
+        sut = LiveSut(
+            [self.TASK],
+            lambda said: {'first': [early, late], 'done': [self.DONE, CLOSE]}.get(said, []),
+        )
+        step = self.step(
+            self.say('first'),
+            self.say('second', after_event=self.echoed(2)),
+            self.say('done', after_event=self.echoed(1)),
+        )
+        result = self.play(sut, step)
+        assert result.result is Outcome.PASS, result.failure
+        assert sut.said() == ['first', 'second', 'done']
+
+    def test_after_event_may_name_what_the_step_captured(self):
+        sut = self.echoing()
+        step = self.step(
+            self.say('first'),
+            self.say('done', after_event={'status_update': {'taskId': '{{exchange.taskId}}'}}),
+        )
+        assert self.play(sut, step).result is Outcome.PASS
+        assert sut.said() == ['first', 'done']
+
+    def test_the_step_is_sent_as_the_version_it_names(self):
+        sut = self.echoing()
+        self.play(sut, self.step(self.say('done'), a2a_version='1.0'), spec_version='1.1')
+        assert sut.opened[0][1] == {VERSION_HEADER: '1.0'}
+
+    # -- a request that does not go out -------------------------------------------------
+
+    def test_events_that_arrive_together_are_acted_on_one_by_one(self):
+        """The SUT opens the exchange, completes the task and closes, and all
+        of it arrives at once. The request the first event makes due still
+        goes out before the runner reads that the exchange is over: what a
+        test comes to must not depend on how the events were packed."""
+        sut = LiveSut([self.TASK, self.DONE, CLOSE])
+        result = self.play(sut, self.step(self.say('first')))
+        assert result.result is Outcome.PASS, result.failure
+        assert sut.said() == ['first']
+
+    def test_a_request_never_released_fails_the_step_and_is_named(self):
+        """The SUT does not echo, so the event `done` is held for never
+        comes. That is reported, and before what the events then fail: it is
+        why the task never completed."""
+        sut = LiveSut([self.TASK])
+        step = self.step(
+            self.say('first'),
+            {**self.say('done'), 'id': 'finish', 'after_event': self.echoed(1)},
+            expect_stream={
+                'timeout_ms': 5000,
+                'final_event': {'status': {'state': 'TASK_STATE_COMPLETED'}},
+            },
+        )
+        result = self.play(sut, step)
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'exchange'
+        assert result.failure.assertion_path == "uplink['finish']"
+        assert result.failure.message == (
+            "uplink request 'finish' was never sent: no downlink event matched "
+            "its `after_event` (1 event(s) received)"
+        )
+        assert sut.said() == ['first']
+        assert result.steps[-1].duration_ms == 5000
+
+    def test_a_request_never_released_is_named_so_however_the_exchange_ends(self):
+        """Also when the SUT closes the exchange at once: the request was
+        held for an event, and no such event came."""
+        sut = LiveSut([self.TASK, self.DONE, CLOSE])
+        step = self.step({**self.say('done', after_event=self.echoed(1)), 'id': 'finish'})
+        result = self.play(sut, step)
+        assert result.failure.message == (
+            "uplink request 'finish' was never sent: no downlink event matched "
+            "its `after_event` (2 event(s) received)"
         )
 
-    def test_the_test_is_skipped_and_nothing_is_sent(self):
-        dispatcher = FakeDispatcher(ok())
-        result = run(runner_for(dispatcher), self.a_live_test())
-        assert result.result is Outcome.SKIP
-        assert result.skip_reason == 'contains live step(s); not yet supported'
-        assert dispatcher.calls == []
+    def test_a_request_without_an_id_is_named_by_its_position(self):
+        sut = LiveSut([self.TASK])
+        step = self.step(self.say('first'), self.say('done', after_event=self.echoed(1)))
+        result = self.play(sut, step)
+        assert result.failure.assertion_path == 'uplink[#2]'
+        assert result.failure.message.startswith('uplink request #2 was never sent')
 
-    def test_claiming_the_requirement_does_not_make_it_run(self):
-        """The step kind has no execution path, whatever a caller claims the
-        runner provides."""
-        dispatcher = FakeDispatcher(ok())
-        runner = runner_for(dispatcher, capabilities=[RunnerRequirement.LIVE_STREAM])
-        result = run(runner, self.a_live_test())
-        assert result.result is Outcome.SKIP
-        assert dispatcher.calls == []
+    def test_a_downlink_that_ends_with_no_event_sends_nothing(self):
+        sut = LiveSut([CLOSE])
+        result = self.play(sut, self.step(self.say('done'), capture=None))
+        assert result.result is Outcome.FAIL
+        assert result.failure.message == (
+            'uplink request #1 was never sent: the downlink produced no event '
+            '(0 event(s) received)'
+        )
+        assert sut.sent == []
 
-    def test_the_pipeline_does_not_claim_the_requirement(self):
+    def test_a_request_the_sut_ended_the_exchange_before(self):
+        """The dispatcher says the exchange was over when the request was to
+        be written. Something the SUT did, so it fails the step."""
+        sut = self.echoing()
+
+        def ended(said: str):
+            return ExchangeEnded('the SUT had ended the exchange') if said == 'second' else ok({})
+
+        sut._acks = ended
+        step = self.step(self.say('first'), {**self.say('second'), 'id': 'second'})
+        result = self.play(sut, step)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == "uplink['second']"
+        assert result.failure.message.startswith(
+            "uplink request 'second' was never sent: the SUT had ended the exchange"
+        )
+        assert [_said_in(request) for _, request in sut.sent][:1] == ['first']
+
+    @pytest.mark.parametrize('then', [[CLOSE], []], ids=['closes', 'stays open'])
+    def test_a_first_event_without_the_captured_value_sends_nothing(self, then):
+        """The requests name `{{exchange.taskId}}`. The SUT's first event
+        does not have it, and that is what is reported, whether the SUT
+        then closes the exchange or leaves it open."""
+        sut = LiveSut([{'task': {}}, *then])
+        result = self.play(sut, self.step(self.say('done')))
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'capture'
+        assert "cannot capture 'taskId'" in result.failure.message
+        assert result.failure.message.endswith('no uplink request was sent')
+        assert sut.sent == []
+
+    def test_a_request_that_names_a_variable_nothing_defines_is_an_error(self):
+        """The test is wrong, not the SUT."""
+        sut = LiveSut([self.TASK])
+        request = {'send_message': {'message': {'taskId': '{{nothing.id}}', 'parts': []}}}
+        result = self.play(sut, self.step(request))
+        assert result.result is Outcome.ERROR
+        assert "'nothing.id'" in result.failure.message
+        assert sut.sent == []
+
+    def test_an_opening_request_that_cannot_be_built_opens_nothing(self):
+        sut = LiveSut([self.TASK, CLOSE])
+        opening = {'subscribe': {'id': '{{nothing.id}}'}}
+        result = self.play(sut, self.step(open=opening, capture=None))
+        assert result.result is Outcome.ERROR
+        assert sut.opened == []
+
+    # -- acknowledgments ------------------------------------------------------------------
+
+    def acknowledged(self, expect_ack=None, **extra: Any) -> dict:
+        request = {**self.say('first'), 'id': 'acknowledged', **extra}
+        if expect_ack is not None:
+            request['expect_ack'] = expect_ack
+        return request
+
+    def test_expect_ack_is_asserted_on_what_the_request_was_answered_with(self):
+        task = {'id': 'T7', 'status': {'state': 'TASK_STATE_WORKING'}}
+        sut = self.echoing(acks=lambda said: ok(task))
+        expect_ack = {'id': '{{exchange.taskId}}', 'status': {'state': {'type': 'string'}}}
+        step = self.step(self.acknowledged(expect_ack), self.say('done'))
+        result = self.play(sut, step)
+        assert result.result is Outcome.PASS, result.failure
+
+        without = self.play(
+            self.echoing(acks=lambda said: ok(task)),
+            self.step(self.acknowledged(), self.say('done')),
+        )
+        # Two comparisons where an answer without `expect_ack` counts one.
+        assert result.steps[-1].checks == without.steps[-1].checks + 1
+
+    def test_an_answer_that_is_not_the_task_fails_and_locates_itself(self):
+        sut = self.echoing(acks=lambda said: ok({'id': 'ANOTHER'}))
+        step = self.step(self.acknowledged({'id': '{{exchange.taskId}}'}), self.say('done'))
+        result = self.play(sut, step)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == "uplink['acknowledged'].ack.id"
+        assert result.failure.actual == 'ANOTHER'
+        # The exchange was still brought to its end.
+        assert sut.said() == ['first', 'done']
+
+    def test_an_error_in_answer_to_a_request_fails_it(self):
+        """Once an exchange is open, a request the SUT rejects is reported
+        on the downlink. A request it accepts is not answered with an error."""
+        sut = self.echoing(acks=lambda said: failed() if said == 'first' else ok({}))
+        result = self.play(sut, self.step(self.acknowledged(), self.say('done')))
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == "uplink['acknowledged']"
+        assert result.failure.message == (
+            "uplink request 'acknowledged' was answered with an error: "
+            "TaskNotFoundError: no such task"
+        )
+        assert sut.said() == ['first', 'done']
+
+    def test_a_request_answered_with_an_event_stream_fails_it(self):
+        """What the dispatcher raises for it. The SUT has the request all
+        the same, so the requests after it are still sent."""
+        streamed = MalformedResponse('the SUT answered with an event stream')
+        sut = self.echoing(acks=lambda said: streamed if said == 'first' else ok({}))
+        result = self.play(sut, self.step(self.acknowledged(), self.say('done')))
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == "uplink['acknowledged']"
+        assert result.failure.message == (
+            "uplink request 'acknowledged': the SUT answered with an event stream"
+        )
+        assert sut.said() == ['first', 'done']
+
+    def test_a_request_answered_in_another_form_was_still_sent(self):
+        """It is the last request of the step, and the step reports what was
+        wrong with its answer once, not also that it never went out."""
+        streamed = MalformedResponse('the SUT answered with an event stream')
+
+        def checks_with(answer):
+            sut = LiveSut([self.TASK], lambda said: [self.DONE, CLOSE], acks=lambda said: answer)
+            result = self.play(sut, self.step({**self.say('done'), 'id': 'finish'}))
+            return result.result, result.steps[-1].checks
+
+        refused, counted = checks_with(streamed)
+        assert refused is Outcome.FAIL
+        # One finding, in place of the one comparison a good answer counts.
+        assert counted == checks_with(ok({}))[1]
+
+    def test_a_request_that_could_not_be_delivered_is_an_error(self):
+        sut = self.echoing(acks=lambda said: DispatchError('ConnectError: refused'))
+        step = self.step(self.say('first'), self.say('done'))
+        result = self.play(sut, step)
+        assert result.result is Outcome.ERROR
+        assert result.failure.message == 'ConnectError: refused'
+
+    def test_on_grpc_expect_ack_is_neither_passed_nor_failed(self):
+        """A request there is one more message on the stream, with no answer
+        of its own. An `expect_ack` no answer could satisfy changes nothing."""
+        impossible = {'id': 'no task has this id'}
+
+        def run_with(expect_ack):
+            sut = self.echoing(binding=TransportBinding.GRPC)
+            step = self.step(self.acknowledged(expect_ack), self.say('done'))
+            return self.play(sut, step)
+
+        with_it, without = run_with(impossible), run_with(None)
+        assert with_it.result is Outcome.PASS
+        assert with_it.steps[-1].checks == without.steps[-1].checks
+
+    def test_a_request_on_its_way_when_the_downlink_ends_is_waited_for(self):
+        """Over HTTP `done` is a call of its own. The SUT completes the task
+        and closes the downlink before it has answered that call."""
+        sut = self.echoing(answers_after=1.0)
+        step = self.step({**self.say('done'), 'expect_ack': {'id': 'T7'}})
+        result = self.play(sut, step)
+        assert result.result is Outcome.PASS, result.failure
+        assert result.steps[-1].duration_ms == 1000
+
+    def test_the_wait_for_an_answer_ends_when_the_answer_comes(self):
+        """The request after it is held for an event that can no longer
+        come. The step is over when the answer is in, not five seconds on."""
+        sut = self.echoing(answers_after=1.0)
+        sut._reacts = lambda said: [self.DONE, CLOSE]
+        step = self.step(
+            self.say('first'), {**self.say('second', after_event=self.echoed(9)), 'id': 'held'}
+        )
+        result = self.play(sut, step)
+        assert result.failure.message == (
+            "uplink request 'held' was never sent: no downlink event matched "
+            "its `after_event` (2 event(s) received)"
+        )
+        assert result.steps[-1].duration_ms == 1000
+
+    def test_a_request_due_after_the_downlink_ended_is_not_sent(self):
+        """The request before it was on its way when the SUT closed the
+        exchange. Its answer comes, and the next one stays where it is."""
+        sut = self.echoing(answers_after=1.0)
+        sut._reacts = lambda said: [self.DONE, CLOSE]
+        step = self.step(self.say('first'), {**self.say('second'), 'id': 'late'})
+        result = self.play(sut, step)
+        assert result.failure.message == (
+            "uplink request 'late' was never sent: the downlink had ended "
+            "(2 event(s) received)"
+        )
+        assert sut.said() == ['first']
+
+    def test_a_fault_while_sending_is_not_filed_against_the_sut(self):
+        """Anything but an answer or a failed delivery is a defect of the
+        harness. It surfaces as itself and is not reported as a request the
+        SUT left unanswered."""
+        sut = self.echoing(acks=lambda said: KeyError('result'))
+        with pytest.raises(KeyError, match='result'):
+            self.play(sut, self.step(self.say('first')))
+        assert sut.closed
+
+    def test_a_request_never_answered_after_the_downlink_ended_is_reported(self):
+        sut = self.echoing(answers_after=60.0)
+        step = self.step({**self.say('done'), 'id': 'finish'})
+        result = self.play(sut, step)
+        assert result.result is Outcome.FAIL
+        assert result.failure.message == (
+            "uplink request 'finish' was sent and not answered: the SUT had not "
+            "answered it 5s after the downlink ended (2 event(s) received)"
+        )
+        assert result.steps[-1].duration_ms == 5000
+
+    # -- an exchange the SUT refuses ------------------------------------------------------
+
+    def test_a_refusal_is_what_expect_error_is_asserted_on(self):
+        refusal = StreamNotOpened('the SUT refused the live exchange', failed())
+        sut = LiveSut(refusal)
+        step = self.step(
+            capture=None, expect_stream=None,
+            expect_error={'error_type': 'TaskNotFoundError'},
+        )
+        result = self.play(sut, step)
+        assert result.result is Outcome.PASS, result.failure
+        assert sut.closed
+
+    def test_a_refusal_with_another_error_fails(self):
+        refusal = StreamNotOpened('the SUT refused the live exchange', failed())
+        step = self.step(
+            capture=None, expect_stream=None,
+            expect_error={'error_type': 'UnsupportedOperationError'},
+        )
+        result = self.play(LiveSut(refusal), step)
+        assert result.result is Outcome.FAIL
+        assert 'UnsupportedOperationError' in str(result.failure.expected)
+
+    def test_a_refusal_nothing_expected_fails(self):
+        refusal = StreamNotOpened('the SUT refused the live exchange', failed())
+        result = self.play(LiveSut(refusal), self.step(self.say('done')))
+        assert result.result is Outcome.FAIL
+        assert result.failure.message == 'the SUT refused the live exchange'
+
+    def test_an_exchange_that_opens_and_stays_open_fails_at_its_first_event(self):
+        """The first event shows the SUT did not refuse. The runner does not
+        read on until a timeout to say so."""
+        sut = LiveSut([self.TASK], opens_after=0.5)
+        step = self.step(
+            capture=None, expect_stream=None,
+            expect_error={'error_type': 'UnsupportedOperationError'},
+        )
+        result = self.play(sut, step)
+        assert result.result is Outcome.FAIL
+        assert result.failure.message == (
+            'expected an error, but the stream opened and produced 1 event(s)'
+        )
+        assert result.steps[-1].duration_ms == 500
+        assert sut.closed
+
+    def test_an_exchange_that_opens_where_a_refusal_was_expected_fails(self):
+        sut = LiveSut([self.TASK, CLOSE])
+        step = self.step(
+            capture=None, expect_stream=None,
+            expect_error={'error_type': 'UnsupportedOperationError'},
+        )
+        result = self.play(sut, step)
+        assert result.result is Outcome.FAIL
+        assert 'expected an error, but the stream opened' in result.failure.message
+
+    # -- the downlink -------------------------------------------------------------------------
+
+    def test_expect_stream_is_asserted_on_the_whole_downlink(self):
+        sut = self.echoing()
+        step = self.step(
+            self.say('first'), self.say('done', after_event=self.echoed(1)),
+            expect_stream={
+                'timeout_ms': 5000,
+                'min_count': 3,
+                'events': [{'index': 0, 'task': {'id': '{{exchange.taskId}}'}}],
+                'final_event': {'status': {'state': 'TASK_STATE_FAILED'}},
+            },
+        )
+        result = self.play(sut, step)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'final_event.status.state'
+
+    def test_an_exchange_the_sut_never_closes_fails_at_the_timeout(self):
+        sut = LiveSut([self.TASK], lambda said: [self.echo(1)])
+        result = self.play(sut, self.step(self.say('first')))
+        assert result.result is Outcome.FAIL
+        assert 'did not complete within 5000ms' in result.failure.message
+        assert sut.closed
+
+    def test_stays_open_ms_ends_the_read_of_an_exchange_that_must_not_close(self):
+        sut = LiveSut([self.TASK], lambda said: [self.echo(1)])
+        step = self.step(
+            self.say('first'), expect_stream={'timeout_ms': 60_000, 'stays_open_ms': 2000}
+        )
+        result = self.play(sut, step)
+        assert result.result is Outcome.PASS, result.failure
+        assert result.steps[-1].duration_ms == 2000
+
+    def test_what_the_step_captured_is_there_for_the_steps_after_it(self):
+        sut = self.echoing()
+        after = Step(
+            id='read', operation=Operation.GET_TASK, params={'id': '{{exchange.taskId}}'}
+        )
+        runner = runner_for(
+            sut, clock=virtual_clock, sleep=asyncio.sleep,
+            capabilities=[RunnerRequirement.LIVE_STREAM],
+        )
+        test = a_test(
+            self.step(self.say('done')), after, runner_requirements=['live_stream']
+        )
+        assert run_virtual(runner.run_test(test)).result is Outcome.PASS
+        assert sut.calls[0][1] == {'id': 'T7'}
+
+    def test_a_capture_path_that_cannot_be_read_still_closes_the_exchange(self):
+        """The test is wrong, and the downlink is not left open for it."""
+        sut = LiveSut([self.TASK])
+
+        async def played():
+            runner = runner_for(
+                sut, clock=virtual_clock, sleep=asyncio.sleep,
+                capabilities=[RunnerRequirement.LIVE_STREAM],
+            )
+            test = a_test(
+                self.step(capture={'taskId': 'task..id'}),
+                runner_requirements=['live_stream'],
+            )
+            result = await runner.run_test(test)
+            # Read while the loop still runs: when it ends it closes
+            # whatever is left open, which would hide a downlink left so.
+            return result, sut.downlink_closed
+
+        result, downlink_closed = run_virtual(played())
+        assert result.result is Outcome.ERROR
+        assert downlink_closed
+        assert sut.closed
+
+    def test_a_step_cancelled_twice_still_closes_the_exchange(self):
+        """A run that is being torn down may cancel more than once."""
+        sut = self.echoing(answers_after=60.0)
+
+        async def cancelled_twice():
+            runner = runner_for(
+                sut, clock=virtual_clock, sleep=asyncio.sleep,
+                capabilities=[RunnerRequirement.LIVE_STREAM],
+            )
+            test = a_test(
+                self.step(self.say('first')), runner_requirements=['live_stream']
+            )
+            running = asyncio.ensure_future(runner.run_test(test))
+            await asyncio.sleep(1)
+            running.cancel()
+            await asyncio.sleep(0)
+            running.cancel()
+            await asyncio.wait({running})
+            left = [
+                task for task in asyncio.all_tasks()
+                if task is not asyncio.current_task() and not task.done()
+            ]
+            return running.cancelled(), left
+
+        cancelled, left = run_virtual(cancelled_twice())
+        assert cancelled
+        assert left == []
+        assert sut.closed
+
+    def test_several_streams_do_not_apply_to_a_live_step(self):
+        sut = self.echoing()
+        step = self.step(capture=None, expect_stream={'streams': [{}, {}]})
+        runner = runner_for(
+            sut, clock=virtual_clock, sleep=asyncio.sleep,
+            capabilities=[RunnerRequirement.LIVE_STREAM, RunnerRequirement.CONCURRENT_STREAMS],
+        )
+        test = a_test(step, runner_requirements=['live_stream', 'concurrent_streams'])
+        result = run_virtual(runner.run_test(test))
+        assert result.result is Outcome.ERROR
+        assert '`expect_stream.streams` does not apply' in result.failure.message
+        assert sut.opened == []
+
+    # -- what an HTTP binding cannot relate to an exchange --------------------------------------
+
+    @pytest.mark.parametrize(('request_', 'said'), [
+        ({'subscribe': {'id': 'T7'}}, 'is `subscribe`'),
+        ({'unrecognized': True}, 'is `unrecognized`'),
+        ({'send_message': {'message': {'parts': [{'text': 'no task'}]}}}, 'names no task'),
+    ])
+    @pytest.mark.parametrize('binding', [TransportBinding.JSONRPC, TransportBinding.REST])
+    def test_over_http_a_later_request_has_to_be_a_message_for_the_task(
+        self, binding, request_, said
+    ):
+        """Each later request is a call of its own there, and the task its
+        message names is all that relates it to the exchange. A test that
+        sends anything else has to be for gRPC only: the mistake is in the
+        test, and nothing is sent."""
+        sut = self.echoing(binding=binding)
+        result = self.play(sut, self.step({**request_, 'id': 'odd'}, self.say('done')))
+        assert result.result is Outcome.ERROR
+        assert f"uplink request 'odd' {said}" in result.failure.message
+        assert 'transport: [grpc]' in result.failure.message
+        assert sut.opened == []
+
+    def test_a_task_named_beside_the_message_counts(self):
+        """`taskId` beside `message` is folded into it, as in `params`."""
+        sut = self.echoing()
+        request = {'send_message': {
+            'taskId': '{{exchange.taskId}}',
+            'message': {'role': 'ROLE_USER', 'parts': [{'text': 'done'}]},
+        }}
+        assert self.play(sut, self.step(request)).result is Outcome.PASS
+        assert sut.sent[0][1]['sendMessage']['message']['taskId'] == 'T7'
+
+    def test_over_grpc_any_kind_of_request_may_follow(self):
+        rejection = {'error': {'code': 'FAILED_PRECONDITION'}}
+        sut = LiveSut(
+            [self.TASK],
+            lambda said: [self.DONE, CLOSE] if said == 'done' else [rejection],
+            binding=TransportBinding.GRPC,
+        )
+        rejected = {'error': {'code': {'type': 'string'}}}
+        step = self.step(
+            {'subscribe': {'id': '{{exchange.taskId}}'}},
+            {'unrecognized': True, 'after_event': rejected},
+            self.say('done', after_event=rejected),
+        )
+        result = self.play(sut, step)
+        assert result.result is Outcome.PASS, result.failure
+        assert [request for _, request in sut.sent][:2] == [
+            {'subscribe': {'id': 'T7'}},
+            stream_request('unrecognized'),
+        ]
+
+    # -- whether the test runs at all --------------------------------------------------------------
+
+    def test_a_runner_that_cannot_drive_an_exchange_skips_the_test(self):
+        sut = self.echoing()
+        result = self.play(sut, self.step(self.say('done')), capabilities=[])
+        assert result.result is Outcome.SKIP
+        assert result.skip_reason == 'runner does not provide live_stream'
+        assert sut.opened == []
+
+    def test_the_pipeline_declares_that_it_can(self):
         import acts_runner
 
-        assert RunnerRequirement.LIVE_STREAM not in acts_runner.RUNNER_CAPABILITIES
+        assert RunnerRequirement.LIVE_STREAM in acts_runner.RUNNER_CAPABILITIES
+        assert StepKind.LIVE in EXECUTABLE_KINDS
+
+    def test_a_dispatcher_that_drives_none_is_an_error_and_not_a_finding(self):
+        dispatcher = FakeDispatcher(ok())
+        result = self.play(dispatcher, self.step(self.say('done')))
+        assert result.result is Outcome.ERROR
+        assert 'does not drive a live exchange' in result.failure.message
 
 
 class TestTheVersionAStepIsWrittenFor:

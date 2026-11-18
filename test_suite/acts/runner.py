@@ -33,6 +33,9 @@ Steps run one after another, with one exception: a `background` step. Its
 request is sent, the steps after it run while it is open, and it is evaluated
 after the last of them. It is how a test sends a message to a task while a
 subscription to that task is being read.
+
+A `live` step is one step that does both at once: it reads the events of a
+two-way exchange while it sends the requests of the test into it.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ import math
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Final, NamedTuple, TypeVar
 
 from pyproto import a2a_pb2
@@ -66,18 +69,21 @@ from test_suite.acts.assertions import (
 from test_suite.acts.dispatcher.base import (
     DispatchError,
     Dispatcher,
+    ExchangeEnded,
+    LiveExchange,
     MalformedResponse,
     StreamEvent,
     StreamNotOpened,
     WireError,
     WireResponse,
 )
-from test_suite.acts.dispatcher.params import adapt
+from test_suite.acts.dispatcher.params import adapt, stream_request
 from test_suite.acts.loader import LoadedSuite
 from test_suite.acts.schema import (
     DEFAULT_SPEC_VERSION,
     Backoff,
     Level,
+    LiveRequest,
     Operation,
     RawBlock,
     RunnerRequirement,
@@ -86,6 +92,7 @@ from test_suite.acts.schema import (
     StreamPlan,
     Test,
     TransportBinding,
+    UplinkRequest,
     parse_spec_version,
 )
 from test_suite.acts.streaming import (
@@ -93,6 +100,7 @@ from test_suite.acts.streaming import (
     awaits_events,
     evaluate_events,
     evaluate_stream,
+    event_matches,
     normalize,
 )
 from test_suite.acts.wire_map import (
@@ -131,9 +139,15 @@ SPEC_VERSION_VARIABLE = 'specVersion'
 _WEBHOOK_POLL_S: Final = 0.25
 
 #: Step kinds the runner can execute.
-EXECUTABLE_KINDS: Final[frozenset[StepKind]] = frozenset(
-    {StepKind.OPERATION, StepKind.RAW, StepKind.CLIENT, StepKind.WEBHOOK}
-)
+EXECUTABLE_KINDS: Final[frozenset[StepKind]] = frozenset({
+    StepKind.OPERATION, StepKind.RAW, StepKind.CLIENT, StepKind.WEBHOOK,
+    StepKind.LIVE,
+})
+
+#: How long a request of a live exchange that was on its way when the downlink
+#: ended is given to be answered. On an HTTP binding such a request is a call
+#: of its own, and the SUT may close the downlink before it has answered it.
+_ACK_GRACE_S: Final = 5.0
 
 #: The behaviour a `client_response` step is delivered through (ACTS §10).
 #:
@@ -276,6 +290,69 @@ class _Background:
     #: Why the first event of its stream did not give the step's `capture`,
     #: if it did not. The steps that follow cannot use what was not captured.
     missed: str | None = None
+
+
+@dataclass(eq=False)
+class _Uplink:
+    """How far the sending side of a live exchange has come.
+
+    Kept apart from the coroutine that sends. That coroutine is stopped when
+    the downlink ends, and what it had done by then is what the step reports.
+    """
+
+    #: The downlink events so far, in order.
+    events: list[StreamedEvent] = field(default_factory=list)
+    #: Set, and replaced, each time an event arrives.
+    arrived: asyncio.Event = field(default_factory=asyncio.Event)
+    #: Positions of the events that have released a held request. An event
+    #: releases one request and is not considered for another.
+    used: set[int] = field(default_factory=set)
+    #: How many of the step's uplink requests have been sent.
+    sent: int = 0
+    #: A request is on its way and has not been answered.
+    sending: bool = False
+    #: The downlink has ended, so nothing more is to be sent.
+    over: bool = False
+    #: What became of the next request, in words that follow its name in a
+    #: report.
+    stopped: str = 'was never sent: the downlink produced no event'
+    #: What the acknowledgments came to.
+    result: AssertionResult = field(default_factory=AssertionResult)
+    #: Why the first event did not give the step's `capture`, if it did not.
+    #: The requests that follow name what it would have captured.
+    missed: str | None = None
+
+    def note(self, event: StreamedEvent) -> None:
+        """Record one more downlink event."""
+        self.events.append(event)
+        arrived, self.arrived = self.arrived, asyncio.Event()
+        arrived.set()
+
+    async def first_event(self) -> None:
+        """Wait until the downlink has produced an event."""
+        while not self.events:
+            await self.arrived.wait()
+
+    async def released_by(self, wanted: Mapping[str, Any]) -> bool:
+        """Wait for an event that matches ``wanted`` and has released nothing.
+
+        ``False`` when the downlink ends without one.
+        """
+        seen = 0
+        while True:
+            while seen < len(self.events):
+                if seen not in self.used and event_matches(wanted, self.events[seen]):
+                    self.used.add(seen)
+                    return True
+                seen += 1
+            if self.over:
+                return False
+            await self.arrived.wait()
+
+
+def _uplink_label(request: UplinkRequest, index: int) -> str:
+    """How a report names one uplink request: its id, or its position."""
+    return repr(request.id) if request.id else f'#{index + 1}'
 
 
 async def _until_either(exchange: asyncio.Future[Any], signal: Awaitable[Any]) -> None:
@@ -838,6 +915,8 @@ class Runner:
                 return await self._run_client_step(step, scope, started)
             if step.kind() is StepKind.WEBHOOK:
                 return await self._run_webhook_step(step, scope, started)
+            if step.kind() is StepKind.LIVE:
+                return await self._run_live_step(step, scope, started)
             if _is_streaming(step):
                 return await self._run_streaming_step(step, scope, started)
             return await self._run_unary_step(step, scope, started)
@@ -1327,6 +1406,227 @@ class Runner:
         gathered, duration = await self._read_streams(step, open_stream)
         return self._conclude_streams(step, scope, started, gathered, duration)
 
+    # -- live exchanges ------------------------------------------------------
+
+    async def _run_live_step(
+        self, step: Step, scope: Scope, started: float
+    ) -> StepResult:
+        """A two-way exchange: read the downlink while sending the uplink.
+
+        The request in `live.open` opens the exchange, and the events that
+        follow are the downlink, to which `expect_stream` applies. The
+        requests in `live.uplink` are sent in order, one at a time, and none
+        before the first event has arrived, because `capture` reads that
+        event and the requests name what it captured. The step ends when the
+        downlink does: the SUT closes it, or the read reaches a bound of the
+        step.
+        """
+        block = step.live
+        expect = step.expect_stream
+        if expect is not None and expect.streams:
+            return self._step(
+                step, Outcome.ERROR, started,
+                message='a live step reads one downlink; `expect_stream.streams` '
+                        'does not apply to it',
+            )
+
+        dispatcher = self._dispatcher_for(step)
+        unrelated = _unrelatable(block.uplink or (), dispatcher.binding)
+        if unrelated is not None:
+            return self._step(step, Outcome.ERROR, started, message=unrelated)
+
+        # Raises for a variable nothing defines, before anything is sent.
+        opening = self._live_request(block.open, scope)
+        exchange = dispatcher.live(opening, self._headers(step))
+        uplink = _Uplink()
+
+        def arrived(event: StreamedEvent) -> None:
+            if not uplink.events:
+                # `capture` reads the first event. Done as it arrives, so
+                # that it does not depend on when the sender next runs.
+                uplink.missed = self._capture_from_stream(step, scope, [event])
+            uplink.note(event)
+
+        sender = asyncio.ensure_future(self._send_uplink(step, scope, exchange, uplink))
+        try:
+            reading: _Reading | BaseException = await self._collect(
+                exchange.events(), expect,
+                # An exchange that opens where a refusal is expected has
+                # failed the step with its first event.
+                disconnect_after=None if step.expect_error is None else 1,
+                stays_open_ms=_stays_open_ms(expect, None),
+                on_event=arrived,
+            )
+        except DispatchError as exc:
+            reading = exc
+        else:
+            uplink.over = True
+            if uplink.sending:
+                # A request that left before the downlink ended was sent.
+                # Wait for its answer, which is what says so.
+                await asyncio.wait({sender}, timeout=_ACK_GRACE_S)
+        finally:
+            sender.cancel()
+            try:
+                await asyncio.wait({sender})
+            finally:
+                # Also when the step is cancelled again while it waits.
+                await exchange.aclose()
+
+        if not sender.cancelled() and sender.exception() is not None:
+            # A request the test wrote that cannot be built, or one that
+            # could not be delivered: nothing to say about the SUT.
+            raise sender.exception()
+        if isinstance(reading, BaseException):
+            return self._stream_refusal(step, scope, started, reading, AssertionResult())
+        return self._conclude_streams(
+            step, scope, started, [reading], AssertionResult(),
+            leading=uplink.result + self._unsent(step, uplink),
+        )
+
+    def _live_request(self, request: LiveRequest, scope: Scope) -> dict[str, Any]:
+        """One request of a live exchange, as the JSON form of a `StreamRequest`.
+
+        A message is prepared as the `params` of `send_message` are: variables
+        resolved, the task and context folded into the message, and a
+        `messageId` added where the test gave none.
+        """
+        if request.unrecognized:
+            return stream_request('unrecognized')
+        if request.subscribe is not None:
+            body = scope.substitute(request.subscribe.model_dump(exclude_none=True))
+            return stream_request('subscribe', body)
+        params = adapt(
+            Operation.SEND_MESSAGE, scope.substitute(dict(request.send_message))
+        )
+        return stream_request('send_message', self._ensure_message_id(params))
+
+    async def _send_uplink(
+        self, step: Step, scope: Scope, exchange: LiveExchange, uplink: _Uplink
+    ) -> None:
+        """Send the step's uplink requests, each when it is due.
+
+        Records in ``uplink`` what became of each request, which the step
+        reads when the downlink has ended, possibly while a request here is
+        still held. Raises for a request that cannot be built or delivered:
+        that says nothing about the SUT.
+        """
+        await uplink.first_event()
+        if uplink.missed is not None:
+            # The requests name what `capture` would have read.
+            return
+
+        for index, request in enumerate(step.live.uplink or ()):
+            label = _uplink_label(request, index)
+            try:
+                uplink.stopped = 'was never sent: the downlink had ended'
+                if request.after_event is not None:
+                    wanted = scope.substitute(request.after_event)
+                    uplink.stopped = (
+                        'was never sent: no downlink event matched its `after_event`'
+                    )
+                    if not await uplink.released_by(wanted):
+                        return
+                if uplink.over:
+                    uplink.stopped = 'was never sent: the downlink had ended'
+                    return
+                message = self._live_request(request, scope)
+                uplink.stopped = (
+                    f'was sent and not answered: the SUT had not answered it '
+                    f'{_ACK_GRACE_S:g}s after the downlink ended'
+                )
+                uplink.sending = True
+                answer: WireResponse | MalformedResponse | None
+                try:
+                    answer = await exchange.send(message)
+                except MalformedResponse as exc:
+                    # The SUT has the request, and answered it in a form it
+                    # may not. A finding about that request; the ones after
+                    # it are still sent, so that the exchange can come to
+                    # its end.
+                    answer = exc
+                finally:
+                    uplink.sending = False
+                uplink.sent = index + 1
+                if isinstance(answer, MalformedResponse):
+                    uplink.result += AssertionResult(
+                        (
+                            Failure(
+                                f'uplink[{label}]', 'acknowledged',
+                                'the current task', 'another form of answer',
+                                f'uplink request {label}: {answer}',
+                            ),
+                        ),
+                        1,
+                    )
+                elif answer is not None:
+                    uplink.result += self._evaluate_ack(request, label, answer, scope)
+            except ExchangeEnded as exc:
+                uplink.stopped = f'was never sent: {exc}'
+                return
+
+    def _evaluate_ack(
+        self,
+        request: UplinkRequest,
+        label: str,
+        answer: WireResponse,
+        scope: Scope,
+    ) -> AssertionResult:
+        """What the SUT answered to one uplink request, where it answers one.
+
+        Only on a binding where such a request is a call of its own. Where it
+        is not there is nothing to evaluate, and `expect_ack` is counted
+        neither as passed nor as failed.
+        """
+        path = f'uplink[{label}]'
+        if answer.error is not None:
+            return AssertionResult(
+                (
+                    Failure(
+                        path, 'acknowledged', 'the current task',
+                        _observed_error(answer.error),
+                        f'uplink request {label} was answered with an error: '
+                        f'{_name_of(answer.error)}: {answer.error.message}',
+                    ),
+                ),
+                1,
+            )
+        if request.expect_ack is None:
+            return AssertionResult(checks=1)
+        return evaluate_body(
+            scope.substitute(request.expect_ack), answer.payload, path=f'{path}.ack'
+        )
+
+    def _unsent(self, step: Step, uplink: _Uplink) -> AssertionResult:
+        """The failure for the first uplink request that did not go through.
+
+        Only the first: the ones after it were waiting for it.
+        """
+        requests = step.live.uplink or ()
+        if uplink.sent >= len(requests):
+            return AssertionResult()
+        if uplink.missed is not None:
+            return AssertionResult(
+                (
+                    Failure(
+                        'capture', 'capture', 'a value in the first event', None,
+                        f'{uplink.missed}; no uplink request was sent',
+                    ),
+                ),
+                1,
+            )
+        label = _uplink_label(requests[uplink.sent], uplink.sent)
+        return AssertionResult(
+            (
+                Failure(
+                    f'uplink[{label}]', 'sent', 'sent', 'not sent',
+                    f'uplink request {label} {uplink.stopped} '
+                    f'({len(uplink.events)} event(s) received)',
+                ),
+            ),
+            1,
+        )
+
     async def _read_streams(
         self,
         step: Step,
@@ -1354,7 +1654,8 @@ class Runner:
                     source, block,
                     disconnect_after=None if plan is None else plan.disconnect_after,
                     stays_open_ms=_stays_open_ms(block, plan),
-                    on_first_event=(
+                    # Called with every event; the caller keeps the first.
+                    on_event=(
                         None if on_first_event is None
                         else functools.partial(on_first_event, index)
                     ),
@@ -1385,8 +1686,16 @@ class Runner:
         started: float,
         gathered: list[_Reading | BaseException],
         duration: AssertionResult,
+        *,
+        leading: AssertionResult | None = None,
     ) -> StepResult:
-        """Capture from what the step's streams produced and evaluate it."""
+        """Capture from what the step's streams produced and evaluate it.
+
+        ``leading`` is what was established while the stream was read, and is
+        reported before anything the events fail: on a live exchange a
+        request that was never sent is why the events are not what the step
+        expects.
+        """
         block = step.expect_stream
         plans = _plans(block)
 
@@ -1430,7 +1739,7 @@ class Runner:
             if block.streams:
                 plans = tuple(block.streams)
 
-        result = AssertionResult()
+        result = leading if leading is not None else AssertionResult()
         for index, (plan, (events, status, timed_out, closed_by_sut)) in enumerate(
             zip(plans, collected)
         ):
@@ -1539,7 +1848,7 @@ class Runner:
         *,
         disconnect_after: int | None = None,
         stays_open_ms: int | None = None,
-        on_first_event: Callable[[StreamedEvent], None] | None = None,
+        on_event: Callable[[StreamedEvent], None] | None = None,
     ) -> _Reading:
         """Read a stream into a list, bounded by `timeout_ms` and `max_count`.
 
@@ -1559,8 +1868,8 @@ class Runner:
         read stops when that long passes without another. Whether the SUT
         closed the stream first is reported, since that is the failure.
 
-        ``on_first_event`` is called with the first event as soon as it has
-        arrived, while the read goes on.
+        ``on_event`` is called with every event as soon as it has arrived,
+        while the read goes on.
         """
         events: list[StreamedEvent] = []
         status: int | None = None
@@ -1594,8 +1903,11 @@ class Runner:
                 if status is None:
                     status = event.status
                 events.append(normalize(event.data, event.index))
-                if on_first_event is not None and len(events) == 1:
-                    on_first_event(events[0])
+                if on_event is not None:
+                    on_event(events[-1])
+                    # A task the event woke runs before the next event is
+                    # read, however many of them one network read delivered.
+                    await asyncio.sleep(0)
                 if limit is not None and len(events) >= limit:
                     return
 
@@ -1605,7 +1917,8 @@ class Runner:
             await asyncio.wait_for(pump(), deadline / 1000)
         except (asyncio.TimeoutError, TimeoutError):
             timed_out = True
-        await _hang_up(source, required=disconnect_after is not None)
+        finally:
+            await _hang_up(source, required=disconnect_after is not None)
         return _Reading(events, status, timed_out, closed_by_sut)
 
     def _evaluate_stream_status(
@@ -1975,6 +2288,45 @@ def _surfaced(parsed: Mapping[str, Any]) -> Mapping[str, Any]:
         **parsed,
         'events': [normalize(event, index).view() for index, event in enumerate(events)],
     }
+
+
+def _unrelatable(
+    requests: Iterable[UplinkRequest], binding: TransportBinding
+) -> str | None:
+    """Why an uplink request cannot be sent on ``binding``, or ``None``.
+
+    On gRPC every request is a message on the one stream of the exchange. On
+    an HTTP binding each later request is a call of its own, and A2A does not
+    say yet how a server tells which exchange such a call belongs to. Until
+    it does, the call is related to its exchange by the task its message
+    names. A request that names no task, or that is not a message, has
+    nothing to relate it, so a test that sends one has to be restricted to
+    gRPC. This is a mistake in the test, and nothing is sent.
+    """
+    if binding is TransportBinding.GRPC:
+        return None
+    for index, request in enumerate(requests):
+        label = _uplink_label(request, index)
+        if request.send_message is None:
+            kind = 'subscribe' if request.subscribe is not None else 'unrecognized'
+            return (
+                f'uplink request {label} is `{kind}`. On {binding.value} a later '
+                f'request of a live exchange is a call of its own, and only a '
+                f'message that names the task of the exchange can be related '
+                f'to it; the test has to declare `transport: [grpc]`'
+            )
+        message = request.send_message.get('message')
+        named = 'taskId' in request.send_message or (
+            isinstance(message, Mapping) and 'taskId' in message
+        )
+        if not named:
+            return (
+                f'uplink request {label} names no task. On {binding.value} a '
+                f'later request of a live exchange is a call of its own, and '
+                f'the task its message names is what relates it to the '
+                f'exchange; give it `taskId`, or declare `transport: [grpc]`'
+            )
+    return None
 
 
 def _is_streaming(step: Step) -> bool:

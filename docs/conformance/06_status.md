@@ -50,7 +50,8 @@ If a second ACTS runner appears, these are the points where its results could le
 
 - **Promote the PR job to a gate**: remove `continue-on-error` in the SDKs that are conformant, and in the others once they are.
 - **Corpus pin**: move to A2A `main` once #1882, #2227 and #2468 land. Until then a change to the draft can arrive here only by a deliberate re-pin.
-- **Live exchanges**: the runner reads a `live` step and does not execute it, so the ten `STREAM-LIVE` tests are skipped in a run at 1.1.
+- **Live exchanges over HTTP**: the runner drives a live exchange on all three bindings. How a later HTTP call is related to its exchange, and where a rejected HTTP request is reported, are not in A2A yet; the runner follows the ACTS specification, and both may change. See [02_architecture.md](02_architecture.md#live-exchanges).
+- **The proto revision**: the stubs are generated from the A2A 1.1 release candidate. A2A has since renamed a member of `StreamRequest`, which changes what a live request looks like on the JSON bindings. The runner follows the stubs, so this moves with the pin in `build_protos.sh`.
 - **Push payload kinds**: the webhook receiver stores `task`, `statusUpdate`, `artifactUpdate` and `messageUpdate` deliveries and refuses `message`. Storing that kind needs `PUSH-DELIV-003` to accept it first; today the test accepts a task, a status update or an artifact update.
 - **A run at 1.1 in CI**: the shared driver and the dashboard have no notion of the run version yet.
 - **SUT output on the CLI**: `run_acts.py` discards the agent's stdout and stderr. A start-up failure has to be reproduced by hand; the service path captures logs under `/app/logs` but the CLI has no `--log-dir`.

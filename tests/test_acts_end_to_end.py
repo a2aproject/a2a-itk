@@ -49,6 +49,7 @@ from tests.acts_fake_agent import (
     AgentError,
     FakeAgent,
     VirtualTimeLoop,
+    _Stream,
     run_virtual,
 )
 
@@ -262,18 +263,19 @@ class TestAConformingAgentPassesAt11:
     """The same corpus, in a run at A2A 1.1: the tests for 1.0 that still
     apply, and the tests that start at 1.1."""
 
-    #: The live exchange tests that target JSON-RPC. The runner does not
-    #: drive a live exchange yet, and skips them.
+    #: The live exchange tests that target JSON-RPC. The other four are for
+    #: gRPC only.
     LIVE = {
         'STREAM-LIVE-001', 'STREAM-LIVE-002', 'STREAM-LIVE-003',
         'STREAM-LIVE-004', 'STREAM-LIVE-009', 'STREAM-LIVE-010',
     }
 
-    def test_every_test_passes_except_the_live_exchange_tests(self, whole_corpus_at_1_1):
-        assert not_passed(whole_corpus_at_1_1) == {
-            test_id: ('skip', 'contains live step(s); not yet supported')
-            for test_id in self.LIVE
-        }
+    def test_every_test_passes(self, whole_corpus_at_1_1):
+        assert not_passed(whole_corpus_at_1_1) == {}
+
+    def test_the_live_exchange_tests_are_among_them(self, whole_corpus_at_1_1):
+        ran = {r.id for r in whole_corpus_at_1_1.results if r.result is Outcome.PASS}
+        assert self.LIVE <= ran
 
     def test_the_run_covers_every_jsonrpc_test_for_1_1(self, whole_corpus_at_1_1):
         applicable = {
@@ -295,9 +297,6 @@ class TestAConformingAgentPassesAt11:
         self, whole_corpus_at_1_1
     ):
         for result in whole_corpus_at_1_1.results:
-            if result.id in self.LIVE:
-                assert result.steps == ()
-                continue
             assert result.steps, result.id
             assert all(s.result is Outcome.PASS for s in result.steps), result.id
             assert sum(s.checks for s in result.steps) > 0, result.id
@@ -305,8 +304,10 @@ class TestAConformingAgentPassesAt11:
     def test_the_deviation_tests_ran_against_the_deviated_agents(
         self, whole_corpus_at_1_1
     ):
-        """One more than at 1.0: the test that an agent which does not
-        advertise `userArtifacts` refuses an artifact from the client."""
+        """Two more than at 1.0: the tests that an agent which does not
+        advertise `userArtifacts` refuses an artifact from the client, and
+        that one which does not advertise `streaming` refuses a live
+        exchange."""
         by_configuration: dict[str, set[str]] = {}
         for result in whole_corpus_at_1_1.results:
             if result.configuration:
@@ -314,7 +315,7 @@ class TestAConformingAgentPassesAt11:
         assert by_configuration == {
             acts_runner.REDUCED_CAPABILITIES_ENV: {
                 'CORE-CAP-001', 'CORE-CAP-002', 'SEC-EXTCARD-003', 'PUSH-CFG-004',
-                'CORE-USERART-001',
+                'CORE-USERART-001', 'STREAM-LIVE-009',
             },
             acts_runner.AUTH_ENFORCED_ENV: {
                 'SEC-AUTH-001', 'SEC-AUTH-002', 'SEC-AUTH-003', 'SEC-AUTH-004',
@@ -326,11 +327,9 @@ class TestAConformingAgentPassesAt11:
         assert report['spec_version'] == '1.1'
         assert report['environment']['interface_protocol_version'] == '1.1'
         ran = len(whole_corpus_at_1_1.results)
-        assert report['summary']['total'] == ran
-        assert report['summary']['skipped'] == len(self.LIVE)
-        assert report['summary']['passed'] == ran - len(self.LIVE)
+        assert report['summary']['total'] == report['summary']['passed'] == ran
+        assert report['summary']['skipped'] == 0
         assert report['summary']['failed'] == report['summary']['errors'] == 0
-        # A skip does not count against conformance.
         assert report_writer.is_conformant(report)
 
 
@@ -1543,6 +1542,237 @@ class TestDeliveriesAndClientStreamsEndToEnd:
         assert result.failure.assertion_path == 'parsed.events'
         # A stream without a rejection is read to its end all the same.
         assert results['PROBE-CLIENT-SKIPS-UNKNOWN'].result is Outcome.PASS
+
+
+# ---------------------------------------------------------------------------
+# Live exchanges, end to end
+# ---------------------------------------------------------------------------
+#
+# Over JSON-RPC a live exchange is several calls: one that opens it and is
+# answered with the event stream, and one for each later request, answered
+# with the task. The corpus tests of it run above with the rest of the corpus.
+# Here they run against agents that get the exchange wrong.
+
+LIVE_REJECTION_PROBE = '''\
+acts_version: "1.0"
+spec_version: "1.1"
+suites:
+  - id: live-rejection-probe
+    name: Live rejection probe
+    tests:
+      - id: PROBE-LIVE-DECLINED
+        name: A declined message is reported on the downlink and changes nothing
+        level: should
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-live-reject]
+        runner_requirements: [live_stream]
+        preconditions:
+          capabilities: {streaming: true}
+        steps:
+          - id: exchange
+            live:
+              open:
+                send_message:
+                  message:
+                    role: ROLE_USER
+                    parts: [{text: "tck-live-reject probe"}]
+              uplink:
+                - id: declined
+                  send_message:
+                    message:
+                      role: ROLE_USER
+                      messageId: probe-declined
+                      taskId: "{{exchange.taskId}}"
+                      parts: [{text: "reject this one"}]
+                  expect_ack:
+                    id: "{{exchange.taskId}}"
+                - id: accepted
+                  after_event:
+                    error: {referenceId: probe-declined}
+                  send_message:
+                    message:
+                      role: ROLE_USER
+                      taskId: "{{exchange.taskId}}"
+                      parts: [{text: "accepted after the rejection"}]
+                - id: finish
+                  after_event:
+                    status_update:
+                      status:
+                        message:
+                          parts: [{text: "live-echo:1"}]
+                  send_message:
+                    message:
+                      role: ROLE_USER
+                      taskId: "{{exchange.taskId}}"
+                      parts: [{text: done}]
+            capture: {taskId: task.id}
+            expect_stream:
+              timeout_ms: 30000
+              ordering: [monotonic_state, contiguous_generation]
+              events:
+                - description: The rejection names the message it refers to
+                  match: any_position
+                  error:
+                    referenceId: probe-declined
+                    code: {type: string}
+              final_event:
+                status: {state: TASK_STATE_COMPLETED}
+'''
+
+
+class TestLiveExchangesEndToEnd:
+    def run_one(self, behaviors_path, test_id, customize=None, **kwargs) -> TestResult:
+        run = conformance_run(
+            behaviors_path, spec_version='1.1', test_ids=[test_id],
+            customize=customize, **kwargs,
+        )
+        (result,) = run.results
+        return result
+
+    def test_every_step_of_an_exchange_is_counted(self, behaviors_path):
+        """The acknowledgment, the events and the final event of
+        `STREAM-LIVE-003` are each compared with something."""
+        result = self.run_one(behaviors_path, 'STREAM-LIVE-003')
+        assert result.result is Outcome.PASS, result.failure
+        (exchange,) = result.steps
+        assert exchange.checks >= 5
+
+    def test_an_agent_that_answers_a_later_request_with_events_is_caught(
+        self, behaviors_path
+    ):
+        """It takes every call for one that opens an exchange. The message
+        still reaches the task, so the downlink looks right; what is wrong
+        is the answer to the call."""
+        def always_open(agent: FakeAgent) -> None:
+            def as_a_new_exchange(record, send):
+                agent._hand_over(agent._accept(send), send)
+                return agent._follow(record, (1, 1), [agent._snapshot(record)], live=True)
+
+            agent._live_uplink = as_a_new_exchange
+
+        result = self.run_one(behaviors_path, 'STREAM-LIVE-003', always_open)
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'exchange'
+        assert result.failure.assertion_path == "uplink['acknowledged']"
+        assert 'with an event stream' in result.failure.message
+
+    def test_an_agent_that_acknowledges_with_another_task_is_caught(self, behaviors_path):
+        def another_task(agent: FakeAgent) -> None:
+            uplink = agent._live_uplink
+
+            def renamed(record, send):
+                task = uplink(record, send)
+                task.id = 'some-other-task'
+                return task
+
+            agent._live_uplink = renamed
+
+        result = self.run_one(behaviors_path, 'STREAM-LIVE-003', another_task)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == "uplink['acknowledged'].ack.id"
+
+    def test_an_agent_that_does_not_answer_on_the_downlink_is_caught(self, behaviors_path):
+        """It takes the messages and echoes none. The request held for the
+        second echo is never sent, and the step says so."""
+        def silent(agent: FakeAgent) -> None:
+            async def never_echoes(record, request):
+                agent._set_status(record, pb.TASK_STATE_WORKING)
+                while True:
+                    request = await agent._next_request(record)
+                    if request.message.parts[0].text == 'done':
+                        agent._set_status(record, pb.TASK_STATE_COMPLETED)
+                        return
+
+            agent.behaviors['tck-live-echo'] = never_echoes
+
+        result = self.run_one(behaviors_path, 'STREAM-LIVE-002', silent)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == "uplink['finish']"
+        assert result.failure.message.startswith(
+            "uplink request 'finish' was never sent: no downlink event matched "
+            "its `after_event`"
+        )
+
+    def test_a_downlink_that_does_not_open_with_the_task_is_caught(self, behaviors_path):
+        """The requests of the test name the task the first event gives."""
+        def no_snapshot(agent: FakeAgent) -> None:
+            follow = agent._follow
+
+            def without_first(record, version, first, *, live=False):
+                return follow(record, version, [] if live else first, live=live)
+
+            agent._follow = without_first
+
+        result = self.run_one(behaviors_path, 'STREAM-LIVE-001', no_snapshot)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'capture'
+        assert "cannot capture 'taskId'" in result.failure.message
+
+    def test_an_agent_that_opens_an_exchange_for_a_task_it_does_not_have_is_caught(
+        self, behaviors_path
+    ):
+        def any_task(agent: FakeAgent) -> None:
+            subscribe = agent.subscribe_to_task
+
+            def lenient(request, version, *, live=False):
+                if request.id not in agent._tasks:
+                    return _Stream([], None, lambda: None)
+                return subscribe(request, version, live=live)
+
+            agent.subscribe_to_task = lenient
+
+        result = self.run_one(behaviors_path, 'STREAM-LIVE-010', any_task)
+        assert result.result is Outcome.FAIL
+        assert 'expected an error, but the stream opened' in result.failure.message
+
+    # -- a request the agent declines ------------------------------------------------
+
+    @pytest.fixture
+    def probe(self, tmp_path) -> Path:
+        path = tmp_path / 'live-rejection.acts.yaml'
+        path.write_text(LIVE_REJECTION_PROBE, encoding='utf-8')
+        return path
+
+    def test_a_declined_message_is_reported_and_the_exchange_goes_on(
+        self, behaviors_path, probe
+    ):
+        """Over JSON-RPC, where this agent reports the rejection on the
+        downlink and still answers the call with the task. The corpus tests
+        of rejections are for gRPC only, because A2A leaves it to each
+        binding how a rejection reaches the caller."""
+        result = self.run_one(behaviors_path, 'PROBE-LIVE-DECLINED', suite_path=probe)
+        assert result.result is Outcome.PASS, result.failure
+
+    def test_an_agent_that_never_reports_the_rejection_is_caught(
+        self, behaviors_path, probe
+    ):
+        def swallow(agent: FakeAgent) -> None:
+            agent._live_uplink = lambda record, send: agent._view(record)
+
+        result = self.run_one(
+            behaviors_path, 'PROBE-LIVE-DECLINED', swallow, suite_path=probe
+        )
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == "uplink['accepted']"
+
+    def test_a_rejection_that_moves_the_task_on_is_caught(self, behaviors_path, probe):
+        """A rejected request does not change the task, so the generation
+        must not move: the events after it would otherwise skip a value."""
+        def counts_it(agent: FakeAgent) -> None:
+            uplink = agent._live_uplink
+
+            def advancing(record, send):
+                if send.message.message_id == 'probe-declined':
+                    agent._advance(record)
+                return uplink(record, send)
+
+            agent._live_uplink = advancing
+
+        result = self.run_one(
+            behaviors_path, 'PROBE-LIVE-DECLINED', counts_it, suite_path=probe
+        )
+        assert result.result is Outcome.FAIL
+        assert 'generation' in result.failure.message
 
 
 # ---------------------------------------------------------------------------

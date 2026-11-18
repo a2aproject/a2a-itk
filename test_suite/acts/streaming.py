@@ -326,7 +326,12 @@ def check_generation(
     return result
 
 
-def _matches(assertion: Mapping[str, Any], event: StreamedEvent) -> bool:
+def event_matches(assertion: Mapping[str, Any], event: StreamedEvent) -> bool:
+    """Does one event satisfy an assertion written for an event?
+
+    The assertion addresses the event as `events` entries do: by the name of
+    its kind in either spelling, or straight through to its fields.
+    """
     return evaluate(assertion, event.view()).ok
 
 
@@ -373,7 +378,7 @@ def _evaluate_event_assertion(
     at = _addressed(assertion, position)
 
     if at is None:
-        if any(_matches(body, event) for event in events):
+        if any(event_matches(body, event) for event in events):
             return AssertionResult(checks=1)
         return _fail(
             f'{path}[*]', 'any_position', body, None,
@@ -427,10 +432,10 @@ def awaits_events(
             continue
         at = _addressed(assertion, position)
         if at is None:
-            waiting = waiting or not any(_matches(body, event) for event in events)
+            waiting = waiting or not any(event_matches(body, event) for event in events)
         elif at >= len(events):
             waiting = True
-        elif not _matches(body, events[at]):
+        elif not event_matches(body, events[at]):
             return False
     return waiting
 
@@ -532,5 +537,6 @@ __all__ = [
     'check_ordering',
     'evaluate_events',
     'evaluate_stream',
+    'event_matches',
     'normalize',
 ]
