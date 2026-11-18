@@ -75,7 +75,7 @@ The cluster is started once for the whole file (the union of every agent any sce
 
 Fetched peers are built once and reused. The cache lives under `$ITK_CACHE_DIR`, default `~/.cache/a2a-itk`. A cold run of the smoke set takes a few minutes; a warm one starts agents in seconds.
 
-The cache key includes the peer's commit SHA, the digest of the ITK image and a hash of `protos/instruction.proto`, so a changed proto or a rebuilt image invalidates old trees automatically. `python -m test_suite.launcher.cache evict` removes trees unused for seven days (`ITK_TREE_TTL`) and caps the total at 50 GB (`ITK_DISK_BUDGET_BYTES`). The CI driver runs it after each `/run` with a two-day TTL.
+The cache key includes the peer's commit SHA, the digest of the ITK image and a hash of `protos/instruction.proto`, so a changed proto or a rebuilt image invalidates old trees automatically. `python -m test_suite.launcher.cache evict` removes trees unused for two days (`ITK_TREE_TTL`) and caps the total at 50 GB (`ITK_DISK_BUDGET_BYTES`). The CI driver runs it after each successful `/run`.
 
 To force a rebuild of one peer, delete its directory under `~/.cache/a2a-itk/trees/`.
 
@@ -191,7 +191,7 @@ Everything the launcher does can be tuned without code changes. The ones you are
 | `ITK_BUILD_TIMEOUT` | 10 min | Per-peer build budget |
 | `ITK_CHECKOUT_TIMEOUT` | 5 min | Per-peer fetch budget |
 | `ITK_RETRIES` | 3 | Retries for transient git failures |
-| `ITK_TREE_TTL` | 7 days | Cache eviction age. The CI driver defaults to 2 days |
+| `ITK_TREE_TTL` | 2 days | Cache eviction age |
 | `ITK_DISK_BUDGET_BYTES` | 50 GB | Cache size cap |
 | `ITK_TEARDOWN_GRACE` | 10 s | SIGTERM-to-SIGKILL grace per agent |
 | `ITK_ENTRYPOINT` | `itk_service_v2.py` | Which script the container runs |

@@ -65,7 +65,7 @@ def disk_budget_bytes() -> int:
 
 def tree_ttl() -> int:
     """Trees older than this (seconds) are eligible for eviction."""
-    return _env_int('ITK_TREE_TTL', 7 * 24 * 60 * 60)  # 7 days
+    return _env_int('ITK_TREE_TTL', 2 * 24 * 60 * 60)  # 2 days
 
 
 def readiness_timeout() -> int:

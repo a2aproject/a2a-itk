@@ -300,7 +300,11 @@ CURL_STATUS=$?
 # - Not in an ACTS run, which exits above: it starts no peers.
 # - This is housekeeping, so a failure is reported and the run goes on.
 if [ $CURL_STATUS -eq 0 ]; then
-  $CONTAINER_RT exec -e ITK_TREE_TTL="${ITK_TREE_TTL:-172800}" -w /app itk-service \
+  EVICT_ARGS=()
+  if [ -n "${ITK_TREE_TTL:-}" ]; then
+    EVICT_ARGS+=(-e ITK_TREE_TTL="$ITK_TREE_TTL")
+  fi
+  $CONTAINER_RT exec "${EVICT_ARGS[@]}" -w /app itk-service \
     uv run python -m test_suite.launcher.cache evict \
     || echo "Warning: launcher cache eviction failed; continuing." >&2
 fi
