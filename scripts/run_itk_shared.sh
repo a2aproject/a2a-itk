@@ -147,20 +147,6 @@ $CONTAINER_RT exec -u root itk-service git config --system core.multiPackIndex f
 $CONTAINER_RT exec -u root itk-service bash -lc \
   'while IFS= read -r -d "" d; do git config --system --add safe.directory "${d%/.git}"; done < <(find /root/.cache/a2a-itk -type d -name .git -print0)'
 
-# 4.2. Drop cached peer trees past ITK_TREE_TTL (7 days by default) or over
-# ITK_DISK_BUDGET_BYTES. CI saves this directory with actions/cache, so without
-# this step the saved cache grows with every new peer commit.
-# - Not in an ACTS run: it starts no peers, so it would only remove trees.
-# - A tree's age counts from the last run that saved the cache. CI saves once
-#   per commit, and a nightly or re-run on the same commit saves nothing, so
-#   the TTL has to outlast the longest expected gap between pushes.
-# - This is housekeeping, so a failure is reported and the run goes on.
-if [ "${ITK_ACTS_RUN}" != "1" ] && [ "${ITK_ACTS_RUN^^}" != "TRUE" ]; then
-  $CONTAINER_RT exec -w /app itk-service \
-    uv run python -m test_suite.launcher.cache evict \
-    || echo "Warning: launcher cache eviction failed; continuing." >&2
-fi
-
 # 5. Wait for readiness.
 MAX_RETRIES=30
 echo "Waiting for ITK service to start on 127.0.0.1:8000..."
@@ -301,6 +287,19 @@ curl -s --max-time "$ITK_RUN_TIMEOUT" -X POST http://127.0.0.1:8000/run \
   -d @run_request.json \
   -o raw_results.json
 CURL_STATUS=$?
+
+# 6c. Drop cached peer trees unused for ITK_TREE_TTL or over
+# ITK_DISK_BUDGET_BYTES. CI saves this directory with actions/cache, so without
+# this step the saved cache grows with every new peer commit.
+# - After /run: every tree this run used was touched on its cache hit, so only
+#   trees no run has used for the TTL are removed. A restored cache can be
+#   days old (a nightly or re-run on the same commit saves nothing), and this
+#   order keeps those stale times from evicting peers about to be reused.
+# - Not in an ACTS run, which exits above: it starts no peers.
+# - This is housekeeping, so a failure is reported and the run goes on.
+$CONTAINER_RT exec -e ITK_TREE_TTL=172800 -w /app itk-service \
+  uv run python -m test_suite.launcher.cache evict \
+  || echo "Warning: launcher cache eviction failed; continuing." >&2
 
 # 7. Report. itk_report.py validates the response shape before anything
 # consumes it, so a FastAPI error envelope can't reach process_results.py and
