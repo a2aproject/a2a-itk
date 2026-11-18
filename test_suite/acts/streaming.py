@@ -342,10 +342,27 @@ def _event_assertion_body(assertion: EventAssertion) -> dict[str, Any]:
     return body
 
 
+def _addressed(assertion: EventAssertion, position: int) -> int | None:
+    """The index of the one event an assertion applies to.
+
+    ``None`` for `match: any_position`, which applies to whichever event
+    matches. Otherwise `index` where it is given, and by default the
+    assertion's own place in the list.
+    """
+    if assertion.index is not None:
+        return assertion.index
+    if assertion.match is EventMatch.ANY_POSITION:
+        return None
+    return position
+
+
 def _evaluate_event_assertion(
     assertion: EventAssertion,
     position: int,
     events: Sequence[StreamedEvent],
+    *,
+    path: str,
+    had: str,
 ) -> AssertionResult:
     body = _event_assertion_body(assertion)
     if not body:
@@ -353,34 +370,69 @@ def _evaluate_event_assertion(
         return AssertionResult()
 
     label = assertion.description or f'events[{position}]'
+    at = _addressed(assertion, position)
 
-    if assertion.index is not None:
-        if assertion.index >= len(events):
-            return _fail(
-                f'events[{assertion.index}]', 'index', body, None,
-                f'{label}: no event at index {assertion.index}; '
-                f'the stream had {len(events)}',
-            )
-        return evaluate(body, events[assertion.index].view(),
-                        path=f'events[{assertion.index}]')
-
-    if assertion.match is EventMatch.ANY_POSITION:
+    if at is None:
         if any(_matches(body, event) for event in events):
             return AssertionResult(checks=1)
         return _fail(
-            'events[*]', 'any_position', body, None,
+            f'{path}[*]', 'any_position', body, None,
             f'{label}: no event among the {len(events)} received matched',
         )
 
-    # `exact_position` is the default (§7): the assertion's own place in the
-    # list is the event index it applies to.
-    if position >= len(events):
+    if at >= len(events):
+        operator = 'index' if assertion.index is not None else 'exact_position'
         return _fail(
-            f'events[{position}]', 'exact_position', body, None,
-            f'{label}: no event at index {position}; '
-            f'the stream had {len(events)}',
+            f'{path}[{at}]', operator, body, None,
+            f'{label}: no event at index {at}; {had} {len(events)}',
         )
-    return evaluate(body, events[position].view(), path=f'events[{position}]')
+    return evaluate(body, events[at].view(), path=f'{path}[{at}]')
+
+
+def evaluate_events(
+    assertions: Sequence[EventAssertion],
+    events: Sequence[StreamedEvent],
+    *,
+    path: str = 'events',
+    had: str = 'the stream had',
+) -> AssertionResult:
+    """Evaluate an `events` list against the events that arrived.
+
+    ``path`` is where the list sits in the test, for a failure to name, and
+    ``had`` words the report of an event that is not there.
+    """
+    result = AssertionResult()
+    for position, assertion in enumerate(assertions):
+        result += _evaluate_event_assertion(
+            assertion, position, events, path=path, had=had
+        )
+    return result
+
+
+def awaits_events(
+    assertions: Sequence[EventAssertion], events: Sequence[StreamedEvent]
+) -> bool:
+    """Could an event that has not arrived yet change what ``assertions`` come to?
+
+    True while an assertion addresses an event that is not there: an index
+    past the last event, or `any_position` with no match so far. An assertion
+    whose event has arrived is decided, because events are not changed once
+    they have arrived. One that is decided and does not hold has failed the
+    list, and nothing is waited for after that.
+    """
+    waiting = False
+    for position, assertion in enumerate(assertions):
+        body = _event_assertion_body(assertion)
+        if not body:
+            continue
+        at = _addressed(assertion, position)
+        if at is None:
+            waiting = waiting or not any(_matches(body, event) for event in events)
+        elif at >= len(events):
+            waiting = True
+        elif not _matches(body, events[at]):
+            return False
+    return waiting
 
 
 def evaluate_stream(
@@ -439,8 +491,7 @@ def evaluate_stream(
     elif Ordering.MONOTONIC_GENERATION in rules:
         result += check_generation(events)
 
-    for position, assertion in enumerate(expect.events or ()):
-        result += _evaluate_event_assertion(assertion, position, events)
+    result += evaluate_events(expect.events or (), events)
 
     if expect.final_event is not None:
         if not events:
@@ -476,8 +527,10 @@ __all__ = [
     'TERMINAL_STATES',
     'StreamedEvent',
     'UPDATE_KINDS',
+    'awaits_events',
     'check_generation',
     'check_ordering',
+    'evaluate_events',
     'evaluate_stream',
     'normalize',
 ]

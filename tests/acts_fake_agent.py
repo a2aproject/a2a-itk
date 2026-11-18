@@ -406,6 +406,34 @@ def _client_parse(operation: str, payload: Any) -> Any:
     return MessageToDict(ParseDict(payload, message_type(), ignore_unknown_fields=True))
 
 
+#: The operations a client reads as a stream of events, for `tck-client-parse`.
+_CLIENT_STREAMS = frozenset({
+    'send_streaming_message', 'subscribe_to_task', 'send_live_message',
+})
+
+
+def _client_read_stream(operation: str, wire_stream: Any) -> Any:
+    """Read a canned stream the way a client of this agent would.
+
+    Each event is unwrapped from its JSON-RPC envelope and parsed as a stream
+    response. An event of a kind the client does not know is skipped, and the
+    client reads on: a later minor version may add kinds. A JSON-RPC error
+    fails the call, and is reported as it is for a single response.
+    """
+    if operation not in _CLIENT_STREAMS:
+        raise ValueError(f'{operation!r} is not answered with a stream')
+    events: list[Any] = []
+    for item in wire_stream:
+        if isinstance(item, dict) and item.get('jsonrpc') == '2.0':
+            if 'error' in item:
+                return {'error': item['error']}
+            item = item.get('result')
+        event = ParseDict(item, pb.StreamResponse(), ignore_unknown_fields=True)
+        if event.WhichOneof('payload') is not None:
+            events.append(MessageToDict(event))
+    return {'events': events}
+
+
 # ---------------------------------------------------------------------------
 # The agent
 # ---------------------------------------------------------------------------
@@ -1397,7 +1425,10 @@ class FakeAgent:
             )
             return
         try:
-            parsed = _client_parse(asked['operation'], asked.get('wire_payload'))
+            if 'wire_stream' in asked:
+                parsed = _client_read_stream(asked['operation'], asked['wire_stream'])
+            else:
+                parsed = _client_parse(asked['operation'], asked.get('wire_payload'))
         except (ParseError, ValueError) as exc:
             self._set_status(
                 record, pb.TASK_STATE_FAILED, f'the client could not parse the payload: {exc}'

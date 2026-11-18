@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from test_suite.acts.schema import (
     ActsDocument,
     ErrorType,
+    EventMatch,
     ExpectError,
     ExpectStream,
     HttpMethod,
@@ -465,6 +466,102 @@ class TestBackgroundStep:
         assert test.runner_requirements is None
 
 
+class TestClientResponse:
+    """The canned response a client step feeds to the SDK's own client."""
+
+    STREAM = [
+        {'jsonrpc': '2.0', 'id': '1', 'result': {'task': {'id': 'T1'}}},
+        {'jsonrpc': '2.0', 'id': '1', 'result': {'statusUpdate': {'taskId': 'T1'}}},
+    ]
+
+    @staticmethod
+    def _client_step(**response):
+        return {
+            'id': 'parse',
+            'client_response': response,
+            'expect_parsed': {'events': {'count': 2}},
+        }
+
+    def test_a_stream_of_events_is_kept_in_order(self):
+        step = Step.model_validate(self._client_step(
+            operation='send_streaming_message', wire_stream=self.STREAM,
+        ))
+        assert step.kind() is StepKind.CLIENT
+        assert step.client_response.wire_stream == self.STREAM
+        assert step.client_response.wire_payload is None
+
+    def test_one_payload_is_still_accepted(self):
+        step = Step.model_validate(self._client_step(
+            operation='get_task', wire_payload={'id': 'T1'},
+        ))
+        assert step.client_response.wire_payload == {'id': 'T1'}
+        assert step.client_response.wire_stream is None
+
+    def test_it_needs_one_of_the_two(self):
+        with pytest.raises(ValidationError, match='got neither'):
+            Step.model_validate(self._client_step(operation='get_task'))
+
+    def test_it_cannot_have_both(self):
+        with pytest.raises(ValidationError, match='exactly one of `wire_payload` and `wire_stream`'):
+            Step.model_validate(self._client_step(
+                operation='send_streaming_message',
+                wire_payload={}, wire_stream=self.STREAM,
+            ))
+
+    @pytest.mark.parametrize('nothing', [[], None])
+    def test_a_stream_lists_at_least_one_event(self, nothing):
+        with pytest.raises(ValidationError):
+            Step.model_validate(self._client_step(
+                operation='send_streaming_message', wire_stream=nothing,
+            ))
+
+    def test_the_downlink_of_a_live_exchange_is_a_stream_a_client_can_be_fed(self):
+        step = Step.model_validate(self._client_step(
+            operation='send_live_message', wire_stream=self.STREAM,
+        ))
+        assert step.client_response.operation is Operation.SEND_LIVE_MESSAGE
+
+
+class TestLiveMessageOperation:
+    def test_an_operation_step_cannot_name_it(self):
+        """It sends one request and reads one response; a live exchange is
+        neither."""
+        with pytest.raises(ValidationError, match='`send_live_message` is a two-way exchange'):
+            Step.model_validate(_step(
+                operation='send_live_message', expect=None,
+                expect_stream={'min_count': 1},
+            ))
+
+
+class TestWebhookEvents:
+    """`expect_webhook.events`: individual deliveries the step waits for."""
+
+    @staticmethod
+    def _webhook(**block):
+        return Step.model_validate(
+            {'id': 'delivered', 'expect_webhook': {'task_id': 'T1', **block}}
+        )
+
+    def test_they_are_event_assertions_like_those_of_a_stream(self):
+        step = self._webhook(events=[
+            {'description': 'the task completed', 'match': 'any_position',
+             'status': {'state': 'TASK_STATE_COMPLETED'}},
+            {'index': 0, 'task': {'id': 'T1'}},
+        ])
+        completed, first = step.expect_webhook.events
+        assert completed.match is EventMatch.ANY_POSITION
+        assert completed.model_extra == {'status': {'state': 'TASK_STATE_COMPLETED'}}
+        assert first.index == 0
+
+    def test_an_empty_list_is_rejected(self):
+        """It would wait for nothing, and reads as if it waited."""
+        with pytest.raises(ValidationError):
+            self._webhook(events=[])
+
+    def test_a_step_without_them_is_unchanged(self):
+        assert self._webhook(min_count=2).expect_webhook.events is None
+
+
 class TestProtocolVersionsPrecondition:
     def test_versions_are_kept(self):
         test = Test.model_validate(
@@ -772,6 +869,8 @@ class TestEnumsMatchTheSpec:
             'cancel_task', 'subscribe_to_task', 'get_agent_card',
             'get_extended_agent_card', 'create_push_config', 'get_push_config',
             'list_push_configs', 'delete_push_config',
+            # From A2A 1.1.
+            'send_live_message',
         }
 
     def test_acts_transport_vocabulary_is_not_the_traversal_one(self):

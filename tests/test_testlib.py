@@ -12,9 +12,16 @@ import asyncio
 import logging
 import time
 
+import httpx
+import pytest
+
 import test_suite
 import testlib
-from notifications_app import _extract_task_id_v03
+from notifications_app import (
+    _extract_task_id_v03,
+    _extract_task_id_v1,
+    create_notifications_app,
+)
 from test_suite.agent_table import AgentTable
 from test_suite.launcher import config
 
@@ -34,6 +41,75 @@ class TestExtractTaskIdV03:
 
     def test_task_kind_still_uses_id(self):
         assert _extract_task_id_v03({'kind': 'task', 'id': 't2'}) == 't2'
+
+
+class TestExtractTaskIdV10:
+    """Which task an A2A 1.x push payload is about. A payload the receiver
+    cannot place is refused, and no test can then assert on it."""
+
+    @pytest.mark.parametrize(('payload', 'task_id'), [
+        ({'task': {'id': 't1', 'status': {}}}, 't1'),
+        ({'statusUpdate': {'taskId': 't2', 'status': {}}}, 't2'),
+        # From A2A 1.1: a client message added to the task.
+        ({'messageUpdate': {'taskId': 't3', 'message': {'messageId': 'm'}}}, 't3'),
+    ])
+    def test_the_kinds_it_stores(self, payload, task_id):
+        assert _extract_task_id_v1(payload) == task_id
+
+    @pytest.mark.parametrize('payload', [
+        {'artifactUpdate': {'taskId': 't1', 'artifact': {}}},
+        {'message': {'messageId': 'm', 'taskId': 't1'}},
+    ])
+    def test_the_kinds_it_does_not_store_yet(self, payload):
+        """A2A delivers these as well. Storing them changes what an existing
+        conformance test reads, so that test has to be corrected first."""
+        assert _extract_task_id_v1(payload) is None
+
+    @pytest.mark.parametrize('payload', [
+        {'statusUpdate': {'status': {}}},
+        {'statusUpdate': 'not an object'},
+        {'messageUpdate': {'taskId': 123}},
+        {'statusUpdate': {'taskId': ['t1']}},
+        {'task': {'id': {'not': 'a string'}}},
+        {},
+    ])
+    def test_a_payload_that_names_no_task(self, payload):
+        """A task id that is not a string is not one: the delivery could not
+        be read back under it."""
+        assert _extract_task_id_v1(payload) is None
+
+    def test_a_delivery_that_names_no_task_is_refused(self):
+        async def deliver() -> int:
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_notifications_app()),
+                base_url='http://receiver.test',
+            )
+            posted = await client.post(
+                '/notifications', json={'statusUpdate': {'taskId': ['t1']}}
+            )
+            await client.aclose()
+            return posted.status_code
+
+        assert asyncio.run(deliver()) == 400
+
+    def test_a_message_update_is_stored_under_its_task(self):
+        """So a test can see one that should not have been delivered."""
+        async def deliver() -> list[dict]:
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_notifications_app()),
+                base_url='http://receiver.test',
+            )
+            payload = {'messageUpdate': {'taskId': 't3', 'message': {'messageId': 'm'}}}
+            posted = await client.post('/notifications', json=payload)
+            assert posted.status_code == 200
+            stored = await client.get('/t3/notifications')
+            await client.aclose()
+            return stored.json()['notifications']
+
+        stored = asyncio.run(deliver())
+        assert [n['event'] for n in stored] == [
+            {'messageUpdate': {'taskId': 't3', 'message': {'messageId': 'm'}}}
+        ]
 
 
 class TestExecuteItkTestExceptions:

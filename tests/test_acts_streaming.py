@@ -22,8 +22,10 @@ from test_suite.acts.streaming import (
     EVENT_KINDS,
     TERMINAL_STATES,
     StreamedEvent,
+    awaits_events,
     check_generation,
     check_ordering,
+    evaluate_events,
     evaluate_stream,
     normalize,
 )
@@ -688,6 +690,105 @@ class TestEventAssertions:
             })
         ])
         assert evaluate_stream(expect, self.EVENTS).ok
+
+
+class TestEventsStillToCome:
+    """`awaits_events`: could an event that has not arrived yet satisfy an
+    assertion? What a step that reads deliveries as they arrive asks before
+    it stops reading."""
+
+    WORKING = [status('TASK_STATE_WORKING', 0)]
+    COMPLETED = {'status': {'state': 'TASK_STATE_COMPLETED'}}
+
+    def test_any_position_waits_until_an_event_matches(self):
+        wanted = [EventAssertion(match='any_position', **self.COMPLETED)]
+        assert awaits_events(wanted, [])
+        assert awaits_events(wanted, self.WORKING)
+        assert not awaits_events(
+            wanted, [*self.WORKING, status('TASK_STATE_COMPLETED', 1)]
+        )
+
+    def test_a_position_waits_until_an_event_is_there(self):
+        """Whether it then holds is not something waiting changes."""
+        second = [EventAssertion(), EventAssertion(**self.COMPLETED)]
+        assert awaits_events(second, self.WORKING)
+        assert not awaits_events(second, [*self.WORKING, status('TASK_STATE_FAILED', 1)])
+
+    def test_an_index_waits_until_an_event_is_there(self):
+        third = [EventAssertion(index=2, **self.COMPLETED)]
+        assert awaits_events(third, [*self.WORKING, artifact(1)])
+        assert not awaits_events(third, [*self.WORKING, artifact(1), artifact(2)])
+
+    def test_an_assertion_that_asserts_nothing_is_not_waited_for(self):
+        assert not awaits_events([EventAssertion(description='prose')], [])
+
+    def test_one_assertion_still_open_is_enough(self):
+        wanted = [
+            EventAssertion(index=0, **{'status': {'state': 'TASK_STATE_WORKING'}}),
+            EventAssertion(match='any_position', **self.COMPLETED),
+        ]
+        assert awaits_events(wanted, self.WORKING)
+
+    def test_an_assertion_that_already_failed_ends_the_wait(self):
+        """The list has failed, whatever arrives for the one still open."""
+        wanted = [
+            EventAssertion(index=0, **{'status': {'state': 'TASK_STATE_FAILED'}}),
+            EventAssertion(match='any_position', **self.COMPLETED),
+        ]
+        assert not awaits_events(wanted, self.WORKING)
+        assert not awaits_events(wanted[::-1], self.WORKING)
+
+    def test_nothing_to_wait_for(self):
+        assert not awaits_events([], self.WORKING)
+
+
+class TestEventsElsewhere:
+    """`evaluate_events` for a list that is not `expect_stream.events`."""
+
+    def test_a_failure_names_where_the_list_sits(self):
+        wanted = [EventAssertion(index=0, **{'status': {'state': 'TASK_STATE_FAILED'}})]
+        result = evaluate_events(
+            wanted, [status('TASK_STATE_WORKING', 0)], path='webhook.events'
+        )
+        assert result.first.path == 'webhook.events[0].status.state'
+
+    def test_any_position_names_the_list_too(self):
+        wanted = [EventAssertion(match='any_position', **{'nope': {'exists': True}})]
+        result = evaluate_events(wanted, [], path='webhook.events')
+        assert result.first.path == 'webhook.events[*]'
+
+    def test_an_event_that_is_not_there_is_reported_in_the_callers_words(self):
+        wanted = [EventAssertion(index=3, **{'task': {'exists': True}})]
+        result = evaluate_events(
+            wanted, [status('TASK_STATE_WORKING', 0)],
+            path='webhook.events', had='the SUT delivered',
+        )
+        assert result.first.path == 'webhook.events[3]'
+        assert result.first.message == (
+            'events[0]: no event at index 3; the SUT delivered 1'
+        )
+
+    def test_an_index_decides_which_event_whatever_match_says(self):
+        both = [EventAssertion(
+            index=0, match='any_position', **{'status': {'state': 'TASK_STATE_COMPLETED'}}
+        )]
+        events = [status('TASK_STATE_WORKING', 0), status('TASK_STATE_COMPLETED', 1)]
+        assert not evaluate_events(both, events).ok
+        assert not awaits_events(both, events[:1])
+
+    def test_a_missing_event_says_how_it_was_addressed(self):
+        there = {'task': {'exists': True}}
+        by_place = evaluate_events([EventAssertion(**there)], [])
+        by_index = evaluate_events([EventAssertion(index=0, **there)], [])
+        assert (by_place.first.operator, by_index.first.operator) == (
+            'exact_position', 'index',
+        )
+
+    def test_a_stream_is_reported_as_before(self):
+        expect = stream(events=[EventAssertion(index=9, **{'a': {'exists': True}})])
+        result = evaluate_stream(expect, [status('TASK_STATE_WORKING', 0)])
+        assert result.first.path == 'events[9]'
+        assert result.first.message == 'events[0]: no event at index 9; the stream had 1'
 
 
 class TestTimeout:
