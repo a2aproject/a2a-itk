@@ -38,6 +38,7 @@ import acts_runner
 from notifications_app import create_notifications_app
 from pyproto import a2a_pb2 as pb
 from test_suite.acts import load_suite
+from test_suite.acts import report as report_writer
 from test_suite.acts.dispatcher import JsonRpcDispatcher
 from test_suite.acts.runner import VERSION_HEADER, Outcome, Runner, TestResult
 from test_suite.acts.schema import ErrorType, Operation, RunnerRequirement, TransportBinding
@@ -198,6 +199,12 @@ def whole_corpus(behaviors_path) -> acts_runner.ActsRun:
     return conformance_run(behaviors_path)
 
 
+@pytest.fixture(scope='module')
+def whole_corpus_at_1_1(behaviors_path) -> acts_runner.ActsRun:
+    """The mirrored corpus at A2A 1.1, run once for the module."""
+    return conformance_run(behaviors_path, spec_version='1.1')
+
+
 # ---------------------------------------------------------------------------
 # A conforming agent passes
 # ---------------------------------------------------------------------------
@@ -209,9 +216,12 @@ class TestAConformingAgentPasses:
         shows up as a named test with its reason."""
         assert not_passed(whole_corpus) == {}
 
-    def test_the_run_covers_every_jsonrpc_test(self, whole_corpus):
-        applicable = load_suite(CORPUS).for_transport(TransportBinding.JSONRPC)
-        assert {r.id for r in whole_corpus.results} == {t.id for t in applicable}
+    def test_the_run_covers_every_jsonrpc_test_for_1_0(self, whole_corpus):
+        applicable = {
+            loaded.id for loaded in load_suite(CORPUS).for_spec_version('1.0')
+            if loaded.test.applies_to(TransportBinding.JSONRPC)
+        }
+        assert {r.id for r in whole_corpus.results} == applicable
 
     def test_every_step_actually_ran(self, whole_corpus):
         """A pass with no steps executed would be a skip in disguise."""
@@ -246,6 +256,82 @@ class TestAConformingAgentPasses:
         assert report['summary']['total'] == len(whole_corpus.results)
         assert report['spec_version'] == '1.0'
         assert report['environment']['interface_protocol_version'] == '1.0'
+
+
+class TestAConformingAgentPassesAt11:
+    """The same corpus, in a run at A2A 1.1: the tests for 1.0 that still
+    apply, and the tests that start at 1.1."""
+
+    #: The live exchange tests that target JSON-RPC. The runner does not
+    #: drive a live exchange yet, and skips them.
+    LIVE = {
+        'STREAM-LIVE-001', 'STREAM-LIVE-002', 'STREAM-LIVE-003',
+        'STREAM-LIVE-004', 'STREAM-LIVE-009', 'STREAM-LIVE-010',
+    }
+
+    def test_every_test_passes_except_the_live_exchange_tests(self, whole_corpus_at_1_1):
+        assert not_passed(whole_corpus_at_1_1) == {
+            test_id: ('skip', 'contains live step(s); not yet supported')
+            for test_id in self.LIVE
+        }
+
+    def test_the_run_covers_every_jsonrpc_test_for_1_1(self, whole_corpus_at_1_1):
+        applicable = {
+            loaded.id for loaded in load_suite(CORPUS).for_spec_version('1.1')
+            if loaded.test.applies_to(TransportBinding.JSONRPC)
+        }
+        assert {r.id for r in whole_corpus_at_1_1.results} == applicable
+        assert self.LIVE < applicable
+
+    def test_it_takes_the_tests_for_1_0_as_well(self, whole_corpus, whole_corpus_at_1_1):
+        """Every JSON-RPC test of a run at 1.0 is also in the run at 1.1, and
+        passes there too: an agent that serves 1.1 still does what 1.0 asked."""
+        at_1_0 = {r.id for r in whole_corpus.results}
+        at_1_1 = {r.id: r.result for r in whole_corpus_at_1_1.results}
+        assert at_1_0 < set(at_1_1)
+        assert all(at_1_1[test_id] is Outcome.PASS for test_id in at_1_0)
+
+    def test_every_step_of_a_passing_test_ran_and_compared_something(
+        self, whole_corpus_at_1_1
+    ):
+        for result in whole_corpus_at_1_1.results:
+            if result.id in self.LIVE:
+                assert result.steps == ()
+                continue
+            assert result.steps, result.id
+            assert all(s.result is Outcome.PASS for s in result.steps), result.id
+            assert sum(s.checks for s in result.steps) > 0, result.id
+
+    def test_the_deviation_tests_ran_against_the_deviated_agents(
+        self, whole_corpus_at_1_1
+    ):
+        """One more than at 1.0: the test that an agent which does not
+        advertise `userArtifacts` refuses an artifact from the client."""
+        by_configuration: dict[str, set[str]] = {}
+        for result in whole_corpus_at_1_1.results:
+            if result.configuration:
+                by_configuration.setdefault(result.configuration, set()).add(result.id)
+        assert by_configuration == {
+            acts_runner.REDUCED_CAPABILITIES_ENV: {
+                'CORE-CAP-001', 'CORE-CAP-002', 'SEC-EXTCARD-003', 'PUSH-CFG-004',
+                'CORE-USERART-001',
+            },
+            acts_runner.AUTH_ENFORCED_ENV: {
+                'SEC-AUTH-001', 'SEC-AUTH-002', 'SEC-AUTH-003', 'SEC-AUTH-004',
+            },
+        }
+
+    def test_the_report_is_conformant(self, whole_corpus_at_1_1):
+        report = acts_runner.to_report(whole_corpus_at_1_1, sdk_name='fake-agent')
+        assert report['spec_version'] == '1.1'
+        assert report['environment']['interface_protocol_version'] == '1.1'
+        ran = len(whole_corpus_at_1_1.results)
+        assert report['summary']['total'] == ran
+        assert report['summary']['skipped'] == len(self.LIVE)
+        assert report['summary']['passed'] == ran - len(self.LIVE)
+        assert report['summary']['failed'] == report['summary']['errors'] == 0
+        # A skip does not count against conformance.
+        assert report_writer.is_conformant(report)
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +394,29 @@ class TestABrokenAgentFails:
         result = self.run_one(behaviors_path, 'STREAM-SSE-001', regress)
         assert result.result is Outcome.FAIL
         assert 'TASK_STATE_SUBMITTED' in result.failure.message
+
+    def test_a_malformed_artifact_update_delivery_is_caught(self, behaviors_path):
+        """`PUSH-DELIV-003` is about the format of what is delivered. The task
+        it uses produces an artifact, so one delivery is an artifact update.
+        The receiver has to store that kind for the test to see it: a
+        delivery it refused could be anything."""
+        def without_the_artifact_id(agent: FakeAgent) -> None:
+            post = agent._post
+
+            def stripped(config, event):
+                if event.WhichOneof('payload') == 'artifact_update':
+                    copy = pb.StreamResponse()
+                    copy.CopyFrom(event)
+                    copy.artifact_update.artifact.ClearField('artifact_id')
+                    event = copy
+                post(config, event)
+
+            agent._post = stripped
+
+        result = self.run_one(behaviors_path, 'PUSH-DELIV-003', without_the_artifact_id)
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'delivered-payload-is-a2a-shaped'
+        assert 'matched none of the 3 alternatives' in result.failure.message
 
     def test_a_notification_without_its_credential_is_caught(self, behaviors_path):
         """`SEC-PUSH-001` reads the delivery off the real receiver."""
@@ -1440,9 +1549,9 @@ class TestDeliveriesAndClientStreamsEndToEnd:
 # What the fake agent does at A2A 1.1
 # ---------------------------------------------------------------------------
 #
-# The mirrored corpus has no A2A 1.1 test yet, so nothing above reaches the
-# agent's 1.1 behavior. These read it through the real dispatcher. They are
-# about the fixture: they say what a corpus test for 1.1 will be run against.
+# These read the agent's 1.1 behavior through the real dispatcher, one piece
+# at a time. They are about the fixture: they say what a corpus test for 1.1
+# is run against, apart from whether any corpus test happens to reach it.
 
 AT_1_1 = {VERSION_HEADER: '1.1'}
 AT_1_0 = {VERSION_HEADER: '1.0'}

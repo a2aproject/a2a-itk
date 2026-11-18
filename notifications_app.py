@@ -22,13 +22,12 @@ class Notification(BaseModel):
 #: StreamResponse: one member, named for the kind. `messageUpdate` is the kind
 #: A2A 1.1 added.
 #:
-#: A2A also delivers `artifactUpdate` and `message`, and those are refused.
-#: Storing them changes what the conformance test `PUSH-DELIV-003`
-#: reads, and that test accepts only a task or a status update, so it has to
-#: be corrected in the corpus first.
+#: A2A also delivers `message`, and that is refused: the conformance test of
+#: the payload format, `PUSH-DELIV-003`, does not accept one.
 _TASK_ID_FIELD_V1 = {
     'task': 'id',
     'statusUpdate': 'taskId',
+    'artifactUpdate': 'taskId',
     'messageUpdate': 'taskId',
 }
 

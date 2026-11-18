@@ -50,20 +50,17 @@ class TestExtractTaskIdV10:
     @pytest.mark.parametrize(('payload', 'task_id'), [
         ({'task': {'id': 't1', 'status': {}}}, 't1'),
         ({'statusUpdate': {'taskId': 't2', 'status': {}}}, 't2'),
+        ({'artifactUpdate': {'taskId': 't4', 'artifact': {'artifactId': 'a'}}}, 't4'),
         # From A2A 1.1: a client message added to the task.
         ({'messageUpdate': {'taskId': 't3', 'message': {'messageId': 'm'}}}, 't3'),
     ])
     def test_the_kinds_it_stores(self, payload, task_id):
         assert _extract_task_id_v1(payload) == task_id
 
-    @pytest.mark.parametrize('payload', [
-        {'artifactUpdate': {'taskId': 't1', 'artifact': {}}},
-        {'message': {'messageId': 'm', 'taskId': 't1'}},
-    ])
-    def test_the_kinds_it_does_not_store_yet(self, payload):
-        """A2A delivers these as well. Storing them changes what an existing
-        conformance test reads, so that test has to be corrected first."""
-        assert _extract_task_id_v1(payload) is None
+    def test_the_kind_it_does_not_store_yet(self):
+        """A2A delivers a message as well. The conformance test of the payload
+        format does not accept one, so that test has to change first."""
+        assert _extract_task_id_v1({'message': {'messageId': 'm', 'taskId': 't1'}}) is None
 
     @pytest.mark.parametrize('payload', [
         {'statusUpdate': {'status': {}}},
@@ -92,14 +89,18 @@ class TestExtractTaskIdV10:
 
         assert asyncio.run(deliver()) == 400
 
-    def test_a_message_update_is_stored_under_its_task(self):
-        """So a test can see one that should not have been delivered."""
+    @pytest.mark.parametrize('payload', [
+        # So a test can see one that should not have been delivered.
+        {'messageUpdate': {'taskId': 't3', 'message': {'messageId': 'm'}}},
+        # So a test can assert on what an agent delivers for an artifact.
+        {'artifactUpdate': {'taskId': 't3', 'artifact': {'artifactId': 'a'}}},
+    ])
+    def test_a_stored_kind_is_kept_under_its_task(self, payload):
         async def deliver() -> list[dict]:
             client = httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=create_notifications_app()),
                 base_url='http://receiver.test',
             )
-            payload = {'messageUpdate': {'taskId': 't3', 'message': {'messageId': 'm'}}}
             posted = await client.post('/notifications', json=payload)
             assert posted.status_code == 200
             stored = await client.get('/t3/notifications')
@@ -107,9 +108,31 @@ class TestExtractTaskIdV10:
             return stored.json()['notifications']
 
         stored = asyncio.run(deliver())
-        assert [n['event'] for n in stored] == [
-            {'messageUpdate': {'taskId': 't3', 'message': {'messageId': 'm'}}}
-        ]
+        assert [n['event'] for n in stored] == [payload]
+
+    def test_a_message_delivery_is_refused(self):
+        async def deliver() -> int:
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_notifications_app()),
+                base_url='http://receiver.test',
+            )
+            posted = await client.post(
+                '/notifications', json={'message': {'messageId': 'm', 'taskId': 't1'}}
+            )
+            await client.aclose()
+            return posted.status_code
+
+        assert asyncio.run(deliver()) == 400
+
+    def test_traversal_reads_no_text_from_an_artifact_update(self):
+        """The traversal suite reads the same receiver, and looks only for the
+        agent's text in a status update. An artifact update gives it none."""
+        event = {'artifactUpdate': {
+            'taskId': 't1',
+            'artifact': {'artifactId': 'a', 'parts': [{'text': 'in an artifact'}]},
+        }}
+        assert testlib._read_v10_notif(event) == []
+        assert testlib._read_v03_notif(event) == []
 
 
 class TestExecuteItkTestExceptions:
