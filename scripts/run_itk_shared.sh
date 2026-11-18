@@ -295,11 +295,15 @@ CURL_STATUS=$?
 #   trees no run has used for the TTL are removed. A restored cache can be
 #   days old (a nightly or re-run on the same commit saves nothing), and this
 #   order keeps those stale times from evicting peers about to be reused.
+# - Only when /run completed: a run that failed or timed out may have touched
+#   only some of its trees.
 # - Not in an ACTS run, which exits above: it starts no peers.
 # - This is housekeeping, so a failure is reported and the run goes on.
-$CONTAINER_RT exec -e ITK_TREE_TTL=172800 -w /app itk-service \
-  uv run python -m test_suite.launcher.cache evict \
-  || echo "Warning: launcher cache eviction failed; continuing." >&2
+if [ $CURL_STATUS -eq 0 ]; then
+  $CONTAINER_RT exec -e ITK_TREE_TTL="${ITK_TREE_TTL:-172800}" -w /app itk-service \
+    uv run python -m test_suite.launcher.cache evict \
+    || echo "Warning: launcher cache eviction failed; continuing." >&2
+fi
 
 # 7. Report. itk_report.py validates the response shape before anything
 # consumes it, so a FastAPI error envelope can't reach process_results.py and
