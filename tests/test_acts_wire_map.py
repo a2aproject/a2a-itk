@@ -7,6 +7,7 @@ through it — so that a change to any row has to be deliberate.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from pathlib import Path
 
@@ -24,8 +25,10 @@ from test_suite.acts.wire_map import (
     GRPC_SERVICE,
     GRPC_STATUS_TO_HTTP,
     OPERATIONS,
+    VERSION_HEADER,
     binding_for_error,
     binding_for_operation,
+    declared_version,
     error_for_jsonrpc_code,
     error_for_reason,
     errors_sharing_http_status,
@@ -85,7 +88,8 @@ class TestOperationsMatchA2ASpec:
         assert binding.rest_path == path
 
     def test_subscribe_is_post_not_get(self):
-        """ACTS §4.1 says GET; A2A §5.3 and §11.3.2 both say POST."""
+        """The row for A2A 1.0, whose method tables say POST. From A2A 1.1 it
+        is GET; see `TestRowsThatDependOnTheVersion`."""
         assert binding_for_operation(
             Operation.SUBSCRIBE_TO_TASK
         ).rest_method is HttpMethod.POST
@@ -138,6 +142,65 @@ class TestOperationsMatchA2ASpec:
         assert (binding.grpc_request, binding.grpc_response) == (
             'StreamRequest', 'StreamResponse',
         )
+
+
+class TestRowsThatDependOnTheVersion:
+    """One row is not the same in every A2A version: over REST, the verb of
+    `subscribe_to_task` is POST in the A2A 1.0 method tables and GET from
+    A2A 1.1."""
+
+    @pytest.mark.parametrize(('version', 'verb'), [
+        (None, 'POST'),
+        ('1.0', 'POST'),
+        ('0.3', 'POST'),
+        ('1.1', 'GET'),
+        ('1.2', 'GET'),
+        ('1.10', 'GET'),
+        ('2.0', 'GET'),
+        ('99.0', 'GET'),
+    ])
+    def test_the_subscribe_verb(self, version, verb):
+        binding = binding_for_operation(Operation.SUBSCRIBE_TO_TASK, version)
+        assert binding.rest_method == HttpMethod(verb)
+
+    def test_the_rest_of_the_row_is_the_same_in_both(self):
+        old = binding_for_operation(Operation.SUBSCRIBE_TO_TASK, '1.0')
+        new = binding_for_operation(Operation.SUBSCRIBE_TO_TASK, '1.1')
+        assert dataclasses.replace(new, rest_method=old.rest_method) == old
+
+    @pytest.mark.parametrize('not_a_version', ['', 'soon', '1', '1.1.0', ' 1.1'])
+    def test_a_version_that_is_not_one_gets_the_1_0_row(self, not_a_version):
+        """A test may send such a header on purpose. The request still has
+        to be written somehow."""
+        assert binding_for_operation(
+            Operation.SUBSCRIBE_TO_TASK, not_a_version
+        ) is OPERATIONS[Operation.SUBSCRIBE_TO_TASK]
+
+    def test_every_other_row_is_the_same_at_every_version(self):
+        for operation in Operation:
+            if operation is Operation.SUBSCRIBE_TO_TASK:
+                continue
+            for version in ('1.0', '1.1', '99.0'):
+                assert binding_for_operation(operation, version) is OPERATIONS[operation]
+
+    def test_without_a_version_the_lookup_is_as_before(self):
+        for operation in Operation:
+            assert binding_for_operation(operation) is OPERATIONS[operation]
+
+
+class TestDeclaredVersion:
+    def test_the_header_is_the_one_a2a_names(self):
+        assert VERSION_HEADER == 'A2A-Version'
+
+    def test_it_is_read_from_the_version_header(self):
+        assert declared_version({VERSION_HEADER: '1.1'}) == '1.1'
+
+    def test_the_header_name_is_matched_whatever_its_case(self):
+        assert declared_version({'a2a-version': '1.0', 'Accept': 'x'}) == '1.0'
+
+    @pytest.mark.parametrize('headers', [None, {}, {'Accept': 'application/json'}])
+    def test_a_request_without_the_header_declares_none(self, headers):
+        assert declared_version(headers) is None
 
 
 class TestOperationsMatchGeneratedService:

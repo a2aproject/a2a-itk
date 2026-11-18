@@ -703,6 +703,56 @@ class TestRequestWritten:
         assert sent == []
 
 
+class TestRequestFieldsFromA2A11:
+    """The request messages gained fields in A2A 1.1. A test writes a 64-bit
+    one as a number or, as a JSON binding carries it, as a string."""
+
+    @pytest.mark.parametrize('generation', [5, '5'])
+    def test_a_held_read_of_a_task(self, generation):
+        agent = FakeAgent()
+        call(agent, lambda d: d.dispatch(
+            Operation.GET_TASK,
+            {'id': 't1', 'currentGeneration': generation, 'timelineLength': 3},
+        ))
+        _, request, _ = agent.calls[0]
+        assert request.current_generation == 5
+        assert request.timeline_length == 3
+
+    @pytest.mark.parametrize('generation', [7, '7'])
+    def test_a_subscription_resumed_from_a_generation(self, generation):
+        agent = FakeAgent()
+
+        async def factory(dispatcher):
+            return [
+                e async for e in dispatcher.stream(
+                    Operation.SUBSCRIBE_TO_TASK,
+                    {'id': 't1', 'lastSeenGeneration': generation},
+                )
+            ]
+
+        call(agent, factory)
+        _, request, _ = agent.calls[0]
+        assert request.HasField('last_seen_generation')
+        assert request.last_seen_generation == 7
+
+    def test_a_send_guarded_by_a_generation(self):
+        agent = FakeAgent()
+        call(agent, lambda d: d.dispatch(Operation.SEND_MESSAGE, {
+            'message': {'role': 'ROLE_USER', 'messageId': 'm1', 'parts': [{'text': 'hi'}]},
+            'configuration': {'ifGenerationMatch': '4'},
+        }))
+        _, request, _ = agent.calls[0]
+        assert request.configuration.if_generation_match == 4
+
+    def test_a_field_no_version_defines_is_still_refused(self):
+        """The message is built strictly, so a misspelled field in a test is
+        reported and not sent as nothing."""
+        with pytest.raises(DispatchError, match='params do not fit GetTaskRequest'):
+            call(FakeAgent(), lambda d: d.dispatch(
+                Operation.GET_TASK, {'id': 't1', 'currentGenerations': 5}
+            ))
+
+
 class TestAgentCardOverHttp:
     """Fetched by the shared HTTP helper, not by a second copy of the GET."""
 

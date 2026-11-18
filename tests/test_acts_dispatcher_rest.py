@@ -319,7 +319,7 @@ class TestStreaming:
         assert seen[0].url.path == '/message:stream'
 
     def test_subscribe_streams_by_post_to_the_task_path(self):
-        """ACTS §4.1 says GET; A2A §11.3.2 says POST."""
+        """As A2A 1.0 has it, and for a request that declares no version."""
         seen = []
 
         def handler(request):
@@ -402,3 +402,165 @@ class TestRequestWritten:
         handler = replying({'id': 't1'})
         asyncio.run(make(handler).dispatch(Operation.GET_TASK, {'id': 't1'}))
         assert 'trace' not in handler.seen[0].extensions
+
+
+class TestSubscribeVerbByVersion:
+    """`subscribe_to_task` is POST in A2A 1.0 and GET from A2A 1.1. The
+    request is written for the version its `A2A-Version` header declares."""
+
+    @staticmethod
+    def _subscribe(params, headers):
+        seen: list[httpx.Request] = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(
+                200,
+                text='data: {"task": {}}\n\n',
+                headers={'Content-Type': 'text/event-stream'},
+            )
+
+        async def run():
+            dispatcher = make(handler)
+            return [
+                e async for e in
+                dispatcher.stream(Operation.SUBSCRIBE_TO_TASK, params, headers)
+            ]
+
+        events = asyncio.run(run())
+        assert [e.data for e in events] == [{'task': {}}]
+        (request,) = seen
+        return request
+
+    def test_at_1_1_it_is_a_get(self):
+        request = self._subscribe({'id': 't1'}, {'A2A-Version': '1.1'})
+        assert request.method == 'GET'
+        assert request.url.path == '/tasks/t1:subscribe'
+        assert request.url.query == b''
+        assert request.content == b''
+
+    def test_at_1_1_the_other_fields_travel_in_the_query(self):
+        """A GET has no body. The task id stays in the path."""
+        request = self._subscribe(
+            {'id': 't1', 'lastSeenGeneration': 7}, {'A2A-Version': '1.1'}
+        )
+        assert request.method == 'GET'
+        assert dict(request.url.params) == {'lastSeenGeneration': '7'}
+        assert request.content == b''
+
+    def test_at_1_0_it_is_a_post_with_the_fields_in_the_body(self):
+        request = self._subscribe(
+            {'id': 't1', 'lastSeenGeneration': 7}, {'A2A-Version': '1.0'}
+        )
+        assert request.method == 'POST'
+        assert request.url.query == b''
+        assert json.loads(request.content) == {'lastSeenGeneration': 7}
+
+    def test_a_version_the_dispatcher_adds_decides_too(self):
+        """The request goes out with that header, so it is written for it."""
+        seen: list[httpx.Request] = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(
+                200, text='data: {"task": {}}\n\n',
+                headers={'Content-Type': 'text/event-stream'},
+            )
+
+        async def run():
+            dispatcher = make(handler, default_headers={'A2A-Version': '1.1'})
+            subscribed = dispatcher.stream(Operation.SUBSCRIBE_TO_TASK, {'id': 't1'})
+            as_1_0 = dispatcher.stream(
+                Operation.SUBSCRIBE_TO_TASK, {'id': 't1'}, {'A2A-Version': '1.0'}
+            )
+            return [e async for e in subscribed], [e async for e in as_1_0]
+
+        asyncio.run(run())
+        assert [(r.method, r.headers['A2A-Version']) for r in seen] == [
+            ('GET', '1.1'), ('POST', '1.0'),
+        ]
+
+    @pytest.mark.parametrize('from_the_dispatcher', [False, True])
+    def test_a_call_answered_with_one_response_is_written_the_same_way(
+        self, from_the_dispatcher
+    ):
+        """The runner streams a subscription. A caller that dispatches one
+        gets the same request, whichever of the two names the version."""
+        handler = replying({})
+        version = {'A2A-Version': '1.1'}
+
+        async def run():
+            dispatcher = make(handler, default_headers=version if from_the_dispatcher else None)
+            await dispatcher.dispatch(
+                Operation.SUBSCRIBE_TO_TASK, {'id': 't1', 'lastSeenGeneration': 2},
+                None if from_the_dispatcher else version,
+            )
+
+        asyncio.run(run())
+        (request,) = handler.seen
+        assert (request.method, request.url.query) == ('GET', b'lastSeenGeneration=2')
+
+    def test_the_header_decides_and_not_the_dispatcher(self):
+        """An agent may serve two versions at one URL, and a step may be sent
+        as a client of either. Both then go through one dispatcher."""
+        seen: list[httpx.Request] = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(
+                200, text='data: {"task": {}}\n\n',
+                headers={'Content-Type': 'text/event-stream'},
+            )
+
+        async def run():
+            dispatcher = make(handler)
+            for version in ('1.1', '1.0', '1.1'):
+                async for _ in dispatcher.stream(
+                    Operation.SUBSCRIBE_TO_TASK, {'id': 't1'}, {'a2a-version': version}
+                ):
+                    pass
+
+        asyncio.run(run())
+        assert [(r.method, r.headers['a2a-version']) for r in seen] == [
+            ('GET', '1.1'), ('POST', '1.0'), ('GET', '1.1'),
+        ]
+
+    def test_the_other_streaming_operation_is_a_post_at_every_version(self):
+        seen: list[httpx.Request] = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(
+                200, text='data: {"task": {}}\n\n',
+                headers={'Content-Type': 'text/event-stream'},
+            )
+
+        async def run():
+            async for _ in make(handler).stream(
+                Operation.SEND_STREAMING_MESSAGE, {'message': {'role': 'ROLE_USER'}},
+                {'A2A-Version': '1.1'},
+            ):
+                pass
+
+        asyncio.run(run())
+        assert seen[0].method == 'POST'
+        assert json.loads(seen[0].content) == {'message': {'role': 'ROLE_USER'}}
+
+    def test_a_refusal_at_1_1_is_still_read_as_an_error(self):
+        def handler(request):
+            assert request.method == 'GET'
+            return httpx.Response(
+                404,
+                json=status_error(404, 'NOT_FOUND', reason='TASK_NOT_FOUND'),
+                headers={'Content-Type': 'application/a2a+json'},
+            )
+
+        async def run():
+            async for _ in make(handler).stream(
+                Operation.SUBSCRIBE_TO_TASK, {'id': 'gone'}, {'A2A-Version': '1.1'}
+            ):
+                pass
+
+        with pytest.raises(StreamNotOpened) as refused:
+            asyncio.run(run())
+        assert refused.value.response.error.error_type is ErrorType.TASK_NOT_FOUND
