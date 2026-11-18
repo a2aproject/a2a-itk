@@ -111,9 +111,6 @@ ACTS_INSUFFICIENT_TOKEN = 'itk-insufficient-token'
 #: than publishing a smaller `capabilities` block.
 REDUCED_CAPABILITIES_ENV = 'ITK_ACTS_REDUCED_CAPABILITIES'
 
-#: The capabilities the reduced pass expects the SUT to drop.
-REDUCIBLE_CAPABILITIES = ('streaming', 'pushNotifications', 'extendedAgentCard')
-
 #: How `Runner._unmet_precondition` words a skip the reduced pass can clear:
 #: the card advertises something the test needs absent.
 _CAPABILITY_SKIP = re.compile(r'agent card capability (\w+)=True, needs False')

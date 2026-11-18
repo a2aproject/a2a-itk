@@ -2976,7 +2976,9 @@ class TestAgainstTheCorpus:
     because an error would mean the runner broke rather than the SUT.
     """
 
-    def _run_all(self, suite, binding):
+    VERSIONS = ('1.0', '1.1')
+
+    def _run_all(self, suite, binding, spec_version='1.0'):
         dispatcher = FakeDispatcher(
             ok({}),
             binding=binding,
@@ -2986,39 +2988,55 @@ class TestAgainstTheCorpus:
             dispatcher,
             variables={'insufficientAuthToken': 'x', 'otherUserTaskId': 'y'},
             agent_card={'capabilities': {}},
+            spec_version=spec_version,
         )
         return asyncio.run(runner.run_suite(suite))
 
+    @pytest.mark.parametrize('spec_version', VERSIONS)
     @pytest.mark.parametrize('binding', list(TransportBinding))
-    def test_no_test_errors(self, suite, binding):
-        results = self._run_all(suite, binding)
+    def test_no_test_errors(self, suite, binding, spec_version):
+        results = self._run_all(suite, binding, spec_version)
         errored = [(r.id, r.failure.message) for r in results if r.result is Outcome.ERROR]
         assert errored == []
 
+    @pytest.mark.parametrize('spec_version', VERSIONS)
     @pytest.mark.parametrize('binding', list(TransportBinding))
-    def test_every_test_reaches_a_verdict(self, suite, binding):
-        results = self._run_all(suite, binding)
+    def test_every_test_reaches_a_verdict(self, suite, binding, spec_version):
+        results = self._run_all(suite, binding, spec_version)
         assert len(results) == len(suite.tests)
         assert all(r.result in tuple(Outcome) for r in results)
 
     @pytest.mark.parametrize('binding', list(TransportBinding))
-    def test_nothing_is_deferred_any_more(self, suite, binding):
-        """Operation, raw and client steps all execute.
+    def test_only_the_live_tests_are_deferred(self, suite, binding):
+        """Operation, raw, client and webhook steps all execute.
 
-        `assertion` is the one kind still outside `EXECUTABLE_KINDS`, so this
-        holds because the corpus contains none of them, not because every kind
-        has an execution path — hence the second assertion.
+        Two kinds are outside `EXECUTABLE_KINDS`. The corpus has no bare
+        `assertion` step. It has ten tests with a `live` step, all for A2A
+        1.1, and a run at 1.1 defers exactly those of them that target the
+        binding.
         """
-        results = self._run_all(suite, binding)
-        deferred = [
-            r for r in results
-            if r.result is Outcome.SKIP and 'not yet supported' in (r.skip_reason or '')
-        ]
-        assert deferred == []
-        assert not any(
-            step.kind() not in EXECUTABLE_KINDS
-            for loaded in suite.tests for step in loaded.test.steps
-        )
+        not_executable = {
+            loaded.test.id: {step.kind() for step in loaded.test.steps} - EXECUTABLE_KINDS
+            for loaded in suite.tests
+        }
+        live = {test_id for test_id, kinds in not_executable.items() if kinds}
+        assert all(not_executable[test_id] == {StepKind.LIVE} for test_id in live)
+        assert len(live) == 10
+
+        def deferred(spec_version):
+            return {
+                r.id for r in self._run_all(suite, binding, spec_version)
+                if r.result is Outcome.SKIP and 'not yet supported' in (r.skip_reason or '')
+            }
+
+        # A run at 1.0 does not take them at all.
+        assert deferred('1.0') == set()
+        at_1_1 = deferred('1.1')
+        assert at_1_1
+        assert at_1_1 == {
+            loaded.test.id for loaded in suite.tests
+            if loaded.test.id in live and loaded.test.applies_to(binding)
+        }
 
     @pytest.mark.parametrize('binding', list(TransportBinding))
     def test_no_raw_test_reaches_the_grpc_dispatcher(self, suite, binding):

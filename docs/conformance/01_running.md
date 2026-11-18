@@ -30,6 +30,9 @@ uv run run_acts.py --mount ../a2a-python/itk --sdk a2a-python --transport all
 # two bindings
 uv run run_acts.py --mount ../a2a-go/itk --sdk a2a-go --transport grpc --transport rest
 
+# another A2A version: selects the tests for it and is sent as A2A-Version
+uv run run_acts.py --mount ../a2a-python/itk --sdk a2a-python --spec-version 1.1
+
 # one test, for iterating on a failure
 uv run run_acts.py --mount ../a2a-python/itk --sdk a2a-python -t CORE-SEND-001 -t CORE-SEND-002
 
@@ -80,7 +83,7 @@ ACTS a2a-go / jsonrpc / A2A 1.0 — 101 tests in 43850ms
 
 Three SUTs are started in sequence per binding: the default one for the bulk of the corpus, then two more in **deviation modes** for the tests the default one has to skip (an agent cannot both advertise streaming and refuse it; nor both require a credential and serve the raw steps that must go unauthenticated). The log says which tests were re-run and why. See [02_architecture.md](02_architecture.md#deviations) for the mechanism.
 
-The denominator differs per binding. Tests that declare a `transport:` are graded only on that binding and are left out of the others entirely, not counted as skipped. With the current corpus that is 101 tests on JSON-RPC, 88 on gRPC and 94 on REST, out of 113.
+The denominator differs per binding. Tests that declare a `transport:` are graded only on that binding and are left out of the others entirely, not counted as skipped. With the current corpus a run at A2A 1.0 has 101 tests on JSON-RPC, 88 on gRPC and 94 on REST, out of 113. A run at A2A 1.1 has 155, 144 and 147, out of 172; the live exchange tests among them are reported as skipped. The tests for 1.1 come from an A2A pull request that is still open ([#2468](https://github.com/a2aproject/A2A/pull/2468)), so those numbers can change.
 
 With `--transport all` a combined block follows:
 

@@ -27,7 +27,13 @@ from test_suite.acts import (
     TransportBinding,
     load_suite,
 )
-from acts_runner import RUNNER_CAPABILITIES, NoApplicableTests, _in_scope, _subset
+from acts_runner import (
+    RUNNER_CAPABILITIES,
+    NoApplicableTests,
+    _for_version,
+    _in_scope,
+    _subset,
+)
 from test_suite.acts.assertions import evaluate_headers
 from test_suite.acts.runner import KNOWN_CAPABILITIES
 from test_suite.acts.schema import RunnerRequirement
@@ -47,23 +53,33 @@ def corpus():
     return load_suite(MANIFEST)
 
 
+@pytest.fixture(scope='module')
+def at_1_0(corpus):
+    """The tests a run at A2A 1.0 takes. The default run, and the one every
+    SDK is scored on today."""
+    return _for_version(corpus, '1.0')
+
+
+@pytest.fixture(scope='module')
+def at_1_1(corpus):
+    """The tests a run at A2A 1.1 takes."""
+    return _for_version(corpus, '1.1')
+
+
 class TestCorpusLoads:
     def test_loads_strictly_with_no_errors(self, corpus):
         assert corpus.errors == []
 
     def test_expected_test_count(self, corpus):
-        """111 tests plus the two REST subscribe tests. A change here means
-        the corpus moved; update the pin in PROVENANCE.md deliberately."""
-        assert len(corpus) == 113
-
-    def test_a_run_at_1_0_takes_every_test(self, corpus):
-        """Nothing in this snapshot is bounded to another version, so the
-        default run is scored on the whole corpus."""
-        assert len(corpus.for_spec_version('1.0')) == len(corpus)
+        """The 113 tests for A2A 1.0 and 60 that start at A2A 1.1. A change
+        here means the corpus moved; update the pin in PROVENANCE.md
+        deliberately."""
+        assert len(corpus) == 173
 
     def test_every_included_file_is_read(self, corpus):
-        """14 suite files plus the manifest itself."""
-        assert len(corpus.sources) == 15
+        """18 suite files plus the manifest itself. Four of the suite files
+        hold tests for A2A 1.1 only."""
+        assert len(corpus.sources) == 19
         assert corpus.sources[0].name == 'suite.acts.yaml'
 
     def test_manifest_includes_every_suite_file_on_disk(self, corpus):
@@ -75,7 +91,8 @@ class TestCorpusLoads:
     def test_suite_ids(self, corpus):
         assert corpus.suite_ids() == [
             'discovery', 'core-operations', 'history', 'multi-turn',
-            'streaming', 'polling', 'error-handling', 'auth-security',
+            'streaming', 'live-message', 'polling', 'generation', 'timeline',
+            'user-artifacts', 'error-handling', 'auth-security',
             'version-negotiation', 'wire-format', 'data-types',
             'push-notifications', 'jsonrpc-transport', 'rest-transport',
             'grpc-transport', 'client-parsing',
@@ -84,13 +101,130 @@ class TestCorpusLoads:
     def test_level_breakdown(self, corpus):
         """Feeds the report's `by_level` summary (spec §13.2)."""
         assert {lv.value: len(corpus.by_level(lv)) for lv in Level} == {
-            'must': 65, 'should': 35, 'may': 13,
+            'must': 105, 'should': 49, 'may': 19,
         }
 
     def test_variables_come_from_the_manifest_and_suites(self, corpus):
         # `webhookUrl` is runner-provided now (§12.2): the URL the runner
         # listens on is not something a document can state.
         assert corpus.variables == {'baseUrl': '{{env.SUT_BASE_URL}}'}
+
+
+class TestWhatARunAtEachVersionTakes:
+    """One corpus serves A2A 1.0 and 1.1. A test says which versions it
+    applies to, and a run takes only the tests for its version.
+
+    The numbers for 1.0 are the ones this file pinned when the corpus had no
+    test for 1.1. Every SDK's results at 1.0 are scored on them, so they must
+    not move when tests for a newer version are added.
+    """
+
+    def test_a_run_at_1_0_takes_the_tests_it_took_before_there_were_any_for_1_1(
+        self, at_1_0
+    ):
+        """By id and in order, so a test that is renamed, dropped or given a
+        lower bound upstream shows up here by name."""
+        assert [e.id for e in at_1_0] == [
+            'CARD-DISC-001', 'CARD-DISC-002', 'CARD-DISC-003', 'CARD-DISC-004',
+            'CARD-DISC-005', 'CARD-DISC-006', 'CARD-CACHE-001', 'CARD-SCHEMA-001',
+            'CARD-EXT-001', 'CARD-DISC-007', 'CORE-SEND-001', 'CORE-SEND-002',
+            'CORE-SEND-003', 'CORE-GET-001', 'CORE-GET-002', 'CORE-CANCEL-001',
+            'CORE-CANCEL-002', 'CORE-FAIL-001', 'CORE-SEND-004', 'CORE-LIST-001',
+            'CORE-LIST-002', 'CORE-LIST-003', 'CORE-HIST-001', 'CORE-HIST-002',
+            'CORE-HIST-003', 'CORE-HIST-004', 'CORE-HIST-005', 'CORE-HIST-006',
+            'CORE-MULTI-001', 'CORE-MULTI-005', 'CORE-MULTI-006', 'CORE-MULTI-003',
+            'CORE-CTX-001', 'STREAM-SSE-001', 'STREAM-SSE-002', 'STREAM-SSE-003',
+            'STREAM-SUB-001', 'STREAM-SUB-002', 'STREAM-SUB-003', 'STREAM-SSE-004',
+            'STREAM-MSG-001', 'STREAM-MULTI-001', 'STREAM-MULTI-002',
+            'STREAM-RESUB-001', 'CORE-EXEC-001', 'CORE-EXEC-002', 'CORE-ERR-001',
+            'CORE-ERR-002', 'CORE-ERR-003', 'CORE-ERR-004', 'JSONRPC-ERR-001',
+            'JSONRPC-ERR-002', 'CORE-ERR-005', 'CORE-ERR-006', 'CORE-CAP-001',
+            'CORE-CAP-002', 'CORE-ERR-007', 'CORE-ERR-008', 'CORE-ERR-009',
+            'JSONRPC-ERR-003', 'SEC-AUTH-001', 'SEC-AUTH-002', 'SEC-AUTH-003',
+            'SEC-AUTH-004', 'SEC-AUTH-005', 'SEC-PUSH-001', 'SEC-PUSH-002',
+            'SEC-EXTCARD-001', 'SEC-EXTCARD-002', 'SEC-EXTCARD-003', 'SEC-EXTCARD-004',
+            'SEC-AUTH-006', 'VER-NEG-001', 'VER-NEG-002', 'DM-FMT-001', 'DM-FMT-002',
+            'DM-FMT-003', 'DM-ART-001', 'DM-ART-002', 'DM-ART-003', 'DM-ART-004',
+            'DM-SERIAL-001', 'DM-SERIAL-002', 'DM-EXTRA-001', 'PUSH-CFG-001',
+            'PUSH-CFG-002', 'PUSH-CFG-003', 'PUSH-CFG-004', 'PUSH-LIST-001',
+            'PUSH-ERR-001', 'PUSH-IDEM-001', 'PUSH-DELIV-001', 'PUSH-DELIV-002',
+            'PUSH-DELIV-003', 'JSONRPC-ENV-001', 'JSONRPC-CT-001', 'JSONRPC-SSE-001',
+            'REST-STATUS-001', 'REST-PD-001', 'REST-CT-001', 'REST-SUB-GET-001',
+            'REST-SUB-POST-001', 'GRPC-STATUS-001', 'GRPC-STREAM-001',
+            'GRPC-STREAM-002', 'CLIENT-PARSE-001', 'CLIENT-PARSE-002',
+            'CLIENT-PARSE-003', 'CLIENT-PARSE-004', 'CLIENT-PARSE-005',
+            'CLIENT-PARSE-006', 'CLIENT-AUTH-001', 'CLIENT-CAP-001',
+        ]
+
+    def test_every_test_added_for_1_1_says_so(self, corpus):
+        assert {e.test.min_spec_version for e in corpus} == {None, '1.1'}
+        assert len([e for e in corpus if e.test.min_spec_version == '1.1']) == 60
+
+    def test_one_test_ends_at_1_0(self, corpus, at_1_1):
+        """Over REST, POST is the subscribe verb only in A2A 1.0."""
+        assert [
+            (e.id, e.test.max_spec_version) for e in corpus if e.test.max_spec_version
+        ] == [('REST-SUB-POST-001', '1.0')]
+        assert len(at_1_1) == 172
+        assert 'REST-SUB-POST-001' not in {e.id for e in at_1_1}
+
+    def test_levels(self, at_1_0, at_1_1):
+        assert {lv.value: len(at_1_0.by_level(lv)) for lv in Level} == {
+            'must': 65, 'should': 35, 'may': 13,
+        }
+        assert {lv.value: len(at_1_1.by_level(lv)) for lv in Level} == {
+            'must': 105, 'should': 48, 'may': 19,
+        }
+
+    def test_what_each_binding_is_scored_on(self, at_1_0, at_1_1):
+        assert [
+            len(_in_scope(at_1_0, binding).tests) for binding in TransportBinding
+        ] == [101, 88, 94]
+        assert [
+            len(_in_scope(at_1_1, binding).tests) for binding in TransportBinding
+        ] == [155, 144, 147]
+
+    def test_a_suite_with_no_test_for_the_version_is_not_listed(self, at_1_0, at_1_1):
+        assert at_1_0.suite_ids() == [
+            'discovery', 'core-operations', 'history', 'multi-turn',
+            'streaming', 'polling', 'error-handling', 'auth-security',
+            'version-negotiation', 'wire-format', 'data-types',
+            'push-notifications', 'jsonrpc-transport', 'rest-transport',
+            'grpc-transport', 'client-parsing',
+        ]
+        assert len(at_1_1.suite_ids()) == 20
+
+    def test_a_run_at_1_0_needs_no_behavior_added_for_1_1(self, at_1_0):
+        """The set an agent that implements A2A 1.0 already has."""
+        assert sorted(at_1_0.required_behaviors()) == [
+            'tck-artifact-data',
+            'tck-artifact-file',
+            'tck-artifact-file-url',
+            'tck-artifact-text',
+            'tck-auth-required',
+            'tck-cancel',
+            'tck-complete-task',
+            'tck-long-running',
+            'tck-message-response',
+            'tck-multi-turn',
+            'tck-stream-basic',
+            'tck-stream-chunked',
+            'tck-task-failure',
+        ]
+
+    def test_a_run_at_1_0_has_no_step_the_runner_cannot_execute(self, at_1_0):
+        counts = {k: 0 for k in StepKind}
+        for entry in at_1_0:
+            for step in entry.test.steps:
+                counts[step.kind()] += 1
+        assert counts == {
+            StepKind.OPERATION: 153,
+            StepKind.RAW: 24,
+            StepKind.CLIENT: 9,
+            StepKind.WEBHOOK: 5,
+            StepKind.ASSERTION: 0,
+            StepKind.LIVE: 0,
+        }
 
 
 class TestCorpusShape:
@@ -122,33 +256,26 @@ class TestCorpusShape:
             for step in entry.test.steps:
                 counts[step.kind()] += 1
         assert counts == {
-            # 142 before the vacuity audit added six: the missing half of
-            # CORE-ERR-009, a positive control on each SEC-EXTCARD test, and
-            # two on REST-STATUS-001. Three more when the streaming tests were
-            # given the long-running task their concurrency needs a subject.
-            # Then one of each kind per REST subscribe test: a send to start
-            # the task, and the raw GET or POST under test.
-            StepKind.OPERATION: 153,
-            StepKind.RAW: 24,
-            StepKind.CLIENT: 9,
-            # The five push tests that used to register a config and assert
-            # nothing about what the SUT then delivered.
-            StepKind.WEBHOOK: 5,
+            StepKind.OPERATION: 263,
+            StepKind.RAW: 27,
+            StepKind.CLIENT: 14,
+            StepKind.WEBHOOK: 7,
             StepKind.ASSERTION: 0,
-            StepKind.LIVE: 0,
+            # One per live exchange test. The runner skips these tests.
+            StepKind.LIVE: 10,
         }
 
     def test_transport_restricted_tests_are_a_minority(self, corpus):
         """Most tests are transport-agnostic; that is what makes one corpus
         runnable against all three bindings."""
         restricted = [e for e in corpus if e.test.transport]
-        assert len(restricted) == 28
-        assert len(corpus.for_transport(TransportBinding.JSONRPC)) == 101
-        assert len(corpus.for_transport(TransportBinding.GRPC)) == 88
-        assert len(corpus.for_transport(TransportBinding.REST)) == 94
+        assert len(restricted) == 37
+        assert len(corpus.for_transport(TransportBinding.JSONRPC)) == 155
+        assert len(corpus.for_transport(TransportBinding.GRPC)) == 144
+        assert len(corpus.for_transport(TransportBinding.REST)) == 148
 
     def test_the_bindings_between_them_cover_the_whole_corpus(self, corpus):
-        """101 + 88 + 94 overlaps, but nothing falls through the gaps: every
+        """The three sets overlap, but nothing falls through the gaps: every
         test targets at least one binding, so scoping loses none of them."""
         covered = {
             entry.id
@@ -192,6 +319,9 @@ class TestCorpusShape:
         assert sorted(bare - set(corpus.variables)) == [
             'insufficientAuthToken',
             'otherUserTaskId',
+            # The version the run targets, for a raw step that writes its own
+            # `A2A-Version` header.
+            'specVersion',
             'webhookUrl',
         ]
 
@@ -204,11 +334,6 @@ class TestWhatEachBindingIsScoredOn:
     Getting this wrong is not cosmetic: it put twenty-three phantom skips in
     the gRPC report and scored a clean run 88/111.
     """
-
-    def test_a_binding_is_scored_only_on_the_tests_that_target_it(self, corpus):
-        assert [
-            len(_in_scope(corpus, binding).tests) for binding in TransportBinding
-        ] == [101, 88, 94]
 
     def test_an_out_of_scope_test_is_absent_rather_than_skipped(self, corpus):
         ids = {entry.id for entry in _in_scope(corpus, TransportBinding.JSONRPC)}
@@ -244,12 +369,18 @@ class TestBehaviorContract:
             'tck-auth-required',
             'tck-cancel',
             'tck-complete-task',
+            'tck-hold-working',
+            'tck-live-echo',
+            'tck-live-reject',
             'tck-long-running',
             'tck-message-response',
             'tck-multi-turn',
+            'tck-progress-update',
             'tck-stream-basic',
             'tck-stream-chunked',
+            'tck-stream-input-required',
             'tck-task-failure',
+            'tck-user-artifact-echo',
         ]
 
     def test_every_behavior_uses_the_tck_prefix(self, corpus):
@@ -260,13 +391,10 @@ class TestBehaviorContract:
         that does needs the SUT to recognise the `tck-*` prefix and play along.
 
         Note the corpus also writes `requires_behaviors: []` explicitly on
-        some tests, so "declares the key" (83) is not "needs a behavior" (72).
+        some tests, so "declares the key" (133) is not "needs a behavior" (122).
         """
-        # 69/80 before REST-STATUS-001 gained a positive control, which needs
-        # a real task and so a behaviour to produce one. The two REST
-        # subscribe tests each need `tck-long-running`.
-        assert len([e for e in corpus if e.test.behaviors()]) == 72
-        assert len([e for e in corpus if e.test.requires_behaviors is not None]) == 83
+        assert len([e for e in corpus if e.test.behaviors()]) == 122
+        assert len([e for e in corpus if e.test.requires_behaviors is not None]) == 133
 
 
 class TestCorpusNeedsNoRewriting:
@@ -278,7 +406,7 @@ class TestCorpusNeedsNoRewriting:
     """
 
     def test_strict_load_of_the_shipped_corpus_succeeds(self):
-        assert len(load_suite(MANIFEST).tests) == 113
+        assert load_suite(MANIFEST).errors == []
 
     def test_push_operations_use_the_abstract_enum_names(self, corpus):
         """The enum has no `*_push_notification_config` member, so a surviving
@@ -385,8 +513,18 @@ class TestUpstreamFixesArePinned:
             # need a receiver the SUT can actually POST to
             'PUSH-DELIV-001', 'PUSH-DELIV-002', 'PUSH-DELIV-003',
             'SEC-PUSH-001', 'SEC-PUSH-002',
+            'PUSH-VER-001', 'PUSH-VER-002', 'PUSH-VER-003',
             # need two streams open at once, or one broken mid-flight
             'STREAM-MULTI-001', 'STREAM-MULTI-002', 'STREAM-RESUB-001',
+            'STREAM-RESUB-002',
+            # keep one request open while sending another
+            'STREAM-MSGUPD-001', 'STREAM-MSGUPD-002', 'STREAM-OPEN-002',
+            'CORE-POLL-003', 'CORE-USERART-007',
+            # drive a two-way live exchange
+            'STREAM-LIVE-001', 'STREAM-LIVE-002', 'STREAM-LIVE-003',
+            'STREAM-LIVE-004', 'STREAM-LIVE-005', 'STREAM-LIVE-006',
+            'STREAM-LIVE-007', 'STREAM-LIVE-008', 'STREAM-LIVE-009',
+            'STREAM-LIVE-010',
         }
         for entry in corpus:
             for step in entry.test.steps:
@@ -431,6 +569,10 @@ class TestUpstreamFixesArePinned:
         # is absent from `RUNNER_CAPABILITIES` without being unarrangeable.
         cannot_arrange = {
             RunnerRequirement.WEBHOOK_ENDPOINT,
+            # The runner does not drive a live exchange yet. The ten tests
+            # that need one are skipped, which is what a runner without the
+            # requirement owes them.
+            RunnerRequirement.LIVE_STREAM,
         }
         # A requirement in both lists is a contradiction: `auth_credentials`
         # sat in `cannot_arrange` after the harness gained it, so declaring it
@@ -488,11 +630,13 @@ class TestKnownDivergencesStillPresent:
     """
 
     def test_error_assertions_that_do_not_name_an_error_type(self, corpus):
-        """Two tests assert only that *some* error came back.
+        """Three tests assert only that *some* error came back.
 
-        Deliberate in both: the spec mandates a failure without mandating
+        Deliberate in each: the spec mandates a failure without mandating
         which error, and each still produces a genuine contrast because the
-        same operation succeeds earlier in the test.
+        same operation succeeds earlier in the test. The third is from A2A
+        1.1: artifact updates sent without a message, where they would create
+        a task.
 
         Two have left this list. `SEC-AUTH-003` first — A2A requires an
         inaccessible task to be reported *not found*, so naming the error is
@@ -509,16 +653,21 @@ class TestKnownDivergencesStillPresent:
         assert sorted(unconstrained) == [
             ('CORE-MULTI-003', 'mismatch'),
             ('CORE-MULTI-006', 'turn2'),
+            ('CORE-USERART-005', 'no-message'),
         ]
 
     def test_subscribe_method_divergence_is_covered_for_both_methods(self, corpus):
-        """The proto binds REST SubscribeToTask to GET, the spec's tables to POST.
+        """In A2A 1.0 the proto binds REST SubscribeToTask to GET, the spec's
+        tables to POST.
 
         Neither source wins in the corpus: one SHOULD test per method, REST
         only, each sending its method as a raw request. The abstract
         `subscribe_to_task` operation cannot test this, because it lets the
-        dispatcher pick the method.
+        dispatcher pick the method. From A2A 1.1 both sources say GET, so the
+        POST test ends at 1.0.
         """
+        assert corpus.by_id('REST-SUB-GET-001').test.max_spec_version is None
+        assert corpus.by_id('REST-SUB-POST-001').test.max_spec_version == '1.0'
         for test_id, method in (
             ('REST-SUB-GET-001', 'GET'),
             ('REST-SUB-POST-001', 'POST'),

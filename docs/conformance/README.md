@@ -48,7 +48,7 @@ Every test has a level - `must`, `should` or `may`. An SDK is **conformant** on 
 | --- | --- |
 | SUT | System under test: the one agent an ACTS run talks to. Either the mounted `current` checkout, which the harness starts, or an agent already running at `--sut-url` |
 | binding, transport | `jsonrpc`, `grpc` or `rest` (ACTS's name for HTTP+JSON) |
-| corpus | The set of `*.acts.yaml` files. 113 tests in 14 files plus a manifest |
+| corpus | The set of `*.acts.yaml` files. 173 tests in 18 files plus a manifest; a run at A2A 1.0 takes 113 of them and a run at A2A 1.1 takes 172. The tests for 1.1 come from an open A2A pull request and can change with it |
 | suite | A named group of tests inside one file (`core-operations`, `streaming`, ...) |
 | level | `must`, `should`, `may` - the RFC 2119 weight of what the test checks |
 | behavior, `tck-*` prefix | A text prefix the SUT recognises and reacts to in a defined way |

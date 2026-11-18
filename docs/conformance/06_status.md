@@ -16,7 +16,13 @@ A `must` failure on the dashboard is an SDK defect or a spec disagreement to res
 
 ## What the corpus is pinned to
 
-The mirrored corpus is a byte-identical copy of `tests/acts/*.acts.yaml` from the A2A repository at commit `a8c99376...` on branch `conformance-spec-adjustments` - PR [#2227](https://github.com/a2aproject/A2A/pull/2227), which targets the branch of [#1882](https://github.com/a2aproject/A2A/pull/1882), where the ACTS specification itself is proposed. Neither is merged into A2A `main`. Both the specification and the test files can still change under review, and the `1.0` in `acts_version` is the draft's own number, not a published release. The pin, and the procedure for moving it, are in [03_corpus.md](03_corpus.md#refreshing-the-mirror).
+The mirrored corpus is a byte-identical copy of `tests/acts/*.acts.yaml` from the A2A repository at commit `3252da72...` on branch `conformance-spec-1.1` - PR [#2468](https://github.com/a2aproject/A2A/pull/2468), which adds the tests for A2A 1.1. It targets the branch of [#2227](https://github.com/a2aproject/A2A/pull/2227), which in turn targets the branch of [#1882](https://github.com/a2aproject/A2A/pull/1882), where the ACTS specification itself is proposed. None of the three is merged into A2A `main`. Both the specification and the test files can still change under review, and the `1.0` in `acts_version` is the draft's own number, not a published release. The pin, and the procedure for moving it, are in [03_corpus.md](03_corpus.md#refreshing-the-mirror).
+
+## A2A 1.1
+
+The corpus holds the tests for A2A 1.0 and for A2A 1.1, and the runner runs either with `--spec-version` (see [01_running.md](01_running.md#the-run-version)). The default is 1.0, and nothing an SDK runs today changes: a run at 1.0 takes the same 113 tests as before.
+
+A run at 1.1 takes 172 tests. No SDK runs it yet: the shared CI driver has no setting for the run version, and an agent has to list a 1.1 interface on its card and implement six more behaviors first ([05_sdk-integration.md](05_sdk-integration.md#2-behaviors)). The tests for 1.1 come from an A2A pull request that is still open ([#2468](https://github.com/a2aproject/A2A/pull/2468)) and can change with it.
 
 An earlier pin contained tests whose preconditions no agent could meet (a capability the protocol does not define). The runner reports such tests separately, as `PRECONDITION CANNOT BE SATISFIED`, so a corpus problem can never read as an SDK's skip. The current pin has none.
 
@@ -43,6 +49,9 @@ If a second ACTS runner appears, these are the points where its results could le
 ## Open items
 
 - **Promote the PR job to a gate**: remove `continue-on-error` in the SDKs that are conformant, and in the others once they are.
-- **Corpus pin**: move to A2A `main` once #1882/#2227 land. Until then a change to the draft can arrive here only by a deliberate re-pin.
+- **Corpus pin**: move to A2A `main` once #1882, #2227 and #2468 land. Until then a change to the draft can arrive here only by a deliberate re-pin.
+- **Live exchanges**: the runner reads a `live` step and does not execute it, so the ten `STREAM-LIVE` tests are skipped in a run at 1.1.
+- **Push payload kinds**: the webhook receiver stores `task`, `statusUpdate`, `artifactUpdate` and `messageUpdate` deliveries and refuses `message`. Storing that kind needs `PUSH-DELIV-003` to accept it first; today the test accepts a task, a status update or an artifact update.
+- **A run at 1.1 in CI**: the shared driver and the dashboard have no notion of the run version yet.
 - **SUT output on the CLI**: `run_acts.py` discards the agent's stdout and stderr. A start-up failure has to be reproduced by hand; the service path captures logs under `/app/logs` but the CLI has no `--log-dir`.
 - **Leftover on the ACTS CI path**: the driver still selects a traversal scenario file and builds a `/run` body before branching to `/run-acts`. Harmless, but a traversal scenario problem could fail an ACTS job for an unrelated reason.

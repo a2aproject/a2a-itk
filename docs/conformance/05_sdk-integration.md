@@ -11,16 +11,17 @@ Reference implementations: a2a-python (`itk/main.py`, `itk/acts_behaviors.py`, `
 The runner fetches the card once per pass, with `A2A-Version` set to the version the run targets (`1.0` unless the run asks for another), without following redirects, and derives everything else from it:
 
 - **Binding URLs** come from `supportedInterfaces`. For each binding the runner dials the entry whose `protocolVersion` is the run version, failing that the newest entry of the same major version that is newer, failing that an entry with no `protocolVersion`. A card whose entries for the binding are all for older versions or another major version is a configuration error, and the run stops before it sends a request. An agent that serves several versions lists one entry per version; they may share a URL. There is no fallback convention: no JSON-RPC interface in the card means `the agent card advertises no jsonrpc interface` and no report for that binding.
-- **Preconditions** read `capabilities` (`streaming`, `pushNotifications`, `extendedAgentCard`), `securitySchemes` plus `securityRequirements`, `skills` and `supportedInterfaces`. A capability the agent has but does not advertise makes every test needing it skip silently; a capability it advertises but lacks makes them fail. Be honest in both directions.
+- **Preconditions** read `capabilities` (`streaming`, `pushNotifications`, `extendedAgentCard`, and in a run at A2A 1.1 `userArtifacts`), `securitySchemes` plus `securityRequirements`, `skills` and `supportedInterfaces`. A capability the agent has but does not advertise makes every test needing it skip silently; a capability it advertises but lacks makes them fail. Be honest in both directions.
+- **A run at A2A 1.1** dials each binding by the rule above, so a card whose entries for a binding are all for 1.0 stops the run with `the agent card advertises no ... interface for A2A 1.1`. Three tests of that run also need a 1.0 entry for the binding and are skipped without one: two send a step as an A2A 1.0 client, and one registers a push notification configuration for delivery as 1.0.
 - `defaultInputModes` should include whatever the agent accepts. The ITK instruction envelope is a binary part, so the Python agent lists `application/x-protobuf` alongside `text/plain`.
 
 ## 2. Behaviors
 
 A test cannot know how to make an arbitrary agent fail a task, stay in `WORKING`, or stream three artifact chunks. ACTS section 11 solves this with a prefix convention: the text of the **first part of the first user message** names a behaviour, and the agent produces the corresponding outcome. The message `tck-complete-task hello world` must come back as a completed task; `tck-cancel start` must stay in `WORKING` until a `cancel_task` arrives.
 
-The standard prefixes (section 11.2) and what the runner's tests expect of each:
+The standard prefixes (section 11.2) and what the runner's tests expect of each. The last column counts the tests of a run at A2A 1.0:
 
-| Prefix | Expected outcome | Corpus uses it |
+| Prefix | Expected outcome | Tests for 1.0 that use it |
 | --- | --- | --- |
 | `tck-complete-task` | Task reaches `TASK_STATE_COMPLETED` with a text status message | 35 tests |
 | `tck-long-running` | Task stays in `TASK_STATE_WORKING` for a moment, then completes. The Python agent waits 1 s; the corpus polls every 2 s, so it must be observable as non-terminal at least once | 14 |
@@ -39,6 +40,19 @@ The standard prefixes (section 11.2) and what the runner's tests expect of each:
 | `tck-reject-task` | `TASK_STATE_REJECTED` | 0 |
 
 The last two are in the spec and in every SDK's contract, but no test in the current corpus uses them. Implement them anyway; a corpus refresh may.
+
+A run at A2A 1.1 uses six more. An agent needs them only once it implements 1.1; a run at 1.0 asks for none of them, and its contract file need not list them.
+
+| Prefix | Expected outcome |
+| --- | --- |
+| `tck-progress-update` | Reports progress at least twice with a status update that keeps the task in `TASK_STATE_WORKING` and carries a new status message, then completes |
+| `tck-hold-working` | Stays in `TASK_STATE_WORKING` for the number of milliseconds given as the argument (`tck-hold-working 4000 ...`; 2000 without one) and emits no update in that time, then completes. A client message sent to the task meanwhile is accepted and added to the task, and is not answered |
+| `tck-stream-input-required` | On a streaming call: status `WORKING`, then status `INPUT_REQUIRED`, then waits. When the client sends a message to the task: status `WORKING`, then status `COMPLETED` |
+| `tck-user-artifact-echo` | Accepts artifacts written by the client for as long as the task is open. After each request it stays in `TASK_STATE_INPUT_REQUIRED` with the status message `artifact-received:<text>`, the text of the first part of the last artifact in that request. Completes when a client message has the text `done` |
+| `tck-live-echo` | On a live exchange: keeps the task in `TASK_STATE_WORKING` and answers every client message after the opening one with a status update whose message text is `live-echo:<n>`, counting from 1. Completes when a client message has the text `done` |
+| `tck-live-reject` | As `tck-live-echo`, but rejects every client message whose text starts with `reject` with a `StreamError` that carries the message's `messageId` in `referenceId`, and keeps the exchange open |
+
+The exact wording is in section 11.2 of the ACTS specification as [A2A #2468](https://github.com/a2aproject/A2A/pull/2468) proposes it, and may change while that pull request is under review. The two live behaviors are used only by the live exchange tests, which this runner skips for now.
 
 Things that bite:
 
@@ -118,7 +132,7 @@ If the card does not change under the variable, the skips stand and the run logs
 
 ## 5. Reduced capabilities
 
-`ITK_ACTS_REDUCED_CAPABILITIES=1` in the environment asks for the opposite of the default: a card that advertises `streaming: false`, `pushNotifications: false` and `extendedAgentCard: false`, and an agent that answers `UnsupportedOperationError` when those operations are called anyway. The runner starts a second agent with the variable set and re-runs the tests skipped as `agent card capability X=True, needs False` - four of them.
+`ITK_ACTS_REDUCED_CAPABILITIES=1` in the environment asks for the opposite of the default: a card that advertises `streaming: false`, `pushNotifications: false` and `extendedAgentCard: false`, and an agent that answers `UnsupportedOperationError` when those operations are called anyway. The runner starts a second agent with the variable set and re-runs the tests skipped as `agent card capability X=True, needs False` - four of them in a run at A2A 1.0. An agent that implements A2A 1.1 drops `userArtifacts` under the variable as well, and refuses an artifact written by the client; a run at 1.1 re-runs one more test for that.
 
 For most SDKs this is a few lines: the server already refuses operations the card does not advertise, so publishing less is enough. If the card still advertises the capabilities under the variable, the skips stand and the run logs it.
 
@@ -138,7 +152,7 @@ The delivery tests (`PUSH-DELIV-*`) are `may`-level and need the receiver, which
 
 ## 7. Client tests
 
-`client-parsing.acts.yaml` holds eight tests (five `must`) that do not exercise the server at all: they hand the SDK's **client** a canonical wire payload and ask what it parsed. The ACTS spec defines the step but not how a runner reaches a client, so this runner delivers it as a behaviour:
+`client-parsing.acts.yaml` holds thirteen tests that do not exercise the server at all, eight of them for A2A 1.0 (five `must`) and five more, all `must`, that start at A2A 1.1: they hand the SDK's **client** a canonical wire payload and ask what it parsed. The ACTS spec defines the step but not how a runner reaches a client, so this runner delivers it as a behaviour:
 
 ```json
 {
@@ -158,7 +172,7 @@ The delivery tests (`PUSH-DELIV-*`) are `may`-level and need the receiver, which
 2. Perform the operation with that client.
 3. Return a **completed task with one artifact holding a data part** whose content is what the client produced, shaped like the operation's response: `{"task": ...}` or `{"message": ...}` for `send_message`, the task fields for `get_task`, the card for the card operations, and `{"error": {"code": ..., "message": ...}}` when the client surfaced an error (`CLIENT-PARSE-004` feeds an error envelope and expects exactly that).
 
-The runner takes the first data part on any artifact of the returned task and evaluates `expect_parsed` against it. No data part means `the SUT returned no parsed payload; it may not implement tck-client-parse` - a failure. These tests have no `requires_behaviors`, so the contract file does not gate them; an SDK without the behaviour fails all eight.
+The runner takes the first data part on any artifact of the returned task and evaluates `expect_parsed` against it. No data part means `the SUT returned no parsed payload; it may not implement tck-client-parse` - a failure. These tests have no `requires_behaviors`, so the contract file does not gate them; an SDK without the behaviour fails all of them.
 
 Use the real client with a mock transport, not a bare deserialiser. Calling `FromJson` directly skips the envelope handling and error mapping that the tests are about.
 
