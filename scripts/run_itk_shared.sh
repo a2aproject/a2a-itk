@@ -152,7 +152,8 @@ $CONTAINER_RT exec -u root itk-service bash -lc \
 # this step the saved cache grows with every new peer commit.
 # - Not in an ACTS run: it starts no peers, so it would only remove trees.
 # - A tree's age counts from the last run that saved the cache. CI saves once
-#   per commit, so the TTL has to outlast a quiet week, not a single night.
+#   per commit, and a nightly or re-run on the same commit saves nothing, so
+#   the TTL has to outlast the longest expected gap between pushes.
 # - This is housekeeping, so a failure is reported and the run goes on.
 if [ "${ITK_ACTS_RUN}" != "1" ] && [ "${ITK_ACTS_RUN^^}" != "TRUE" ]; then
   $CONTAINER_RT exec -w /app itk-service \
