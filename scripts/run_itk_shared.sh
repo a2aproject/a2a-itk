@@ -298,6 +298,23 @@ curl -s --max-time "$ITK_RUN_TIMEOUT" -X POST http://127.0.0.1:8000/run \
   -o raw_results.json
 CURL_STATUS=$?
 
+# 6c. Drop cached peer trees unused for ITK_TREE_TTL or over
+# ITK_DISK_BUDGET_BYTES. CI saves this directory with actions/cache, so without
+# this step the saved cache grows with every new peer commit.
+# - After /run: every tree this run used was touched on its cache hit, so only
+#   trees no run has used for the TTL are removed. A restored cache can be
+#   days old (a nightly or re-run on the same commit saves nothing), and this
+#   order keeps those stale times from evicting peers about to be reused.
+# - Only when /run completed: a run that failed or timed out may have touched
+#   only some of its trees.
+# - Not in an ACTS run, which exits above: it starts no peers.
+# - This is housekeeping, so a failure is reported and the run goes on.
+if [ $CURL_STATUS -eq 0 ]; then
+  $CONTAINER_RT exec -w /app itk-service \
+    uv run python -m test_suite.launcher.cache evict \
+    || echo "Warning: launcher cache eviction failed; continuing." >&2
+fi
+
 # 7. Report. itk_report.py validates the response shape before anything
 # consumes it, so a FastAPI error envelope can't reach process_results.py and
 # land an empty entry in the published history.

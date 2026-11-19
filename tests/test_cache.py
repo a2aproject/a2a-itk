@@ -5,6 +5,7 @@ Concurrency-specific behaviour lives in test_cache_concurrency.py.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -90,6 +91,21 @@ class TestCheckoutAndBuild:
         cache.release(_REPO, _SHA_A)
 
         assert calls == {'fetch': 1, 'build': 1}, 'second call must not refetch/rebuild'
+
+    def test_hit_refreshes_sentinel_mtime(self, cache_dir):
+        cache.checkout_and_build(
+            _REPO, _SHA_A, _fetcher=_fake_fetch_ok, _builder=_fake_build_ok,
+        )
+        cache.release(_REPO, _SHA_A)
+        sentinel = cache_dir / 'trees' / cache.cache_key(_REPO, _SHA_A) / '.itk-built'
+        os.utime(sentinel, (0, 0))
+
+        cache.checkout_and_build(
+            _REPO, _SHA_A, _fetcher=_fake_fetch_ok, _builder=_fake_build_ok,
+        )
+        cache.release(_REPO, _SHA_A)
+
+        assert sentinel.stat().st_mtime > 0, 'a hit must reset the eviction age'
 
     def test_different_sha_misses(self, cache_dir):  # noqa: ARG002
         n = {'n': 0}

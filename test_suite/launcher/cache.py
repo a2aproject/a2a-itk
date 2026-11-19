@@ -266,6 +266,10 @@ def checkout_and_build(
         _pin(key)
 
         if sentinel.exists():
+            # evict() ages a tree by the sentinel mtime. Refresh it on every
+            # hit, so a peer that stays in use is not evicted and rebuilt
+            # once per TTL.
+            sentinel.touch()
             return tree / subdir
 
         # Any prior contents are a failed/partial build — always start clean.
