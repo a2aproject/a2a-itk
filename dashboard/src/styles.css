@@ -1215,6 +1215,15 @@ a:hover {
   color: var(--text-muted);
 }
 
+/* The A2A version switch of the conformance view sits under the SDK tabs. */
+.version-tabs {
+  margin: 0 0 16px;
+}
+
+.version-tabs .segment {
+  text-decoration: none;
+}
+
 .ghost-button {
   padding: 5px 10px;
   border: 1px solid var(--border);

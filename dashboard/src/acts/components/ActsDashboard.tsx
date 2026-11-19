@@ -10,8 +10,8 @@ interface Props {
 }
 
 /**
- * Owns the "which run is selected" state. ActsView mounts this with
- * `key={sdk.id}`, so switching SDK resets the selection to the newest run.
+ * Owns the "which run is selected" state. ActsView keys this by SDK and A2A
+ * version, so switching either resets the selection to the newest run.
  */
 export default function ActsDashboard({ runs, sdk }: Props) {
   const [runIndex, setRunIndex] = useState(0);

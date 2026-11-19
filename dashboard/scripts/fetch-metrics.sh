@@ -47,7 +47,7 @@ fetch itk_dotnet.json a2a-dotnet itk_dotnet.json
 fetch itk_ts.json     a2a-js     itk_js.json
 fetch itk_java.json   a2a-java   itk_java.json
 
-echo "Conformance (ACTS) metrics:"
+echo "Conformance (ACTS) metrics at A2A 1.0:"
 fetch acts_python.json a2a-python acts_python.json
 fetch acts_go.json     a2a-go     acts_go.json
 fetch acts_rust.json   a2a-rs     acts_rust.json
@@ -55,4 +55,14 @@ fetch acts_dotnet.json a2a-dotnet acts_dotnet.json
 fetch acts_ts.json     a2a-js     acts_js.json
 fetch acts_java.json   a2a-java   acts_java.json
 
-echo "Done: 12 files in public/, $missing not published yet."
+# One file per version, named as scripts/run_itk_shared.sh publishes it. An
+# SDK that does not run ACTS at a version yet has no such asset.
+echo "Conformance (ACTS) metrics at A2A 1.1:"
+fetch acts_python_v11.json a2a-python acts_python_v11.json
+fetch acts_go_v11.json     a2a-go     acts_go_v11.json
+fetch acts_rust_v11.json   a2a-rs     acts_rust_v11.json
+fetch acts_dotnet_v11.json a2a-dotnet acts_dotnet_v11.json
+fetch acts_ts_v11.json     a2a-js     acts_js_v11.json
+fetch acts_java_v11.json   a2a-java   acts_java_v11.json
+
+echo "Done: 18 files in public/, $missing not published yet."

@@ -22,7 +22,7 @@ The mirrored corpus is a byte-identical copy of `tests/acts/*.acts.yaml` from th
 
 The corpus holds the tests for A2A 1.0 and for A2A 1.1, and the runner runs either with `--spec-version` (see [01_running.md](01_running.md#the-run-version)). The default is 1.0, and nothing an SDK runs today changes: a run at 1.0 takes the same 113 tests as before.
 
-A run at 1.1 takes 172 tests. No SDK runs it yet: the shared CI driver has no setting for the run version, and an agent has to list a 1.1 interface on its card and implement six more behaviors first ([05_sdk-integration.md](05_sdk-integration.md#2-behaviors)). The tests for 1.1 come from an A2A pull request that is still open ([#2468](https://github.com/a2aproject/A2A/pull/2468)) and can change with it.
+A run at 1.1 takes 172 tests. No SDK runs it yet: an agent has to list a 1.1 interface on its card and implement six more behaviors first ([05_sdk-integration.md](05_sdk-integration.md#2-behaviors)). Then the SDK sets `ITK_ACTS_SPEC_VERSIONS` in its workflows, its runs at 1.1 are published to `acts_<sdk>_v11.json`, and the dashboard shows them beside the runs at 1.0 ([04_ci.md](04_ci.md#running-at-a2a-11)). The tests for 1.1 come from an A2A pull request that is still open ([#2468](https://github.com/a2aproject/A2A/pull/2468)) and can change with it.
 
 An earlier pin contained tests whose preconditions no agent could meet (a capability the protocol does not define). The runner reports such tests separately, as `PRECONDITION CANNOT BE SATISFIED`, so a corpus problem can never read as an SDK's skip. The current pin has none.
 
@@ -53,6 +53,5 @@ If a second ACTS runner appears, these are the points where its results could le
 - **Live exchanges over HTTP**: the runner drives a live exchange on all three bindings. How a later HTTP call is related to its exchange, and where a rejected HTTP request is reported, are not in A2A yet; the runner follows the ACTS specification, and both may change. See [02_architecture.md](02_architecture.md#live-exchanges).
 - **The proto revision**: the stubs are generated from the A2A 1.1 release candidate. A2A has since renamed a member of `StreamRequest`, which changes what a live request looks like on the JSON bindings. The runner follows the stubs, so this moves with the pin in `build_protos.sh`.
 - **Push payload kinds**: the webhook receiver stores `task`, `statusUpdate`, `artifactUpdate` and `messageUpdate` deliveries and refuses `message`. Storing that kind needs `PUSH-DELIV-003` to accept it first; today the test accepts a task, a status update or an artifact update.
-- **A run at 1.1 in CI**: the shared driver and the dashboard have no notion of the run version yet.
 - **SUT output on the CLI**: `run_acts.py` discards the agent's stdout and stderr. A start-up failure has to be reproduced by hand; the service path captures logs under `/app/logs` but the CLI has no `--log-dir`.
 - **Leftover on the ACTS CI path**: the driver still selects a traversal scenario file and builds a `/run` body before branching to `/run-acts`. Harmless, but a traversal scenario problem could fail an ACTS job for an unrelated reason.
