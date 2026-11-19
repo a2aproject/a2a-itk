@@ -41,6 +41,7 @@ sources the script as its last statement.
 | `ITK_RUN_TIMEOUT` | `1800` | Seconds the whole `/run` request may take, peer builds included, before the driver gives up and dumps the service log |
 | `ITK_ACTS_RUN` | `0` | Run the ACTS conformance suite **instead of** the traversal suite |
 | `ITK_ACTS_TRANSPORTS` | `jsonrpc` | Comma-separated bindings to run ACTS over, e.g. `jsonrpc,grpc,rest` |
+| `ITK_ACTS_SPEC_VERSIONS` | `1.0` | Comma-separated A2A versions to run ACTS at, e.g. `1.0,1.1`. Each runs every binding and has a history file of its own |
 | `ITK_ACTS_LANGUAGE` | `$ITK_SDK_NAME` | Language string for the report's `sdk-info` (spec §13.1) |
 | `ACTS_HISTORY_LIMIT` | `7` | Runs kept in the rolling ACTS history. Lower than ITK's 50 — an ACTS entry is far larger |
 
@@ -53,7 +54,7 @@ Orthogonal to `ITK_NIGHTLY_RUN`, which still decides whether results are
 | | `ITK_NIGHTLY_RUN` unset | `ITK_NIGHTLY_RUN=true` |
 | --- | --- | --- |
 | `ITK_ACTS_RUN=0` | traversal, gate on `all_passed` | traversal, append to `itk_<sdk>.json` |
-| `ITK_ACTS_RUN=1` | ACTS, gate on `must` conformance | ACTS, append to `acts_<sdk>.json` |
+| `ITK_ACTS_RUN=1` | ACTS, gate on `must` conformance | ACTS, append to `acts_<sdk>.json` (`acts_<sdk>_v11.json` at A2A 1.1) |
 
 Each transport produces two files in the itk directory:
 
@@ -62,9 +63,15 @@ Each transport produces two files in the itk directory:
   file to upload as a workflow artifact**; it is what someone reads to find
   out *why* a test failed.
 - `acts_results_<transport>.json` — the same document under a stable name, so
-  the following steps needn't glob for a timestamp.
+  the following steps needn't glob for a timestamp. At a version other than
+  1.0 the name carries the version: `acts_results_v11_<transport>.json`.
 
-On the nightly path **one** entry is appended to `acts_<metrics-name>.json`,
+Each A2A version in `ITK_ACTS_SPEC_VERSIONS` is a run of its own, over every
+binding, with a history file of its own: `acts_<metrics-name>.json` for 1.0,
+the name it has always had, and `acts_<metrics-name>_v11.json` for 1.1. The
+workflow uploads each file it publishes.
+
+On the nightly path **one** entry is appended to the version's history file,
 which the workflow re-uploads to the `nightly-metrics` release exactly as it
 already does for `itk_<metrics-name>.json`. One commit tested over three
 bindings is one run of the SDK, so the bindings nest under `results` rather

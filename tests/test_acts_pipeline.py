@@ -391,6 +391,33 @@ class TestProcessing:
         assert code == 0
         assert history[-1]['spec_version'] == '1.1'
 
+    def test_a_run_is_not_added_to_the_history_of_another_version(self, tmp_path, caplog):
+        """Each version has a file of its own. A run published to the wrong
+        one would push the other version's runs out of their window."""
+        last_night = build_run([a_report()])
+        at_11 = {**a_report(), 'spec_version': '1.1'}
+        with pytest.raises(SystemExit):
+            self.run(tmp_path, at_11, history=[last_night])
+        assert 'holds runs at A2A 1.0, and this run is at A2A 1.1' in caplog.text
+        assert not (tmp_path / 'acts_python.json').exists()
+
+    def test_entries_that_name_no_version_do_not_count_against_a_run(self, tmp_path):
+        """An entry built from a report that named no version, or a hand-made one."""
+        at_11 = {**a_report(), 'spec_version': '1.1'}
+        code, history = self.run(
+            tmp_path, at_11, history=[{'timestamp': 'old'}, {'spec_version': ''}]
+        )
+        assert code == 0
+        assert history[-1]['spec_version'] == '1.1'
+
+    def test_a_run_joins_a_history_of_its_own_version(self, tmp_path):
+        earlier = build_run([{**a_report(), 'spec_version': '1.1'}])
+        code, history = self.run(
+            tmp_path, {**a_report(), 'spec_version': '1.1'}, history=[earlier]
+        )
+        assert code == 0
+        assert [e['spec_version'] for e in history] == ['1.1', '1.1']
+
     def test_both_sdks_can_share_one_asset(self, tmp_path):
         """Nothing keys the history by SDK, so a shared asset stays coherent."""
         first = build_run([a_report(sdk='a2a-python')])
