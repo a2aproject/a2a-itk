@@ -347,6 +347,120 @@ class TestStepFieldsMatchKind:
             })
 
 
+class TestProtocolVersionOnAStep:
+    def test_an_operation_step_may_name_the_version_it_is_sent_as(self):
+        step = Step.model_validate(_step(a2a_version='1.99'))
+        assert step.a2a_version == '1.99'
+        assert Step.model_validate(_step()).a2a_version is None
+
+    def test_a_raw_step_writes_its_own_header(self):
+        with pytest.raises(ValidationError, match='writes its own `A2A-Version` header'):
+            Step.model_validate({
+                'id': 'r', 'raw': {'method': 'POST', 'path': '/'}, 'a2a_version': '1.0',
+            })
+
+    def test_it_is_not_for_a_step_that_sends_nothing_itself(self):
+        with pytest.raises(ValidationError, match='belongs to an operation step'):
+            Step.model_validate({
+                'id': 'w', 'expect_webhook': {'task_id': 'T1'}, 'a2a_version': '1.0',
+            })
+
+    @pytest.mark.parametrize('written', [1.0, 1, ''])
+    def test_the_version_is_written_as_text(self, written):
+        """Unquoted, YAML reads `1.10` as the number 1.1."""
+        with pytest.raises(ValidationError, match='a2a_version'):
+            Step.model_validate(_step(a2a_version=written))
+
+
+class TestStepDuration:
+    def test_bounds_are_kept(self):
+        step = Step.model_validate(_step(min_duration_ms=1000, max_duration_ms=5000))
+        assert (step.min_duration_ms, step.max_duration_ms) == (1000, 5000)
+
+    @pytest.mark.parametrize('name', ['min_duration_ms', 'max_duration_ms'])
+    def test_a_bound_cannot_be_negative(self, name):
+        with pytest.raises(ValidationError):
+            Step.model_validate(_step(**{name: -1}))
+
+    def test_bounds_no_response_can_satisfy_are_rejected(self):
+        with pytest.raises(ValidationError, match='no response can satisfy both'):
+            Step.model_validate(_step(min_duration_ms=2000, max_duration_ms=1000))
+
+    @pytest.mark.parametrize('name', ['min_duration_ms', 'max_duration_ms'])
+    def test_a_bound_times_one_request_not_several(self, name):
+        with pytest.raises(ValidationError, match='`repeat` sends several'):
+            Step.model_validate(
+                _step(**{name: 1000}, repeat={'until': 'status.state == X'})
+            )
+
+    @pytest.mark.parametrize('name', ['min_duration_ms', 'max_duration_ms'])
+    def test_a_bound_is_not_for_a_step_that_reads_a_stream(self, name):
+        with pytest.raises(ValidationError, match='this step reads a stream'):
+            Step.model_validate(
+                _step(operation='subscribe_to_task', params={'id': 'T1'}, expect=None,
+                      expect_stream={'min_count': 1}, **{name: 1000})
+            )
+
+    @pytest.mark.parametrize('name', ['min_duration_ms', 'max_duration_ms'])
+    def test_a_bound_is_for_an_operation_step(self, name):
+        with pytest.raises(ValidationError, match='times the response to an operation'):
+            Step.model_validate({
+                'id': 'r', 'raw': {'method': 'POST', 'path': '/'}, name: 1000,
+            })
+
+
+class TestProtocolVersionsPrecondition:
+    def test_versions_are_kept(self):
+        test = Test.model_validate(
+            _test(preconditions={'protocol_versions': ['1.0', '1.1']})
+        )
+        assert test.preconditions.protocol_versions == ['1.0', '1.1']
+
+    @pytest.mark.parametrize('written', [[], ['1'], ['1.0.0'], ['latest'], [1.0]])
+    def test_each_entry_is_a_version(self, written):
+        """It is compared with the versions an agent card lists."""
+        with pytest.raises(ValidationError, match='protocol_versions'):
+            Test.model_validate(_test(preconditions={'protocol_versions': written}))
+
+
+class TestStaysOpen:
+    def test_it_is_kept_for_the_step_and_for_one_stream_of_it(self):
+        block = ExpectStream.model_validate(
+            {'stays_open_ms': 3000, 'streams': [{}, {'stays_open_ms': 500}]}
+        )
+        assert block.stays_open_ms == 3000
+        assert [plan.stays_open_ms for plan in block.streams] == [None, 500]
+
+    def test_a_stream_the_runner_hangs_up_on_cannot_show_it(self):
+        with pytest.raises(ValidationError, match='has the runner hang up'):
+            ExpectStream.model_validate(
+                {'streams': [{'disconnect_after': 1, 'stays_open_ms': 500}]}
+            )
+
+    def test_the_steps_own_bound_applies_to_a_cut_stream_too(self):
+        with pytest.raises(ValidationError, match='applies to every stream'):
+            ExpectStream.model_validate(
+                {'stays_open_ms': 500, 'streams': [{'disconnect_after': 1}, {}]}
+            )
+
+    @pytest.mark.parametrize('wait', [-1, 0])
+    def test_it_has_to_be_a_wait(self, wait):
+        """With none, the read ends before the SUT closing the stream could
+        be seen, and the step passes whatever the SUT does."""
+        with pytest.raises(ValidationError):
+            ExpectStream.model_validate({'stays_open_ms': wait})
+
+    @pytest.mark.parametrize('block', [
+        {'stays_open_ms': 3000, 'timeout_ms': 3000},
+        {'timeout_ms': 2000, 'streams': [{}, {'stays_open_ms': 3000}]},
+    ])
+    def test_the_deadline_has_to_outlast_it(self, block):
+        """Or an agent that keeps the stream open fails on the deadline."""
+        with pytest.raises(ValidationError, match='ends the read before'):
+            ExpectStream.model_validate(block)
+        ExpectStream.model_validate({**block, 'timeout_ms': 3001})
+
+
 class TestRawOnlyTestsNeedATransport:
     """Spec §4.4. A raw request hard-codes one binding's wire shape."""
 
@@ -468,6 +582,10 @@ class TestExpectError:
     def test_known_error_name_is_accepted(self):
         e = ExpectError.model_validate({'error_type': 'TaskNotFoundError'})
         assert e.literal_error_type() is ErrorType.TASK_NOT_FOUND
+
+    def test_the_a2a_1_1_error_name_is_accepted(self):
+        e = ExpectError.model_validate({'error_type': 'TaskGenerationMismatchError'})
+        assert e.literal_error_type() is ErrorType.TASK_GENERATION_MISMATCH
 
     def test_misspelled_error_name_is_rejected(self):
         """A name the spec doesn't define could never match, so the test

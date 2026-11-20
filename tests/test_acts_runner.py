@@ -26,6 +26,7 @@ from test_suite.acts.dispatcher.base import (
     Dispatcher,
     MalformedResponse,
     StreamEvent,
+    StreamNotOpened,
     UnsupportedByBinding,
     WireError,
     WireResponse,
@@ -56,6 +57,9 @@ from test_suite.acts.schema import (
     Test,
     TransportBinding,
 )
+
+
+from tests.acts_fake_agent import run_virtual
 
 
 CORPUS = (
@@ -600,6 +604,223 @@ class TestCaptureOnARepeatedStep:
         assert dispatcher.calls[-1][1]['currentGeneration'] == '3'
 
 
+def virtual_clock() -> float:
+    """The clock of the loop a test runs on; see `run_virtual`."""
+    return asyncio.get_running_loop().time()
+
+
+class SlowDispatcher(FakeDispatcher):
+    """Takes ``takes`` seconds to answer, on whatever clock the loop keeps."""
+
+    def __init__(self, *args: Any, takes: float, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.takes = takes
+
+    async def dispatch(self, operation, params=None, headers=None) -> WireResponse:
+        await asyncio.sleep(self.takes)
+        return await super().dispatch(operation, params, headers)
+
+    async def stream(self, operation, params=None, headers=None):
+        await asyncio.sleep(self.takes)
+        async for event in super().stream(operation, params, headers):
+            yield event
+
+
+class TestStepDuration:
+    """`min_duration_ms` and `max_duration_ms`.
+
+    The only way a test can observe that a server held a request open, or that
+    it answered at once.
+    """
+
+    def timed(self, dispatcher, step, **kwargs):
+        runner = runner_for(dispatcher, clock=virtual_clock, **kwargs)
+        return run_virtual(runner.run_test(a_test(step)))
+
+    @pytest.mark.parametrize(
+        ('takes', 'bounds', 'outcome'),
+        [
+            (4.0, {'min_duration_ms': 1000}, Outcome.PASS),
+            (0.2, {'min_duration_ms': 1000}, Outcome.FAIL),
+            (1.0, {'min_duration_ms': 1000}, Outcome.PASS),
+            (0.2, {'max_duration_ms': 3000}, Outcome.PASS),
+            (4.0, {'max_duration_ms': 3000}, Outcome.FAIL),
+            (2.9, {'max_duration_ms': 3000}, Outcome.PASS),
+            (2.0, {'min_duration_ms': 1000, 'max_duration_ms': 3000}, Outcome.PASS),
+            (0.5, {'min_duration_ms': 1000, 'max_duration_ms': 3000}, Outcome.FAIL),
+            (3.5, {'min_duration_ms': 1000, 'max_duration_ms': 3000}, Outcome.FAIL),
+        ],
+    )
+    def test_the_response_time_is_held_to_the_bounds(self, takes, bounds, outcome):
+        result = self.timed(SlowDispatcher(ok({}), takes=takes), get_task(**bounds))
+        assert result.result is outcome
+
+    def test_a_response_that_came_too_soon_says_how_soon(self):
+        result = self.timed(
+            SlowDispatcher(ok({}), takes=0.2), get_task(min_duration_ms=1000)
+        )
+        failure = result.failure
+        assert failure.assertion_path == 'duration'
+        assert (failure.expected, failure.actual) == ('at least 1000ms', '200ms')
+        assert 'arrived after 200ms' in failure.message
+
+    def test_a_request_held_past_the_bound_is_abandoned(self):
+        """The step fails at the bound. Waiting for the answer would take as
+        long as the SUT likes, and then end in the transport's own timeout."""
+        ended: list[float] = []
+
+        async def held():
+            runner = runner_for(SlowDispatcher(ok({}), takes=500.0), clock=virtual_clock)
+            result = await runner.run_test(a_test(get_task(max_duration_ms=3000)))
+            ended.append(virtual_clock())
+            return result
+
+        result = run_virtual(held())
+        assert result.result is Outcome.FAIL
+        failure = result.failure
+        assert failure.assertion_path == 'duration'
+        assert (failure.expected, failure.actual) == ('at most 3000ms', 'no response')
+        assert 'no response after 3000ms' in failure.message
+        assert ended == [pytest.approx(3.0)]
+
+    def test_another_timeout_is_not_taken_for_the_bound(self):
+        """Only the step's own bound running out means the SUT held the request."""
+        dispatcher = FakeDispatcher(raises=TimeoutError('not the bound'))
+        with pytest.raises(TimeoutError, match='not the bound'):
+            self.timed(dispatcher, get_task(max_duration_ms=3000))
+
+    def test_a_time_is_not_rounded_to_the_bound_it_missed(self):
+        """999.6ms against a minimum of 1000ms must not read "1000ms"."""
+        result = self.timed(
+            SlowDispatcher(ok({}), takes=0.9996), get_task(min_duration_ms=1000)
+        )
+        assert result.failure.actual == '999ms'
+
+    def test_the_wait_before_the_step_is_not_part_of_it(self):
+        """`delay_ms` is the runner waiting, not the SUT answering."""
+        step = get_task(delay_ms=5000, max_duration_ms=1000)
+        result = self.timed(
+            SlowDispatcher(ok({}), takes=0.2), step, sleep=asyncio.sleep
+        )
+        assert result.result is Outcome.PASS
+        step = get_task(delay_ms=5000, min_duration_ms=1000)
+        result = self.timed(
+            SlowDispatcher(ok({}), takes=0.2), step, sleep=asyncio.sleep
+        )
+        assert result.result is Outcome.FAIL
+
+    def test_a_wrong_response_is_reported_before_its_timing(self):
+        result = self.timed(
+            SlowDispatcher(ok({'id': 'OTHER'}), takes=0.2),
+            get_task(min_duration_ms=1000, expect={'body': {'id': 'T1'}}),
+        )
+        assert result.failure.assertion_path == 'body.id'
+
+    def test_an_error_response_is_timed_too(self):
+        step = get_task(
+            min_duration_ms=1000, expect_error={'error_type': 'TaskNotFoundError'}
+        )
+        assert self.timed(SlowDispatcher(failed(), takes=0.2), step).result is Outcome.FAIL
+        assert self.timed(SlowDispatcher(failed(), takes=2.0), step).result is Outcome.PASS
+
+    def test_a_refused_stream_is_timed_too(self):
+        """A streaming operation that expects to be refused reads no stream,
+        so its duration can be bounded like any other response."""
+        refusal = StreamNotOpened('the SUT refused the stream', failed())
+        step = Step(
+            id='s', operation=Operation.SUBSCRIBE_TO_TASK, params={'id': 'T1'},
+            expect_error={'error_type': 'TaskNotFoundError'}, max_duration_ms=1000,
+        )
+        quick = SlowDispatcher(raises=refusal, takes=0.2)
+        assert self.timed(quick, step).result is Outcome.PASS
+        slow = SlowDispatcher(raises=refusal, takes=1.0004)
+        result = self.timed(slow, step)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'duration'
+        assert result.failure.actual == '1001ms'
+
+    def test_a_step_without_bounds_is_not_timed(self):
+        result = self.timed(SlowDispatcher(ok({}), takes=500.0), get_task())
+        assert result.result is Outcome.PASS
+
+
+class TestStepSentAsAnotherVersion:
+    """`a2a_version`: one step sent as a client of another A2A version."""
+
+    def test_the_step_carries_that_version_and_the_others_the_runs(self):
+        dispatcher = FakeDispatcher(ok())
+        test = a_test(
+            get_task('before'),
+            get_task('as-1-0', a2a_version='1.0'),
+            get_task('after'),
+        )
+        run(runner_for(dispatcher, spec_version='1.1'), test)
+        assert [call[2][VERSION_HEADER] for call in dispatcher.calls] == ['1.1', '1.0', '1.1']
+
+    def test_spec_version_still_names_the_run_version(self):
+        """The step is sent as another version; the run still targets its own."""
+        dispatcher = FakeDispatcher(ok())
+        step = Step(
+            id='get', operation=Operation.GET_TASK, a2a_version='1.0',
+            params={'id': '{{specVersion}}'},
+        )
+        run(runner_for(dispatcher, spec_version='1.1'), a_test(step))
+        _, params, headers = dispatcher.calls[0]
+        assert params['id'] == '1.1'
+        assert headers[VERSION_HEADER] == '1.0'
+
+    def routed(self, *steps):
+        """A run whose agent serves 1.0 on an interface of its own."""
+        main = FakeDispatcher(ok(), events=[status_update('TASK_STATE_COMPLETED')])
+        other = FakeDispatcher(ok(), events=[status_update('TASK_STATE_COMPLETED')])
+        asked: list[str] = []
+
+        def dispatcher_for_version(version: str):
+            asked.append(version)
+            return other if version == '1.0' else None
+
+        runner = runner_for(
+            main, spec_version='1.1', dispatcher_for_version=dispatcher_for_version
+        )
+        result = run(runner, a_test(*steps))
+        return result, main, other, asked
+
+    def test_the_step_goes_to_the_interface_for_its_version(self):
+        result, main, other, asked = self.routed(
+            get_task('before'), get_task('as-1-0', a2a_version='1.0'), get_task('after')
+        )
+        assert result.result is Outcome.PASS
+        assert len(main.calls) == 2
+        assert [call[2][VERSION_HEADER] for call in other.calls] == ['1.0']
+        # Asked only for the step that names a version.
+        assert asked == ['1.0']
+
+    def test_a_streaming_step_goes_there_too(self):
+        step = Step(
+            id='s', operation=Operation.SUBSCRIBE_TO_TASK, params={'id': 'T1'},
+            a2a_version='1.0', expect_stream={'min_count': 1},
+        )
+        _, main, other, _ = self.routed(step)
+        assert (main.streamed, other.streamed) == ([], ['operation'])
+        assert other.calls[0][2][VERSION_HEADER] == '1.0'
+
+    def test_a_repeated_step_goes_there_on_every_attempt(self):
+        step = get_task(
+            a2a_version='1.0',
+            repeat={'until': 'status.state == NEVER', 'max_attempts': 3},
+        )
+        _, main, other, _ = self.routed(step)
+        assert main.calls == []
+        assert [call[2][VERSION_HEADER] for call in other.calls] == ['1.0'] * 3
+
+    def test_a_version_the_agent_does_not_serve_goes_to_the_runs_interface(self):
+        """Which is expected to refuse it."""
+        _, main, other, asked = self.routed(get_task(a2a_version='1.99'))
+        assert asked == ['1.99']
+        assert [call[2][VERSION_HEADER] for call in main.calls] == ['1.99']
+        assert other.calls == []
+
+
 class TestProtocolObligations:
     def test_the_version_header_goes_on_every_request(self):
         """§12.4."""
@@ -788,6 +1009,56 @@ class TestPreconditions:
         assert result.result is Outcome.SKIP
         assert result.skip_reason.startswith(UNSATISFIABLE)
         assert "'telepathy' is not a capability" in result.skip_reason
+
+    VERSIONED_CARD = {
+        'supportedInterfaces': [
+            {'protocolBinding': 'JSONRPC', 'protocolVersion': '1.1', 'url': 'http://sut/a'},
+            {'protocolBinding': 'JSONRPC', 'protocolVersion': '1.0.0', 'url': 'http://sut/a'},
+            {'protocolBinding': 'JSONRPC', 'url': 'http://sut/unversioned'},
+            {'protocolBinding': 'GRPC', 'protocolVersion': '0.3', 'url': 'sut:1'},
+        ],
+    }
+
+    def versioned(self, *versions, binding=TransportBinding.JSONRPC):
+        runner = runner_for(
+            FakeDispatcher(ok(), binding=binding), agent_card=self.VERSIONED_CARD
+        )
+        test = a_test(get_task(), preconditions={'protocol_versions': list(versions)})
+        return run(runner, test)
+
+    def test_a_version_the_agent_serves_on_this_binding_runs(self):
+        assert self.versioned('1.1').result is Outcome.PASS
+        # The card writes `1.0.0`, which plainly means 1.0.
+        assert self.versioned('1.0').result is Outcome.PASS
+        assert self.versioned('1.0', '1.1').result is Outcome.PASS
+
+    def test_a_version_the_agent_does_not_serve_skips(self):
+        result = self.versioned('1.2')
+        assert result.result is Outcome.SKIP
+        assert result.skip_reason == (
+            'agent card lists no jsonrpc interface for A2A 1.2; it lists 1.0, 1.1'
+        )
+
+    def test_every_listed_version_has_to_be_served(self):
+        result = self.versioned('1.0', '1.2')
+        assert result.result is Outcome.SKIP
+        assert 'for A2A 1.2;' in result.skip_reason
+
+    def test_an_interface_on_another_binding_does_not_count(self):
+        """It does not serve a request sent over this one."""
+        assert self.versioned('0.3').result is Outcome.SKIP
+        assert self.versioned('0.3', binding=TransportBinding.GRPC).result is Outcome.PASS
+        result = self.versioned('1.1', binding=TransportBinding.GRPC)
+        assert result.skip_reason == (
+            'agent card lists no grpc interface for A2A 1.1; it lists 0.3'
+        )
+
+    def test_a_card_with_no_interface_for_the_binding_skips(self):
+        runner = runner_for(FakeDispatcher(ok()), agent_card={})
+        test = a_test(get_task(), preconditions={'protocol_versions': ['1.0']})
+        result = run(runner, test)
+        assert result.result is Outcome.SKIP
+        assert result.skip_reason.endswith('it lists none')
 
     def test_the_known_set_comes_from_the_specs_own_proto(self):
         """Written out by hand it would drift; derived, it cannot."""
@@ -1440,6 +1711,108 @@ class TestStreamingSteps:
         result = run(runner_for(dispatcher), a_test(step))
         assert result.result is Outcome.ERROR
         assert "undefined variable 'nope'" in result.failure.message
+
+    # -- stays_open_ms ---------------------------------------------------------
+
+    WAITING = [status_update('TASK_STATE_WORKING'), status_update('TASK_STATE_INPUT_REQUIRED')]
+
+    def read(self, dispatcher, step, **kwargs):
+        """Run on virtual time: a stream that stalls costs no real waiting."""
+        return run_virtual(runner_for(dispatcher, **kwargs).run_test(a_test(step)))
+
+    def test_a_stream_still_open_after_its_last_event_passes(self):
+        dispatcher = FakeDispatcher(events=self.WAITING, stall=3600.0)
+        step = self.subscribe(expect_stream={
+            'stays_open_ms': 3000,
+            'final_event': {'status': {'state': 'TASK_STATE_INPUT_REQUIRED'}},
+        })
+        result = self.read(dispatcher, step)
+        assert result.result is Outcome.PASS
+        assert result.steps[0].checks == 2
+
+    def test_a_stream_the_sut_closes_fails(self):
+        """What a stream read to its end cannot show: that it did not end."""
+        dispatcher = FakeDispatcher(events=self.WAITING)
+        step = self.subscribe(expect_stream={
+            'stays_open_ms': 3000,
+            'final_event': {'status': {'state': 'TASK_STATE_INPUT_REQUIRED'}},
+        })
+        result = self.read(dispatcher, step)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'stream'
+        assert result.failure.message == (
+            'the SUT closed the stream after 2 event(s); it had to stay open '
+            'for 3000ms after its last event'
+        )
+
+    def test_a_stream_closed_before_any_event_fails(self):
+        dispatcher = FakeDispatcher(events=[])
+        step = self.subscribe(expect_stream={'stays_open_ms': 3000})
+        result = self.read(dispatcher, step)
+        assert result.result is Outcome.FAIL
+        assert 'closed the stream after 0 event(s)' in result.failure.message
+
+    def test_a_stream_that_closes_within_the_wait_fails(self):
+        """Open for two seconds is not open for three."""
+        dispatcher = FakeDispatcher(events=self.WAITING, stall=2.0)
+        step = self.subscribe(expect_stream={'stays_open_ms': 3000})
+        assert self.read(dispatcher, step).result is Outcome.FAIL
+
+    def test_the_other_assertions_still_apply_to_the_events_that_arrived(self):
+        dispatcher = FakeDispatcher(events=self.WAITING, stall=3600.0)
+        step = self.subscribe(expect_stream={
+            'stays_open_ms': 3000,
+            'final_event': {'status': {'state': 'TASK_STATE_COMPLETED'}},
+        })
+        result = self.read(dispatcher, step)
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'final_event.status.state'
+
+    def test_the_wait_starts_after_an_event_and_not_before_the_first(self):
+        """A stream that opens and sends nothing has no last event to be open
+        after. It is bounded by the step's deadline, like any other read."""
+        dispatcher = FakeDispatcher(events=[], stall=3600.0)
+        step = self.subscribe(expect_stream={'stays_open_ms': 3000, 'timeout_ms': 10_000})
+        result = self.read(dispatcher, step)
+        assert result.result is Outcome.FAIL
+        assert 'did not complete within 10000ms' in result.failure.message
+
+    def test_the_runner_stops_reading_once_the_stream_is_shown_open(self):
+        """It does not wait out the step's deadline as well."""
+        dispatcher = FakeDispatcher(events=self.WAITING, stall=3600.0)
+        step = self.subscribe(expect_stream={'stays_open_ms': 3000, 'timeout_ms': 60_000})
+        elapsed: list[float] = []
+
+        async def timed():
+            loop = asyncio.get_running_loop()
+            result = await runner_for(dispatcher).run_test(a_test(step))
+            elapsed.append(loop.time())
+            return result
+
+        assert run_virtual(timed()).result is Outcome.PASS
+        assert elapsed == [pytest.approx(3.0)]
+
+    def test_a_streams_own_wait_does_not_shorten_the_steps(self):
+        """The SUT closes the stream a second after its last event: long
+        enough for the stream's own bound, too soon for the step's."""
+        dispatcher = FakeDispatcher(events=self.WAITING, stall=1.0)
+        step = self.subscribe(expect_stream={
+            'stays_open_ms': 3000, 'streams': [{'stays_open_ms': 500}],
+        })
+        result = run_virtual(runner_for(dispatcher).run_test(a_test(step)))
+        assert result.result is Outcome.FAIL
+        assert 'the SUT closed the stream' in result.failure.message
+
+    def test_one_stream_of_a_set_may_have_to_stay_open(self):
+        dispatcher = FakeDispatcher(events=self.WAITING)
+        step = self.subscribe(expect_stream={
+            'streams': [{'description': 'closes'}, {'description': 'stays', 'stays_open_ms': 3000}],
+        })
+        test = a_test(step, runner_requirements=['concurrent_streams'])
+        runner = runner_for(dispatcher, capabilities=[RunnerRequirement.CONCURRENT_STREAMS])
+        result = run_virtual(runner.run_test(test))
+        assert result.result is Outcome.FAIL
+        assert result.failure.message.startswith('stays: the SUT closed the stream')
 
     def test_repeat_on_a_streaming_step_is_an_error(self):
         dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_COMPLETED')])

@@ -77,6 +77,7 @@ Checked in this order, before any step runs:
    - `capabilities: {streaming: true}` - the card must advertise it (a card that omits a capability has not advertised it). A capability name that A2A does not define at all is reported as `PRECONDITION CANNOT BE SATISFIED`, a distinct skip that `run_acts.py` lists separately, because no SUT could ever clear it and it would otherwise look like "not applicable here".
    - `authentication: true` - the card must declare both `securitySchemes` and a non-empty `securityRequirements`. Schemes alone are an offer, not a requirement.
    - `skills`, `transport`, `extensions` - presence checks.
+   - `protocol_versions: ["1.0"]` - the card must list, for the binding under test, an interface for each of these A2A versions. It gates a test that sends a step as a client of a version other than the one the run targets.
 
 ### Behaviors: a failure, not a skip
 
@@ -96,6 +97,12 @@ Each test gets a fresh variable `Scope` (section 3.2, isolation), seeded with th
 | `expect_webhook` | Poll the receiver for notifications delivered to `webhookUrl` for a task until `min_count` arrive or `timeout_ms` passes; evaluate `each_event`, `final_event`, `headers` and `token` |
 
 Every abstract operation carries `A2A-Version` set to the run version (section 12.4); on gRPC it is call metadata. A raw step is sent as written and reads the run version from `{{specVersion}}`.
+
+`a2a_version` on an operation step sends that one step as a client of another version: the header carries that version, and where the card lists an interface for it on the binding under test, the step goes to that interface. A version the agent does not list goes to the interface the run uses, which is expected to refuse it.
+
+`min_duration_ms` and `max_duration_ms` on an operation step bound the time from sending the request to the complete response. They are how a test observes that the SUT held a request open (the A2A 1.1 long poll) or answered at once; `delay_ms` before the step is not counted. A request that is still unanswered at `max_duration_ms` is abandoned and the step fails. They cannot be combined with `repeat` or `expect_stream`.
+
+`stays_open_ms` in `expect_stream` is for a stream the SUT must not close. After each event the runner waits that long for the next one; if none comes and the stream has not ended, the runner hangs up and evaluates the other assertions on the events it has. A stream the SUT closes fails the step. Where the step and one of its streams both set it, the longer wait applies. It cannot be combined with `disconnect_after`, and `timeout_ms` has to be longer than it.
 
 A streaming step with no `timeout_ms` of its own gets 30 seconds. Not one streaming step in the corpus declares a timeout, and without a backstop a SUT that never closes a stream would hang the run and produce no report at all.
 
