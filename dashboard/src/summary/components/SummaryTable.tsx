@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { TRANSPORT_LABELS } from "../../acts/lib.ts";
 import { sdkPath } from "../../routes.tsx";
-import { commitUrl } from "../../shared/sdks.ts";
+import { DEFAULT_ACTS_VERSION, commitUrl } from "../../shared/sdks.ts";
 import { ACTS_TRANSPORTS, ITK_PROTOCOLS, ITK_PROTOCOL_LABELS } from "../lib.ts";
 import type { SdkOverview } from "../types.ts";
 
@@ -49,7 +49,7 @@ export default function SummaryTable({ rows }: { rows: SdkOverview[] }) {
                 Interoperability (ITK)
               </th>
               <th scope="colgroup" colSpan={2 + ACTS_TRANSPORTS.length} className="group-col">
-                Conformance (ACTS)
+                Conformance (ACTS, A2A {DEFAULT_ACTS_VERSION})
               </th>
             </tr>
             <tr>

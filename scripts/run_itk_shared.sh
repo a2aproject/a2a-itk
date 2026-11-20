@@ -31,6 +31,9 @@ ITK_COPY_PROTO="${ITK_COPY_PROTO:-1}"
 # a PR, and a traversal nightly does not imply a conformance one.
 ITK_ACTS_RUN="${ITK_ACTS_RUN:-0}"
 ITK_ACTS_TRANSPORTS="${ITK_ACTS_TRANSPORTS:-jsonrpc}"
+# The A2A versions to run ACTS at, one run of every binding each, and one
+# history file each. An SDK lists 1.1 only once its agent serves it.
+ITK_ACTS_SPEC_VERSIONS="${ITK_ACTS_SPEC_VERSIONS:-1.0}"
 ITK_ACTS_LANGUAGE="${ITK_ACTS_LANGUAGE:-${ITK_SDK_NAME}}"
 ITK_MOUNT_ITK_DIR="${ITK_MOUNT_ITK_DIR:-1}"
 ITK_SELINUX_MOUNT_LABEL="${ITK_SELINUX_MOUNT_LABEL:-0}"
@@ -52,6 +55,35 @@ fi
 # Non-zero until the run proves otherwise, so an unexpected early exit is
 # reported as a failure rather than a pass.
 RESULT=1
+
+# What the files of one A2A version are called: nothing added for 1.0, so
+# they keep the names they had before ACTS ran at more than one version, and
+# `_v11` for 1.1, as in the agent ids of matrix.yaml (`python_v10`).
+acts_suffix() {
+  if [ "$1" != "1.0" ]; then
+    echo "_v${1//./}"
+  fi
+}
+
+# Checked before anything is built or started: a list that is mistyped would
+# otherwise surface at the end of a long run. The whole value is checked
+# before it is split, and a version is written the one way the runner accepts,
+# so `01.0` stops here too.
+if [ "${ITK_ACTS_RUN}" = "1" ] || [ "${ITK_ACTS_RUN^^}" = "TRUE" ]; then
+  ACTS_VERSION='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+  if ! [[ "$ITK_ACTS_SPEC_VERSIONS" =~ ^${ACTS_VERSION}(,${ACTS_VERSION})*$ ]]; then
+    echo "Error: ITK_ACTS_SPEC_VERSIONS is '${ITK_ACTS_SPEC_VERSIONS}', which is not a comma-separated list of Major.Minor versions such as 1.0,1.1" >&2
+    exit 1
+  fi
+  declare -A ACTS_SEEN=()
+  for ACTS_SPEC_VERSION in ${ITK_ACTS_SPEC_VERSIONS//,/ }; do
+    if [ -n "${ACTS_SEEN[$ACTS_SPEC_VERSION]:-}" ]; then
+      echo "Error: ITK_ACTS_SPEC_VERSIONS lists ${ACTS_SPEC_VERSION} twice" >&2
+      exit 1
+    fi
+    ACTS_SEEN[$ACTS_SPEC_VERSION]=1
+  done
+fi
 
 # Podman is a drop-in for the handful of commands used here; a2a-java's CI
 # runs on it.
@@ -218,27 +250,33 @@ if [ $BUILD_REQUEST_STATUS -ne 0 ] || [ ! -s run_request.json ]; then
   exit 1
 fi
 
-# 6b. ACTS conformance path. Runs instead of the traversal suite, one report
-# per transport. Each report is left on disk as
-# `acts-report-<sdk>-<transport>-<ts>.json` for the workflow to upload as a
-# build artifact; on the nightly path a lean entry is also appended to the
-# rolling `acts_<sdk>.json` release asset.
+# 6b. ACTS conformance path. Runs instead of the traversal suite: at each
+# A2A version in ITK_ACTS_SPEC_VERSIONS, one report per transport. Each report
+# is left on disk as `acts-report-<sdk>-<transport>-<ts>.json` for the
+# workflow to upload as a build artifact; on the nightly path a lean entry is
+# also appended to the version's rolling release asset, `acts_<sdk>.json` for
+# 1.0 and `acts_<sdk>_v11.json` for 1.1.
 if [ "${ITK_ACTS_RUN}" = "1" ] || [ "${ITK_ACTS_RUN^^}" = "TRUE" ]; then
   RESULT=0
-  # Collected across the loop: every binding this run exercised contributes to
-  # ONE history entry, because one commit tested over three transports is one
-  # run of the SDK, not three.
-  ACTS_REPORT_ARGS=()
-  for ACTS_TRANSPORT in ${ITK_ACTS_TRANSPORTS//,/ }; do
-    echo "Running ACTS conformance over ${ACTS_TRANSPORT}..."
-    python3 - "$ACTS_TRANSPORT" "$ITK_SDK_REPO" "$ITK_ACTS_LANGUAGE" > acts_request.json <<'PY'
+  for ACTS_SPEC_VERSION in ${ITK_ACTS_SPEC_VERSIONS//,/ }; do
+    ACTS_SUFFIX="$(acts_suffix "$ACTS_SPEC_VERSION")"
+    # Collected across the bindings: every binding this version exercised
+    # contributes to ONE history entry, because one commit tested over three
+    # transports is one run of the SDK, not three. A version is a run of its
+    # own, in a history of its own.
+    ACTS_REPORT_ARGS=()
+    for ACTS_TRANSPORT in ${ITK_ACTS_TRANSPORTS//,/ }; do
+      echo "Running ACTS conformance at A2A ${ACTS_SPEC_VERSION} over ${ACTS_TRANSPORT}..."
+      ACTS_RESULTS="acts_results${ACTS_SUFFIX}_${ACTS_TRANSPORT}.json"
+      python3 - "$ACTS_TRANSPORT" "$ITK_SDK_REPO" "$ITK_ACTS_LANGUAGE" "$ACTS_SPEC_VERSION" > acts_request.json <<'PY'
 import json, sys
-transport, repo, language = sys.argv[1], sys.argv[2], sys.argv[3]
+transport, repo, language, spec_version = sys.argv[1:5]
 json.dump({
     'transport': transport,
     'sdk': repo,
     'language': language,
     'repository': f'https://github.com/a2aproject/{repo}',
+    'spec_version': spec_version,
     # The corpus references these and no document defines them; §12.2 leaves
     # supplying them to the runner. Values the SUT should reject.
     'variables': {
@@ -247,41 +285,48 @@ json.dump({
     },
 }, sys.stdout)
 PY
-    curl -s -X POST http://127.0.0.1:8000/run-acts \
-      -H "Content-Type: application/json" \
-      -d @acts_request.json \
-      -o "acts_results_${ACTS_TRANSPORT}.json"
+      curl -s -X POST http://127.0.0.1:8000/run-acts \
+        -H "Content-Type: application/json" \
+        -d @acts_request.json \
+        -o "$ACTS_RESULTS"
 
-    # Validate before anything consumes it, so a FastAPI error envelope
-    # cannot reach the metrics processor and land an empty history entry.
-    ACTS_ARGS=(--response-file "acts_results_${ACTS_TRANSPORT}.json"
-               --title "ACTS CONFORMANCE (${ACTS_TRANSPORT})")
-    if [ "${ITK_NIGHTLY_RUN^^}" != "TRUE" ]; then
-      ACTS_ARGS+=(--require-conformant)
-    fi
-    python3 "$ITK_REPO_DIR/scripts/acts_report.py" "${ACTS_ARGS[@]}" || RESULT=$?
+      # Validate before anything consumes it, so a FastAPI error envelope
+      # cannot reach the metrics processor and land an empty history entry.
+      ACTS_ARGS=(--response-file "$ACTS_RESULTS"
+                 --title "ACTS CONFORMANCE (A2A ${ACTS_SPEC_VERSION}, ${ACTS_TRANSPORT})")
+      if [ "${ITK_NIGHTLY_RUN^^}" != "TRUE" ]; then
+        ACTS_ARGS+=(--require-conformant)
+      fi
+      python3 "$ITK_REPO_DIR/scripts/acts_report.py" "${ACTS_ARGS[@]}" || RESULT=$?
 
-    # Keep the full §13 report under its spec §13.5 name for the workflow to
-    # upload; the rolling asset only carries a tally.
-    python3 - "acts_results_${ACTS_TRANSPORT}.json" <<'PY'
+      # Keep the full §13 report under its spec §13.5 name for the workflow
+      # to upload; the rolling asset only carries a tally. The version is in
+      # the report, as `spec_version`. A response that is not a report is not
+      # kept: acts_report.py has said what it is.
+      python3 - "$ACTS_RESULTS" <<'PY'
 import json, pathlib, sys
-report = json.loads(pathlib.Path(sys.argv[1]).read_text())
-stamp = report['generated_at'].replace('-', '').replace(':', '').split('.')[0]
-name = f"acts-report-{report['sdk']['name']}-{report['transport']}-{stamp}Z.json"
+try:
+    report = json.loads(pathlib.Path(sys.argv[1]).read_text())
+    stamp = report['generated_at'].replace('-', '').replace(':', '').split('.')[0]
+    name = f"acts-report-{report['sdk']['name']}-{report['transport']}-{stamp}Z.json"
+except (OSError, ValueError, LookupError, TypeError):
+    sys.exit()
 pathlib.Path(name).write_text(json.dumps(report, indent=2))
 print(f'ACTS report: {name}')
 PY
 
-    ACTS_REPORT_ARGS+=(--report-file "acts_results_${ACTS_TRANSPORT}.json")
-  done
+      ACTS_REPORT_ARGS+=(--report-file "$ACTS_RESULTS")
+    done
 
-  if [ "${ITK_NIGHTLY_RUN^^}" = "TRUE" ]; then
-    python3 "$ITK_REPO_DIR/scripts/process_acts_results.py" \
-      "${ACTS_REPORT_ARGS[@]}" \
-      --history_output_file "acts_${ITK_METRICS_NAME}.json" \
-      --history_url "https://github.com/a2aproject/${ITK_SDK_REPO}/releases/download/nightly-metrics/acts_${ITK_METRICS_NAME}.json" \
-      || RESULT=$?
-  fi
+    if [ "${ITK_NIGHTLY_RUN^^}" = "TRUE" ]; then
+      ACTS_HISTORY="acts_${ITK_METRICS_NAME}${ACTS_SUFFIX}.json"
+      python3 "$ITK_REPO_DIR/scripts/process_acts_results.py" \
+        "${ACTS_REPORT_ARGS[@]}" \
+        --history_output_file "$ACTS_HISTORY" \
+        --history_url "https://github.com/a2aproject/${ITK_SDK_REPO}/releases/download/nightly-metrics/${ACTS_HISTORY}" \
+        || RESULT=$?
+    fi
+  done
   set -e
   if [ $RESULT -ne 0 ]; then
     echo "ACTS run failed. Container logs:"

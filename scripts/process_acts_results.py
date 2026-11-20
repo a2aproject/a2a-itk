@@ -15,6 +15,10 @@ keeps as a build artifact: the rolling asset is fetched by a browser on every
 dashboard load, and 111 tests × three bindings × a week of failure prose would
 make it unusable for the one thing it is for — showing a trend.
 
+**One history per A2A version.** A run at 1.0 and a run at 1.1 of the same
+commit are published to two files, `acts_<sdk>.json` and `acts_<sdk>_v11.json`:
+an entry carries one `spec_version`, and the processor refuses to mix them.
+
 **One entry per run, not per transport.** A nightly that exercises jsonrpc,
 grpc and rest is *one* run of the SDK at one commit, so it contributes one
 entry with the three bindings nested under `results`. Appending three would
@@ -224,7 +228,21 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(1)
 
     history = fetch_existing_history(args.history_url)
-    history.append(build_run(reports))
+    run = build_run(reports)
+    others = sorted(
+        {entry.get('spec_version') for entry in history}
+        - {run['spec_version'], None, ''}
+    )
+    if others:
+        # Each version has a history file of its own. A run that names the
+        # wrong one would push the other version's runs out of its window.
+        logger.error(
+            'The history at %s holds runs at A2A %s, and this run is at A2A '
+            '%s; publish it to the history of its own version.',
+            args.history_url, ', '.join(others), run['spec_version'],
+        )
+        raise SystemExit(1)
+    history.append(run)
 
     limit = int(os.environ.get('ACTS_HISTORY_LIMIT', str(DEFAULT_HISTORY_LIMIT)))
     if len(history) > limit:

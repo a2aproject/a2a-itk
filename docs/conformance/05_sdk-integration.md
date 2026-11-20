@@ -231,4 +231,4 @@ A rough order that keeps each step's failures readable:
 6. `tck-client-parse`.
 7. Push delivery.
 
-Then wire the two workflows as in [04_ci.md](04_ci.md). Leave `continue-on-error: true` on the PR job until the SDK is conformant on every binding it runs.
+Then wire the two workflows as in [04_ci.md](04_ci.md). Leave `continue-on-error: true` on the PR job until the SDK is conformant on every binding it runs. Once the agent serves A2A 1.1, add the run at 1.1 as in [Running at A2A 1.1](04_ci.md#running-at-a2a-11).
