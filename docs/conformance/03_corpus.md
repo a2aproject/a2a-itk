@@ -28,7 +28,7 @@ Nineteen files: a manifest and eighteen suite files, 173 tests in all. One corpu
 | `history.acts.yaml` | `CORE-HIST` | 6 | - | Task history length and ordering |
 | `multi-turn.acts.yaml` | `CORE-MULTI`, `CORE-CTX` | 5 | - | `INPUT_REQUIRED` round trips, context ids |
 | `streaming.acts.yaml` | `STREAM-SSE`, `STREAM-SUB`, `STREAM-RESUB`, `STREAM-MULTI`, `STREAM-MSG`, `STREAM-MSGUPD`, `STREAM-OPEN` | 11 | 8 | Event sequences, final events, subscription and resubscription, concurrent streams; from 1.1 resuming from a generation, the message update event, and streams that stay open while a task waits for input |
-| `live-message.acts.yaml` | `STREAM-LIVE` | - | 10 | `SendLiveMessage`, the two-way exchange. The runner skips these; see [06_status.md](06_status.md#open-items) |
+| `live-message.acts.yaml` | `STREAM-LIVE` | - | 10 | `SendLiveMessage`, the two-way exchange: opening it with a message or a subscription, later requests and their acknowledgment, rejected requests. Four of the ten are for gRPC only |
 | `polling.acts.yaml` | `CORE-EXEC` | 2 | - | Polling a long-running task to completion |
 | `generation.acts.yaml` | `CORE-GEN`, `STREAM-GEN`, `CORE-POLL`, `CORE-MATCH` | - | 14 | The task generation counter on tasks, artifacts and stream events; a `GetTask` held until the task changes; a send guarded by a generation |
 | `timeline.acts.yaml` | `CORE-TIME` | - | 5 | The task timeline |

@@ -36,6 +36,8 @@ from pyproto import a2a_pb2
 from test_suite.acts.dispatcher.base import (
     DispatchError,
     Dispatcher,
+    ExchangeEnded,
+    LiveExchange,
     MalformedResponse,
     StreamEvent,
     StreamNotOpened,
@@ -48,7 +50,7 @@ from test_suite.acts.dispatcher.http_base import (
     fetch_agent_card,
     http_status_error,
 )
-from test_suite.acts.dispatcher.params import adapt
+from test_suite.acts.dispatcher.params import UNRECOGNIZED_LIVE_REQUEST, adapt
 from test_suite.acts.schema import Operation, RawBlock, TransportBinding
 from test_suite.acts.wire_map import (
     GRPC_SERVICE,
@@ -147,6 +149,39 @@ def _to_dict(message: Any) -> Any:
         MessageToDict(message),
         MessageToDict(message, always_print_fields_with_no_presence=True),
     )
+
+
+def _varint(value: int) -> bytes:
+    """``value`` in the variable-length encoding of the protobuf wire format."""
+    out = bytearray()
+    while True:
+        low, value = value & 0x7F, value >> 7
+        out.append(low | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def _stream_request_message(request: Mapping[str, Any]) -> Any:
+    """A `StreamRequest` message from its JSON form.
+
+    A request of the kind no A2A version defines is built from bytes: one
+    field with a number the proto does not have, holding a small message. The
+    generated stub keeps a field it does not know and writes it out again, so
+    the SUT receives a `StreamRequest` whose payload it cannot name, which is
+    what a request from a later minor version looks like.
+    """
+    name, number = UNRECOGNIZED_LIVE_REQUEST
+    if name in request:
+        inner = b'\x0a\x04acts'  # field 1, a string
+        length_delimited = 2
+        unknown = _varint((number << 3) | length_delimited) + _varint(len(inner)) + inner
+        return a2a_pb2.StreamRequest.FromString(unknown)
+    try:
+        return ParseDict(dict(request), a2a_pb2.StreamRequest())
+    except ParseError as exc:
+        raise DispatchError(
+            f'send_live_message: the request does not fit StreamRequest: {exc}'
+        ) from exc
 
 
 class GrpcDispatcher(Dispatcher):
@@ -403,6 +438,13 @@ class GrpcDispatcher(Dispatcher):
             # collection got to the call. A no-op once the call has finished.
             call.cancel()
 
+    def live(
+        self,
+        request: Mapping[str, Any],
+        headers: Mapping[str, str] | None = None,
+    ) -> LiveExchange:
+        return _GrpcLiveExchange(self, request, headers)
+
     # -- the agent card, over HTTP -----------------------------------------
 
     async def _get_agent_card(
@@ -419,6 +461,91 @@ class GrpcDispatcher(Dispatcher):
             {**self._default_headers, **(headers or {})},
             error_from=http_status_error,
         )
+
+
+class _GrpcLiveExchange(LiveExchange):
+    """A live exchange over gRPC: one bidirectional stream.
+
+    Every request is a message on the stream, and none has a response of its
+    own. The sending side stays open until the exchange is closed from here:
+    A2A does not say what closing it alone means for the exchange.
+    """
+
+    def __init__(
+        self,
+        dispatcher: GrpcDispatcher,
+        request: Mapping[str, Any],
+        headers: Mapping[str, str] | None,
+    ) -> None:
+        self._dispatcher = dispatcher
+        self._opening = request
+        self._headers = headers
+        self._call: Any = None
+
+    async def events(self) -> AsyncIterator[StreamEvent]:
+        opening = _stream_request_message(self._opening)
+        # No deadline on the call. An exchange lasts as long as the two sides
+        # keep it, and the reader bounds how long it reads.
+        call = self._dispatcher._callable(
+            Operation.SEND_LIVE_MESSAGE, written_by_hand=True
+        )(metadata=self._dispatcher._metadata(self._headers))
+        self._call = call
+        index = 0
+        try:
+            try:
+                await call.write(opening)
+            except asyncio.InvalidStateError:
+                # The call was over before the request could be written.
+                # Reading it says why.
+                pass
+            async for message in call:
+                yield StreamEvent(index=index, data=_to_dict(message))
+                index += 1
+        except AioRpcError as exc:
+            if index == 0:
+                # Nothing was streamed, so the SUT refused to open the
+                # exchange. The status and its `ErrorInfo` say with which
+                # error, as for any stream that does not open.
+                raise StreamNotOpened(
+                    f'the SUT refused the live exchange: '
+                    f'{exc.code().name}: {exc.details()}',
+                    _response_from_rpc_error(exc),
+                ) from exc
+            if exc.code() is grpc.StatusCode.UNAVAILABLE:
+                # The connection was lost. The agent said nothing, so there
+                # is nothing to hold it to.
+                raise DispatchError(
+                    f'the live exchange was lost after {index} event(s): '
+                    f'{exc.details()}'
+                ) from exc
+            # The exchange had opened, and the SUT ended it with an error
+            # status. Where it rejects a request it reports that on the
+            # stream and keeps the exchange, so this fails the step.
+            raise MalformedResponse(
+                f'the SUT ended the live exchange after {index} event(s) with '
+                f'{exc.code().name}: {exc.details()}'
+            ) from exc
+        finally:
+            call.cancel()
+
+    async def send(self, request: Mapping[str, Any]) -> WireResponse | None:
+        if self._call is None:
+            raise DispatchError('the live exchange is not open yet')
+        message = _stream_request_message(request)
+        try:
+            await self._call.write(message)
+        except asyncio.InvalidStateError as exc:
+            raise ExchangeEnded('the SUT had ended the exchange') from exc
+        except AioRpcError as exc:
+            raise ExchangeEnded(
+                f'the SUT had ended the exchange: {exc.code().name}: {exc.details()}'
+            ) from exc
+        return None
+
+    async def aclose(self) -> None:
+        if self._call is not None:
+            # A no-op once the call has finished.
+            self._call.cancel()
 
 
 def _response_from_rpc_error(exc: AioRpcError) -> WireResponse:

@@ -103,6 +103,23 @@ class JsonRpcDispatcher(HttpDispatcher):
             raw_body=text,
         )
 
+    async def _live_uplink(
+        self, request: Mapping[str, Any], headers: Mapping[str, str] | None
+    ) -> WireResponse:
+        response, parsed, text = await self._one_document(
+            'POST',
+            self.rpc_path,
+            payload=self._envelope(Operation.SEND_LIVE_MESSAGE, request),
+            headers=headers,
+        )
+        return WireResponse(
+            status=response.status_code,
+            payload=parsed.get('result') if isinstance(parsed, dict) else None,
+            error=self._error_from(response, parsed),
+            headers=dict(response.headers),
+            raw_body=text,
+        )
+
     def _error_from(self, response: httpx.Response, parsed: Any) -> WireError | None:
         """Read the envelope's ``error`` member.
 
