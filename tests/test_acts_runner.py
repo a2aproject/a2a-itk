@@ -309,6 +309,87 @@ class TestErrorsVersusFailures:
         assert result.result is Outcome.FAIL
         assert 'cannot capture' in result.failure.message
 
+    def test_a_failed_assertion_is_reported_before_a_missed_capture(self):
+        """A value is usually captured on the step that also asserts it, and
+        the assertion is the one that says what the SUT got wrong."""
+        dispatcher = FakeDispatcher(ok({'task': {'id': 'T1'}}))
+        step = Step(
+            id='send',
+            operation=Operation.SEND_MESSAGE,
+            params={'message': {'role': 'ROLE_USER'}},
+            expect={'body': {'task': {'generation': {'gte': 1}}}},
+            capture={'generation': 'task.generation'},
+        )
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'body.task.generation'
+        assert 'cannot capture' not in result.failure.message
+
+    def test_a_missed_capture_still_fails_a_step_whose_assertions_pass(self):
+        """A later step needs the value."""
+        dispatcher = FakeDispatcher(ok({'task': {'id': 'T1'}}))
+        step = Step(
+            id='send',
+            operation=Operation.SEND_MESSAGE,
+            params={'message': {'role': 'ROLE_USER'}},
+            expect={'status': 200, 'body': {'task': {'id': 'T1'}}},
+            capture={'generation': 'task.generation'},
+        )
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.FAIL
+        assert "cannot capture 'generation'" in result.failure.message
+
+    def test_an_error_response_is_reported_as_the_error_not_as_a_missed_capture(self):
+        dispatcher = FakeDispatcher(failed())
+        step = get_task(
+            expect={'status': 200, 'body': {'id': 'T1'}}, capture={'taskId': 'id'}
+        )
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.FAIL
+        assert 'cannot capture' not in result.failure.message
+        assert 'TaskNotFoundError' in str(result.failure.actual)
+
+    def test_a_missed_capture_names_the_error_the_sut_returned(self):
+        """With nothing asserted on the step, the capture is all there is to
+        report, and it missed because the call failed."""
+        dispatcher = FakeDispatcher(failed())
+        result = run(runner_for(dispatcher), a_test(get_task(capture={'taskId': 'id'})))
+        assert result.result is Outcome.FAIL
+        assert "cannot capture 'taskId'" in result.failure.message
+        assert 'TaskNotFoundError: no such task' in result.failure.message
+
+    def test_a_step_that_asserts_with_its_own_missed_capture_fails_on_the_capture(self):
+        dispatcher = FakeDispatcher(ok({'task': {'id': 'T1'}}))
+        step = Step(
+            id='send',
+            operation=Operation.SEND_MESSAGE,
+            params={'message': {'role': 'ROLE_USER'}},
+            expect={'body': {'task': {'endGeneration': {'gte': '{{send.generation}}'}}}},
+            capture={'generation': 'task.generation'},
+        )
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.FAIL
+        assert "cannot capture 'generation'" in result.failure.message
+
+    def test_an_undefined_variable_in_an_assertion_is_an_error_on_that_test(self):
+        """The test is wrong, not the SUT, and it costs one result. Left to
+        escape, it would lose all of them."""
+        dispatcher = FakeDispatcher(ok({'id': 'T1'}))
+        suite = _suite_of(
+            a_test(get_task(expect={'body': {'id': '{{nope}}'}}), id='T-STEP'),
+            a_test(
+                get_task(),
+                id='T-TEST',
+                assertions=[{'source': '{{get.response}}', 'match': {'id': '{{nope}}'}}],
+            ),
+            a_test(get_task(), id='T-FINE'),
+        )
+        results = asyncio.run(runner_for(dispatcher).run_suite(suite))
+        assert [(r.id, r.result) for r in results] == [
+            ('T-STEP', Outcome.ERROR), ('T-TEST', Outcome.ERROR), ('T-FINE', Outcome.PASS),
+        ]
+        assert "undefined variable 'nope'" in results[0].failure.message
+
     def test_an_unparseable_until_is_an_error(self):
         dispatcher = FakeDispatcher(ok({}))
         step = get_task(repeat={'until': 'not an expression at all'})
@@ -496,6 +577,27 @@ class TestPolling:
         step = get_task(repeat={'until': 'status.state == TASK_STATE_COMPLETED'})
         asyncio.run(runner.run_test(a_test(step)))
         assert slept == []
+
+
+class TestCaptureOnARepeatedStep:
+    def test_capture_reads_the_attempt_that_satisfied_until(self):
+        """Not the first reply: the value has usually changed by the last."""
+        dispatcher = FakeDispatcher([
+            ok({'status': {'state': 'TASK_STATE_WORKING'}, 'generation': '2'}),
+            ok({'status': {'state': 'TASK_STATE_COMPLETED'}, 'generation': '3'}),
+            ok({}),
+        ])
+        poll = get_task(
+            'poll',
+            repeat={'until': 'status.state == TASK_STATE_COMPLETED'},
+            capture={'generation': 'generation'},
+        )
+        after = Step(
+            id='after', operation=Operation.GET_TASK,
+            params={'id': 'T1', 'currentGeneration': '{{poll.generation}}'},
+        )
+        assert run(runner_for(dispatcher), a_test(poll, after)).result is Outcome.PASS
+        assert dispatcher.calls[-1][1]['currentGeneration'] == '3'
 
 
 class TestProtocolObligations:
@@ -942,6 +1044,16 @@ class TestRawSteps:
         )
         return Step(id=step_id, raw=block, **kwargs)
 
+    def test_a_missed_capture_does_not_blame_the_error_in_the_body(self):
+        """A raw response is read whole, error or not, so the path missed for
+        a reason of its own."""
+        dispatcher = FakeDispatcher(failed())
+        step = self.raw_step(capture={'code': 'error.code'})
+        result = run(runner_for(dispatcher), self.a_raw_test(step))
+        assert result.result is Outcome.FAIL
+        assert "cannot capture 'code'" in result.failure.message
+        assert 'TaskNotFoundError' not in result.failure.message
+
     def test_it_goes_to_dispatch_raw_not_dispatch(self):
         dispatcher = FakeDispatcher(ok({'jsonrpc': '2.0', 'result': {}}))
         run(runner_for(dispatcher), self.a_raw_test(self.raw_step()))
@@ -1165,6 +1277,146 @@ class TestStreamingSteps:
             }],
         )
         assert run(runner_for(dispatcher), a_test(step)).result is Outcome.PASS
+
+    # -- capture, and assertions that use captured values ---------------------
+
+    SNAPSHOT = {'task': {'id': 'T1', 'status': {'state': 'TASK_STATE_WORKING'}, 'generation': '2'}}
+
+    def subscribe(self, step_id='s', **kwargs):
+        return Step(
+            id=step_id, operation=Operation.SUBSCRIBE_TO_TASK, params={'id': 'T1'}, **kwargs
+        )
+
+    def test_capture_reads_the_first_event_with_its_kind_named_first(self):
+        dispatcher = FakeDispatcher(
+            events=[self.SNAPSHOT, status_update('TASK_STATE_COMPLETED', generation='3')]
+        )
+        watch = self.subscribe(
+            capture={'taskId': 'task.id', 'generation': 'task.generation'}
+        )
+        after = Step(
+            id='after', operation=Operation.GET_TASK,
+            params={'id': '{{s.taskId}}', 'currentGeneration': '{{s.generation}}'},
+        )
+        assert run(runner_for(dispatcher), a_test(watch, after)).result is Outcome.PASS
+        assert dispatcher.calls[-1][1] == {'id': 'T1', 'currentGeneration': '2'}
+
+    @pytest.mark.parametrize('path', ['status_update.taskId', 'statusUpdate.taskId'])
+    def test_capture_accepts_either_spelling_of_the_kind(self, path):
+        """The wire writes `statusUpdate`; a test writes `status_update`."""
+        dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_COMPLETED')])
+        watch = self.subscribe(capture={'taskId': path})
+        after = Step(id='after', operation=Operation.GET_TASK, params={'id': '{{s.taskId}}'})
+        assert run(runner_for(dispatcher), a_test(watch, after)).result is Outcome.PASS
+        assert dispatcher.calls[-1][1] == {'id': 'T1'}
+
+    def test_capture_does_not_read_past_the_first_event(self):
+        """The first event is the one a later step can rely on."""
+        dispatcher = FakeDispatcher(
+            events=[status_update('TASK_STATE_WORKING'), self.SNAPSHOT]
+        )
+        result = run(
+            runner_for(dispatcher), a_test(self.subscribe(capture={'taskId': 'task.id'}))
+        )
+        assert result.result is Outcome.FAIL
+        assert "cannot capture 'taskId'" in result.failure.message
+        assert 'it is a status_update event' in result.failure.message
+
+    def test_capture_on_a_stream_without_events_fails(self):
+        dispatcher = FakeDispatcher(events=[])
+        result = run(
+            runner_for(dispatcher), a_test(self.subscribe(capture={'taskId': 'task.id'}))
+        )
+        assert result.result is Outcome.FAIL
+        assert 'the stream produced no event' in result.failure.message
+
+    def test_capture_on_a_raw_stream_reads_the_event_as_it_arrived(self):
+        """A raw step asserts on the envelope, and captures from it too."""
+        dispatcher = FakeDispatcher(
+            events=[{'jsonrpc': '2.0', 'id': 1, 'result': {'task': {'id': 'T7'}}}]
+        )
+        watch = Step(
+            id='s',
+            raw=RawBlock(method='POST', path='/', body={'jsonrpc': '2.0'}),
+            expect_stream={'min_count': 1},
+            capture={'taskId': 'result.task.id'},
+        )
+        after = Step(id='after', operation=Operation.GET_TASK, params={'id': '{{s.taskId}}'})
+        test = a_test(watch, after, transport=[TransportBinding.JSONRPC])
+        assert run(runner_for(dispatcher), test).result is Outcome.PASS
+        assert dispatcher.calls[-1][1] == {'id': 'T7'}
+
+    def test_a_failed_stream_assertion_is_reported_before_a_missed_capture(self):
+        dispatcher = FakeDispatcher(
+            events=[{'task': {'id': 'T1', 'status': {'state': 'TASK_STATE_WORKING'}}}]
+        )
+        step = self.subscribe(
+            expect_stream={'events': [{'index': 0, 'task': {'generation': {'gte': 1}}}]},
+            capture={'generation': 'task.generation'},
+        )
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'events[0].task.generation'
+
+    def test_variables_reach_every_part_of_expect_stream(self):
+        """An event is compared with the value a variable stands for, not
+        with the text `{{id}}`, which no event could ever equal."""
+        dispatcher = FakeDispatcher(
+            events=[self.SNAPSHOT, status_update('TASK_STATE_COMPLETED')]
+        )
+        step = self.subscribe(expect_stream={
+            'events': [{'index': 0, 'task': {'id': '{{id}}'}}],
+            'each_event': {'any_of': [{'task': {'id': '{{id}}'}}, {'taskId': '{{id}}'}]},
+            'final_event': {'status': {'state': '{{final}}'}},
+            'streams': [{'final_event': {'taskId': '{{id}}'}}],
+        })
+        variables = {'id': 'T1', 'final': 'TASK_STATE_COMPLETED'}
+        assert run(runner_for(dispatcher, variables=variables), a_test(step)).result is Outcome.PASS
+        for wrong in ({'id': 'OTHER'}, {'final': 'TASK_STATE_FAILED'}):
+            runner = runner_for(dispatcher, variables={**variables, **wrong})
+            assert run(runner, a_test(step)).result is Outcome.FAIL
+
+    @pytest.mark.parametrize(
+        ('second', 'outcome'), [('3', Outcome.PASS), ('2', Outcome.FAIL)]
+    )
+    def test_a_stream_is_asserted_with_what_it_captured_from_its_first_event(
+        self, second, outcome
+    ):
+        """How a test says "everything after the snapshot is newer than it"."""
+        dispatcher = FakeDispatcher(
+            events=[self.SNAPSHOT, status_update('TASK_STATE_COMPLETED', generation=second)]
+        )
+        step = self.subscribe(
+            capture={'generation': 'task.generation'},
+            expect_stream={'each_event': {'any_of': [
+                {'task': {'generation': {'gte': '{{s.generation}}'}}},
+                {'status_update': {'generation': {'gt': '{{s.generation}}'}}},
+            ]}},
+        )
+        assert run(runner_for(dispatcher), a_test(step)).result is outcome
+
+    def test_a_stream_asserted_with_a_capture_it_could_not_read_fails_on_the_capture(self):
+        """The SUT sent a first event without the value. That is a failure of
+        the SUT, and must not read as a test naming an undefined variable."""
+        dispatcher = FakeDispatcher(
+            events=[{'task': {'id': 'T1', 'status': {'state': 'TASK_STATE_WORKING'}}}]
+        )
+        step = self.subscribe(
+            capture={'generation': 'task.generation'},
+            expect_stream={'each_event': {'generation': {'gte': '{{s.generation}}'}}},
+        )
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.FAIL
+        assert "cannot capture 'generation'" in result.failure.message
+
+    def test_an_undefined_variable_in_expect_stream_is_an_error(self):
+        dispatcher = FakeDispatcher(events=[self.SNAPSHOT])
+        step = self.subscribe(
+            expect_stream={'events': [{'index': 0, 'task': {'id': '{{nope}}'}}]}
+        )
+        result = run(runner_for(dispatcher), a_test(step))
+        assert result.result is Outcome.ERROR
+        assert "undefined variable 'nope'" in result.failure.message
 
     def test_repeat_on_a_streaming_step_is_an_error(self):
         dispatcher = FakeDispatcher(events=[status_update('TASK_STATE_COMPLETED')])

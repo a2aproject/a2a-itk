@@ -88,9 +88,9 @@ Each test gets a fresh variable `Scope` (section 3.2, isolation), seeded with th
 
 | Step kind | What the runner does |
 | --- | --- |
-| operation, unary | Substitute `{{...}}` in `params`, dispatch, evaluate `expect` (status, headers, body) or `expect_error`, record the response and run `capture` |
+| operation, unary | Substitute `{{...}}` in `params`, dispatch, record the response, run `capture` and evaluate `expect` (status, headers, body) or `expect_error`. A failed assertion is reported in preference to a `capture` that found no value, because a value is usually captured on the step that also asserts it. When the step's own assertions use the value the capture missed, the miss is what is reported |
 | operation, with `repeat` | Re-dispatch until the `until` expression holds or attempts run out (defaults: 10 attempts, 1000 ms, no backoff). Running out is a fail |
-| operation, streaming | Read events until the stream closes, `max_count` is reached, or the timeout. Evaluate `expect_stream`: event count, matchers on specific events, the final event, and whether the task states form a legal progression. `streams: N` opens N concurrent streams; `disconnect_after` hangs up mid-stream |
+| operation, streaming | Read events until the stream closes, `max_count` is reached, or the timeout. Evaluate `expect_stream`: event count, matchers on specific events, the final event, and whether the task states form a legal progression. `streams: N` opens N concurrent streams; `disconnect_after` hangs up mid-stream. `capture` reads the first event, with the kind of event as the first path segment (`task.id`), and `expect_stream` may compare events with captured values, this step's included |
 | raw | Send the HTTP request as written, no default headers; evaluate as above |
 | `client_response` | section 10: ask the SUT's *own client* to parse a canned payload. No A2A operation does this, so it rides a `send_message` whose text is `tck-client-parse` and whose data part carries `{operation, wire_payload}`; the agent answers with what its client parsed and `expect_parsed` is evaluated like a body |
 | `expect_webhook` | Poll the receiver for notifications delivered to `webhookUrl` for a task until `min_count` arrive or `timeout_ms` passes; evaluate `each_event`, `final_event`, `headers` and `token` |
@@ -104,6 +104,8 @@ A streaming step with no `timeout_ms` of its own gets 30 seconds. Not one stream
 [`assertions.py`](../../test_suite/acts/assertions.py) implements section 5. An `expect.body` is a tree that mirrors the response: a scalar leaf is an exact match, a map is either a descent into a field or a set of operators on the value - and the syntax does not say which. `{status: {state: X}}` is two field descents; `{type: array, count_gte: 1}` is two operators. The rule the evaluator applies: **a key is an operator when it is a known operator name and its argument is well-formed for that operator; otherwise it is a field name.** Both halves are needed - the corpus asserts on RFC 9457 bodies whose members really are called `type` and `title`.
 
 Operators: `type`, `exists`, `absent`, `contains`, `matches`, `starts_with`, `ends_with`, `gt`/`gte`/`lt`/`lte`, `count`/`count_gte`/`count_lte`, `one_of`, and `items` for per-element assertions on an array. Named assertions on a collection use `any`/`all`/`none` with a path and a matcher.
+
+A 64-bit integer such as `generation` reaches an assertion as a string of digits (`"5"`) on every binding, because that is how ProtoJSON writes it, while a test writes the number `5`. `gt`/`gte`/`lt`/`lte` read a string of digits as the integer it spells, for the value and for the operand, so a value captured from one response can be compared with another. An exact match does not convert: `generation: 5` does not match `"5"`; write `{gte: 5, lte: 5}`.
 
 Failures record the assertion path (`task.status.state`), the expected and actual values, and the step, so a report entry can be acted on without re-running.
 

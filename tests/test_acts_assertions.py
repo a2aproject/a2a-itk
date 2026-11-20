@@ -189,8 +189,73 @@ class TestNumericOperators:
     def test_a_bool_is_not_comparable(self):
         assert not evaluate({'gte': 0}, True).ok
 
-    def test_a_string_is_not_comparable(self):
-        assert not evaluate({'gte': 0}, '5').ok
+    @pytest.mark.parametrize(
+        ('assertion', 'value', 'expected'),
+        [
+            # The value is a string, as a JSON binding sends a 64-bit integer.
+            ({'gte': 1}, '5', True),
+            ({'gt': 5}, '5', False),
+            ({'lt': 1000000}, '9000000000000000000', False),
+            # The operand is one too, when it was captured from a response.
+            ({'gt': '4'}, 5, True),
+            ({'gt': '4'}, '5', True),
+            ({'gte': '5', 'lte': '5'}, '5', True),
+            ({'gte': '5', 'lte': '5'}, '6', False),
+            # Compared as numbers: as text, "10" sorts before "9".
+            ({'gt': '9'}, '10', True),
+            ({'lt': '9'}, '10', False),
+            ({'gte': '-3'}, '-2', True),
+        ],
+    )
+    def test_a_string_of_digits_is_compared_as_the_integer_it_spells(
+        self, assertion, value, expected
+    ):
+        assert evaluate(assertion, value).ok is expected
+
+    def test_a_64_bit_value_keeps_every_digit(self):
+        """Two generations one apart are different numbers. Read as floats
+        they would be the same one."""
+        below, above = '9007199254740992', '9007199254740993'
+        assert float(below) == float(above)
+        assert evaluate({'gt': below}, above).ok
+        assert not evaluate({'gte': above}, below).ok
+
+    @pytest.mark.parametrize('text', ['abc', '', '1.5', '1e3', ' 5', '5 ', '+5', '0x10'])
+    def test_any_other_string_is_not_comparable(self, text):
+        assert not evaluate({'gte': 0}, text).ok
+        assert not evaluate({'lte': 10**30}, text).ok
+
+    def test_digits_past_what_python_parses_are_not_a_number(self):
+        """`int()` refuses a string of several thousand digits. An agent that
+        sends one fails the assertion; it must not end the run."""
+        endless = '9' * 5000
+        assert not evaluate({'gte': 0}, endless).ok
+        assert not evaluate({'gte': endless}, '5').ok
+
+    def test_an_operand_that_is_not_a_number_is_not_this_operator(self):
+        """`gte: abc` cannot be a comparison, so by the rule that tells an
+        operator from a field it is a field named `gte`."""
+        assert evaluate({'gte': 'abc'}, {'gte': 'abc'}).ok
+        assert not evaluate({'gte': 'abc'}, '5').ok
+
+    def test_a_string_of_digits_is_still_a_string(self):
+        assert evaluate({'type': 'string'}, '5').ok
+        assert not evaluate({'type': 'number'}, '5').ok
+
+    def test_an_exact_match_does_not_convert(self):
+        """Only the ordering operators read a string as a number."""
+        result = evaluate(5, '5')
+        assert not result.ok
+        # Printed plainly both sides read "5", which explains nothing.
+        message = result.first.message
+        assert 'should equal 5, got "5"' in message
+        assert '{gte: N, lte: N}' in message
+        assert not evaluate('5', 5).ok
+
+    def test_a_type_mismatch_that_is_not_about_numbers_gets_no_number_hint(self):
+        message = evaluate(True, 'True').first.message
+        assert 'should equal true, got "True"' in message
+        assert 'gte' not in message
 
 
 class TestCountOperators:
