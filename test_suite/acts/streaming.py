@@ -8,8 +8,9 @@ states they carry form a legal progression.
 ## Two event shapes, and why both are supported
 
 An event on the wire is a `StreamResponse`, a oneof over `task`, `message`,
-`status_update` and `artifact_update`. Assertions in the corpus address it two
-different ways, and both have to work:
+`status_update` and `artifact_update`, and from A2A 1.1 also `message_update`
+and `error`. Assertions in the corpus address it two different ways, and both
+have to work:
 
     final_event: {status: {state: TASK_STATE_COMPLETED}}   # the inner event
     events: [{one_of: [{task: ...}, {status_update: ...}]}]  # the oneof arm
@@ -20,14 +21,30 @@ one discriminator naming its kind. An assertion mentioning `message` therefore
 fails on a status update — which is the point of `STREAM-MSG-001` — while one
 mentioning `status` reads straight through to the inner event.
 
+**The name of a kind always means the kind.** Two of the 1.1 payloads have a
+field called `message`: a message update carries the message that was added,
+and a stream error carries its text. Read straight through, `{message: ...}`
+would match both, and could no longer say "this event is a `Message`". So at
+the top of an event a kind's name is reserved for the kind, and such a field
+is reached through its own kind: `message_update: {message: ...}`.
+
 The wire spells the discriminator in camelCase (ProtoJSON), the spec and the
-corpus in snake_case. Normalization accepts either; the view offers only the
-snake_case name, because that is what an assertion is ever written in.
+corpus in snake_case. Normalization accepts either, and the view offers the
+kind under both, so the two spellings name one kind in every assertion:
+`{message_update: {absent: true}}` fails on an event that arrived as
+`messageUpdate`.
 
 An event with no recognizable discriminator is passed through whole. That is
 not a fallback for malformed input — it is how a **raw** streaming step works,
 where the assertion is about the transport envelope (`each_event:
 {jsonrpc: "2.0"}`) and unwrapping it would remove the thing under test.
+
+## Generation
+
+A2A 1.1 numbers the changes to a task. `Task.generation` starts at 1, every
+change raises it by one, and each change is reported by one event carrying the
+new value. `monotonic_generation` and `contiguous_generation` check that
+sequence; see :func:`check_generation`.
 """
 
 from __future__ import annotations
@@ -40,6 +57,7 @@ from test_suite.acts.assertions import (
     AssertionResult,
     Failure,
     evaluate,
+    integer_value,
 )
 from test_suite.acts.schema import (
     EventAssertion,
@@ -47,6 +65,7 @@ from test_suite.acts.schema import (
     Ordering,
     StreamAssertions,
 )
+from test_suite.acts.variables import MISSING
 
 
 #: Wire spelling -> canonical `StreamResponse` oneof arm.
@@ -57,10 +76,27 @@ DISCRIMINATORS: Final[Mapping[str, str]] = {
     'statusUpdate': 'status_update',
     'artifact_update': 'artifact_update',
     'artifactUpdate': 'artifact_update',
+    # A2A 1.1.
+    'message_update': 'message_update',
+    'messageUpdate': 'message_update',
+    'error': 'error',
 }
 
 #: The kinds an assertion may name. Values of `DISCRIMINATORS`, deduplicated.
 EVENT_KINDS: Final[frozenset[str]] = frozenset(DISCRIMINATORS.values())
+
+#: Every spelling of each kind, for offering an event under all of them.
+_SPELLINGS: Final[Mapping[str, tuple[str, ...]]] = {
+    kind: tuple(name for name, named in DISCRIMINATORS.items() if named == kind)
+    for kind in EVENT_KINDS
+}
+
+#: The kinds that report one change to a task, and so carry the generation
+#: that change produced. A `task` is a snapshot and is treated separately; a
+#: `message` and an `error` carry no generation.
+UPDATE_KINDS: Final[frozenset[str]] = frozenset({
+    'status_update', 'artifact_update', 'message_update',
+})
 
 SUBMITTED: Final = 'TASK_STATE_SUBMITTED'
 
@@ -88,14 +124,24 @@ class StreamedEvent:
     def view(self) -> Any:
         """What assertions are evaluated against.
 
-        The payload's own fields, plus the single discriminator naming this
-        event's kind — so `{status: ...}` and `{status_update: {status: ...}}`
-        both address the same event, and `{message: ...}` addresses only a
-        message.
+        The payload's own fields, plus the discriminator naming this event's
+        kind, in both spellings — so `{status: ...}` and
+        `{status_update: {status: ...}}` both address the same event.
+
+        A payload field that has the name of a kind is left out: `message` on
+        a message update, for one. `{message: ...}` therefore addresses only
+        an event that *is* a message, whatever the other kinds contain.
         """
         if self.kind is None or not isinstance(self.payload, Mapping):
             return self.payload
-        return {**self.payload, self.kind: self.payload}
+        view = {
+            name: value
+            for name, value in self.payload.items()
+            if name not in DISCRIMINATORS
+        }
+        for spelling in _SPELLINGS[self.kind]:
+            view[spelling] = self.payload
+        return view
 
     def state(self) -> str | None:
         """The task state this event carries, if it carries one.
@@ -166,6 +212,103 @@ def check_ordering(events: Sequence[StreamedEvent]) -> AssertionResult:
         if state != previous:
             result += AssertionResult(checks=1)
         previous, previous_index = state, event.index
+
+    return result
+
+
+def check_generation(
+    events: Sequence[StreamedEvent], *, contiguous: bool = False
+) -> AssertionResult:
+    """Verify `ordering: monotonic_generation`, or `contiguous_generation`.
+
+    The stream fails when:
+
+    - a status, artifact or message update carries no generation, or one
+      lower than 1;
+    - the generation of such an update is not greater than every generation
+      seen earlier on the stream;
+    - a task snapshot carries a generation lower than 1, or lower than one
+      seen earlier. A snapshot may repeat the latest value: it reports the
+      state of the task and is not a change to it.
+
+    With ``contiguous`` each update must also be exactly one above the
+    latest generation before it. That holds only on a stream that is
+    sent every event: a subscriber that asked for A2A 1.0 is not sent message
+    updates, and sees a gap wherever a client message was added.
+
+    A `message` and an `error` carry no generation and are skipped, as is an
+    event of a kind this runner does not know.
+    """
+    result = AssertionResult()
+    #: The greatest generation seen so far, and where.
+    highest: int | None = None
+    highest_index = -1
+    #: The event before this one had a generation that could not be read. The
+    #: update after it is not checked for a gap, so that one missing value is
+    #: reported once.
+    after_unreadable = False
+
+    for event in events:
+        if event.kind != 'task' and event.kind not in UPDATE_KINDS:
+            continue
+        snapshot = event.kind == 'task'
+        label = f'event {event.index} ({event.kind})'
+        path = f'events[{event.index}].generation'
+        written = (
+            event.payload.get('generation', MISSING)
+            if isinstance(event.payload, Mapping)
+            else MISSING
+        )
+        generation = integer_value(written)
+
+        if generation is None or generation < 1:
+            if written is MISSING:
+                said = 'carries no generation'
+            elif generation is None:
+                said = f'has generation {written!r}, which is not an integer'
+            else:
+                said = f'has generation {generation}'
+            result += _fail(
+                path, 'ordering', 'a generation of at least 1', written,
+                f'{label} {said}; a task and every update to it carry a '
+                f'generation of at least 1',
+            )
+            after_unreadable = True
+            continue
+
+        if highest is None:
+            # The first generation on the stream has nothing to compare with.
+            result += AssertionResult(checks=1)
+        elif snapshot and generation < highest:
+            result += _fail(
+                path, 'ordering', f'at least {highest}', generation,
+                f'{label} is at generation {generation}, lower than the '
+                f'{highest} already seen at event {highest_index}',
+            )
+        elif not snapshot and generation <= highest:
+            result += _fail(
+                path, 'ordering', f'greater than {highest}', generation,
+                f'{label} has generation {generation}, which is not greater '
+                f'than the {highest} already seen at event {highest_index}',
+            )
+        elif (
+            contiguous
+            and not snapshot
+            and not after_unreadable
+            and generation != highest + 1
+        ):
+            result += _fail(
+                path, 'ordering', highest + 1, generation,
+                f'{label} has generation {generation}, but the latest before '
+                f'it was {highest}, at event {highest_index}; a stream that '
+                f'misses no change reads {highest + 1} here',
+            )
+        else:
+            result += AssertionResult(checks=1)
+
+        if highest is None or generation > highest:
+            highest, highest_index = generation, event.index
+        after_unreadable = False
 
     return result
 
@@ -274,8 +417,14 @@ def evaluate_stream(
         else:
             result += AssertionResult(checks=1)
 
-    if expect.ordering is Ordering.MONOTONIC_STATE:
+    rules = expect.orderings()
+    if Ordering.MONOTONIC_STATE in rules:
         result += check_ordering(events)
+    if Ordering.CONTIGUOUS_GENERATION in rules:
+        # The stricter rule makes every check of the other one.
+        result += check_generation(events, contiguous=True)
+    elif Ordering.MONOTONIC_GENERATION in rules:
+        result += check_generation(events)
 
     for position, assertion in enumerate(expect.events or ()):
         result += _evaluate_event_assertion(assertion, position, events)
@@ -313,6 +462,8 @@ __all__ = [
     'SUBMITTED',
     'TERMINAL_STATES',
     'StreamedEvent',
+    'UPDATE_KINDS',
+    'check_generation',
     'check_ordering',
     'evaluate_stream',
     'normalize',

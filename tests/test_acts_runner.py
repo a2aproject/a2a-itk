@@ -1409,6 +1409,29 @@ class TestStreamingSteps:
         assert result.result is Outcome.FAIL
         assert "cannot capture 'generation'" in result.failure.message
 
+    def test_ordering_rules_reach_the_stream_through_a_step(self):
+        """A list of rules, on a step whose block is resolved against the
+        scope before it is evaluated."""
+        events = [
+            self.SNAPSHOT,
+            status_update('TASK_STATE_WORKING', generation='3'),
+            status_update('TASK_STATE_COMPLETED', generation='5'),
+        ]
+        step = self.subscribe(expect_stream={
+            'ordering': ['monotonic_state', 'contiguous_generation'],
+            'events': [{'index': 0, 'task': {'id': '{{id}}'}}],
+        })
+        result = run(
+            runner_for(FakeDispatcher(events=events), variables={'id': 'T1'}), a_test(step)
+        )
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'events[2].generation'
+        events[2] = status_update('TASK_STATE_COMPLETED', generation='4')
+        result = run(
+            runner_for(FakeDispatcher(events=events), variables={'id': 'T1'}), a_test(step)
+        )
+        assert result.result is Outcome.PASS
+
     def test_an_undefined_variable_in_expect_stream_is_an_error(self):
         dispatcher = FakeDispatcher(events=[self.SNAPSHOT])
         step = self.subscribe(
@@ -1912,6 +1935,48 @@ class TestWebhookSteps:
             read_webhook=self.receiver([{'event': {'task': {'id': 'T1'}}}]),
         )
         result = run(runner, self.a_webhook_test(each_event={'task': {'id': 'T1'}}))
+        assert result.result is Outcome.PASS
+
+    def test_a_delivery_is_addressed_like_a_stream_event(self):
+        """The wire writes `statusUpdate`; a test may write `status_update`,
+        or address the payload's fields without naming the kind."""
+        delivered = [{'event': {'statusUpdate': {
+            'taskId': 'T1', 'generation': '3',
+            'status': {'state': 'TASK_STATE_COMPLETED'},
+        }}}]
+        runner = self.runner(read_webhook=self.receiver(delivered))
+        for assertion in (
+            {'status_update': {'generation': {'gte': 1}}},
+            {'statusUpdate': {'taskId': 'T1'}},
+            {'status': {'state': 'TASK_STATE_COMPLETED'}},
+        ):
+            for part in ('each_event', 'final_event'):
+                result = run(runner, self.a_webhook_test(**{part: assertion}))
+                assert result.result is Outcome.PASS, (part, assertion)
+        result = run(
+            runner,
+            self.a_webhook_test(final_event={'status': {'state': 'TASK_STATE_FAILED'}}),
+        )
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'webhook.final_event[0].status.state'
+
+    @pytest.mark.parametrize('spelling', ['message_update', 'messageUpdate'])
+    def test_a_kind_that_must_not_be_delivered(self, spelling):
+        """How a test checks that a configuration created for A2A 1.0 is sent
+        none of the kinds A2A 1.1 added. It must fail when one arrives,
+        however the test spelled the kind."""
+        never = {spelling: {'absent': True}}
+        update = [{'event': {'messageUpdate': {'taskId': 'T1', 'message': {'messageId': 'm'}}}}]
+        result = run(
+            self.runner(read_webhook=self.receiver(update)),
+            self.a_webhook_test(each_event=never),
+        )
+        assert result.result is Outcome.FAIL
+        status = [{'event': {'statusUpdate': {'taskId': 'T1', 'status': {}}}}]
+        result = run(
+            self.runner(read_webhook=self.receiver(status)),
+            self.a_webhook_test(each_event=never),
+        )
         assert result.result is Outcome.PASS
 
     def test_no_delivery_fails_and_says_how_many_arrived(self):

@@ -721,8 +721,13 @@ class Runner:
             if subject is None:
                 continue
             for index, event in enumerate(target):
+                # A delivered payload is a stream event, and is addressed in
+                # the same forms: by the name of its kind in either spelling,
+                # or straight through to the fields of the payload.
                 result = evaluate_body(
-                    scope.substitute(subject), event, path=f'webhook.{name}[{index}]'
+                    scope.substitute(subject),
+                    normalize(event, index).view(),
+                    path=f'webhook.{name}[{index}]',
                 )
                 checks += result.checks
                 if not result.ok:

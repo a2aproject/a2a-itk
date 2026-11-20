@@ -159,6 +159,23 @@ def _is_number(value: Any) -> bool:
 _INTEGER_TEXT: Final = re.compile(r'-?[0-9]+')
 
 
+def integer_value(value: Any) -> int | None:
+    """``value`` as an integer, or ``None`` if it is not one.
+
+    An integer, or the string of decimal digits ProtoJSON writes a 64-bit
+    integer as. For a field such as `generation`, which is never a fraction.
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and _INTEGER_TEXT.fullmatch(value):
+        try:
+            return int(value)
+        except ValueError:
+            # Python refuses to parse a string of several thousand digits.
+            return None
+    return None
+
+
 def _as_number(value: Any) -> int | float | None:
     """``value`` as something the numeric comparisons can order, or ``None``.
 
@@ -168,13 +185,7 @@ def _as_number(value: Any) -> int | float | None:
     """
     if _is_number(value):
         return value
-    if isinstance(value, str) and _INTEGER_TEXT.fullmatch(value):
-        try:
-            return int(value)
-        except ValueError:
-            # Python refuses to parse a string of several thousand digits.
-            return None
-    return None
+    return integer_value(value)
 
 
 def _is_comparable(value: Any) -> bool:
@@ -799,4 +810,5 @@ __all__ = [
     'evaluate_named',
     'evaluate_status',
     'evaluate_until',
+    'integer_value',
 ]

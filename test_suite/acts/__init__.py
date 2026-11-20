@@ -62,6 +62,7 @@ from test_suite.acts.runner import (
 )
 from test_suite.acts.streaming import (
     StreamedEvent,
+    check_generation,
     check_ordering,
     evaluate_stream,
     normalize,
@@ -128,6 +129,7 @@ __all__ = [
     'Backoff',
     'binding_for_error',
     'binding_for_operation',
+    'check_generation',
     'check_ordering',
     'ClientResponseBlock',
     'CollectionMatch',

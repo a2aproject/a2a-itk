@@ -21,6 +21,7 @@ from test_suite.acts.schema import (
     Level,
     NamedAssertion,
     Operation,
+    Ordering,
     Step,
     StepKind,
     Suite,
@@ -501,6 +502,35 @@ class TestExpectStream:
     def test_unknown_ordering_is_rejected(self):
         with pytest.raises(ValidationError):
             ExpectStream.model_validate({'ordering': 'sorted'})
+
+    def test_every_ordering_rule_of_the_spec_is_accepted(self):
+        for rule in ('monotonic_state', 'monotonic_generation', 'contiguous_generation'):
+            assert ExpectStream.model_validate({'ordering': rule}).orderings() == {Ordering(rule)}
+
+    def test_ordering_takes_one_rule_or_a_list(self):
+        block = ExpectStream.model_validate(
+            {'ordering': ['monotonic_state', 'monotonic_generation']}
+        )
+        assert block.orderings() == {
+            Ordering.MONOTONIC_STATE, Ordering.MONOTONIC_GENERATION,
+        }
+        assert ExpectStream.model_validate({}).orderings() == frozenset()
+
+    def test_an_empty_list_of_rules_is_rejected(self):
+        """It reads as a constraint and checks nothing."""
+        with pytest.raises(ValidationError):
+            ExpectStream.model_validate({'ordering': []})
+
+    def test_an_unknown_rule_in_a_list_is_rejected(self):
+        with pytest.raises(ValidationError):
+            ExpectStream.model_validate({'ordering': ['monotonic_state', 'sorted']})
+
+    def test_a_stream_of_a_set_takes_the_rules_too(self):
+        block = ExpectStream.model_validate(
+            {'streams': [{'ordering': ['monotonic_generation']}, {}]}
+        )
+        assert block.streams[0].orderings() == {Ordering.MONOTONIC_GENERATION}
+        assert block.streams[1].orderings() == frozenset()
 
     def test_event_payload_keys_are_open(self):
         """Event payload keys are assertion subtrees like any other body, so
