@@ -189,6 +189,20 @@ _OPERATIONS: dict[Operation, OperationBinding] = {
         grpc_request='CancelTaskRequest',
         grpc_response='Task',
     ),
+    # From A2A 1.1. A two-way exchange: on gRPC one bidirectional stream; on
+    # the HTTP bindings this call opens the exchange and is answered with the
+    # agent's events. Tentative: the proto defines the RPC and its HTTP route,
+    # but the binding sections of the A2A text do not list it yet
+    # (https://github.com/a2aproject/A2A/pull/2411).
+    Operation.SEND_LIVE_MESSAGE: OperationBinding(
+        jsonrpc_method='SendLiveMessage',
+        grpc_method='SendLiveMessage',
+        rest_method=HttpMethod.POST,
+        rest_path='/message:live',
+        streaming=True,
+        grpc_request='StreamRequest',
+        grpc_response='StreamResponse',
+    ),
     # ACTS §4.1 says `GET` here. A2A §5.3 and §11.3.2 both say POST, and a GET
     # cannot carry the subscribe body, so POST it is.
     Operation.SUBSCRIBE_TO_TASK: OperationBinding(

@@ -32,6 +32,7 @@ from unittest import mock
 
 import httpx
 import pytest
+from google.protobuf.json_format import MessageToDict, ParseDict
 
 import acts_runner
 from notifications_app import create_notifications_app
@@ -40,6 +41,7 @@ from test_suite.acts import load_suite
 from test_suite.acts.dispatcher import JsonRpcDispatcher
 from test_suite.acts.runner import VERSION_HEADER, Outcome, Runner, TestResult
 from test_suite.acts.schema import ErrorType, Operation, RunnerRequirement, TransportBinding
+from tests import acts_fake_agent
 from tests.acts_fake_agent import (
     CARD_PATH,
     UNSUPPORTED_OPERATION,
@@ -1201,6 +1203,237 @@ class TestBackgroundStepsEndToEnd:
         assert [(s.id, s.result) for s in result.steps] == [
             ('stream', Outcome.FAIL), ('wait', Outcome.PASS), ('answer', Outcome.PASS),
         ]
+
+
+# ---------------------------------------------------------------------------
+# Deliveries read up to a named one, and a client fed a stream
+# ---------------------------------------------------------------------------
+#
+# Two things a test could not do before. Assert on every delivery up to a
+# given one, where a webhook step used to stop at the first. And have the
+# agent's own client read a stream of events, where a client step used to
+# carry one payload.
+
+DELIVERY_AND_CLIENT_STREAM_PROBE = '''\
+acts_version: "1.0"
+spec_version: "1.1"
+suites:
+  - id: delivery-and-client-stream-probe
+    name: Delivery and client stream probe
+    tests:
+      - id: PROBE-NOT-DELIVERED
+        name: A configuration created for A2A 1.0 is not delivered a message update
+        level: may
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-multi-turn]
+        runner_requirements: [webhook_endpoint]
+        preconditions:
+          capabilities: {pushNotifications: true}
+        steps:
+          - id: create
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-multi-turn delivery probe"}]
+            expect: {status: 200}
+            capture: {taskId: task.id}
+          - id: set-config
+            operation: create_push_config
+            params:
+              taskId: "{{create.taskId}}"
+              url: "{{webhookUrl}}"
+              protocolVersion: "1.0"
+            expect: {status: 200}
+          - id: answer
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                taskId: "{{create.taskId}}"
+                parts: [{text: done}]
+            expect: {status: 200}
+          - id: no-message-update
+            expect_webhook:
+              task_id: "{{create.taskId}}"
+              events:
+                - description: Deliveries are read up to the one that reports the completed task
+                  match: any_position
+                  status_update:
+                    taskId: "{{create.taskId}}"
+                    status: {state: TASK_STATE_COMPLETED}
+              each_event:
+                message_update: {absent: true}
+      - id: PROBE-CLIENT-SKIPS-UNKNOWN
+        name: The client skips a stream event of a kind it does not know
+        level: must
+        min_spec_version: "1.1"
+        steps:
+          - id: parse
+            client_response:
+              operation: send_streaming_message
+              wire_stream:
+                - jsonrpc: "2.0"
+                  id: "1"
+                  result:
+                    task: {id: task-1, generation: "2"}
+                - jsonrpc: "2.0"
+                  id: "1"
+                  result:
+                    futureEvent: {taskId: task-1}
+                - jsonrpc: "2.0"
+                  id: "1"
+                  result:
+                    statusUpdate:
+                      taskId: task-1
+                      status: {state: TASK_STATE_COMPLETED}
+                      generation: "3"
+            expect_parsed:
+              events:
+                type: array
+                count: 2
+                items:
+                  - task: {id: task-1}
+                  - status_update:
+                      status: {state: TASK_STATE_COMPLETED}
+                      generation: {gte: 3, lte: 3}
+      - id: PROBE-CLIENT-READS-A-LIVE-DOWNLINK
+        name: The client reads a rejected request on a live exchange and goes on
+        level: must
+        min_spec_version: "1.1"
+        steps:
+          - id: parse
+            client_response:
+              operation: send_live_message
+              wire_stream:
+                - jsonrpc: "2.0"
+                  id: "1"
+                  result:
+                    task: {id: task-2, generation: "2"}
+                - jsonrpc: "2.0"
+                  id: "1"
+                  result:
+                    error: {taskId: task-2, code: INVALID_ARGUMENT, referenceId: m-1}
+                - jsonrpc: "2.0"
+                  id: "1"
+                  result:
+                    statusUpdate:
+                      taskId: task-2
+                      status: {state: TASK_STATE_COMPLETED}
+                      generation: "3"
+            expect_parsed:
+              events:
+                count: 3
+                items:
+                  - task: {id: task-2}
+                  - error: {code: INVALID_ARGUMENT, referenceId: m-1}
+                  - status_update: {taskId: task-2}
+'''
+
+
+class TestDeliveriesAndClientStreamsEndToEnd:
+    @pytest.fixture
+    def probe(self, tmp_path) -> Path:
+        path = tmp_path / 'delivery-and-client-stream.acts.yaml'
+        path.write_text(DELIVERY_AND_CLIENT_STREAM_PROBE, encoding='utf-8')
+        return path
+
+    def run(self, behaviors_path, probe, customize=None) -> dict[str, TestResult]:
+        run = conformance_run(
+            behaviors_path, spec_version='1.1', suite_path=probe, customize=customize
+        )
+        return {r.id: r for r in run.results}
+
+    def test_a_conforming_agent_passes(self, behaviors_path, probe):
+        results = self.run(behaviors_path, probe)
+        assert {
+            r.id: r.failure.message if r.failure else r.skip_reason
+            for r in results.values() if r.result is not Outcome.PASS
+        } == {}
+        assert len(results) == 3
+
+    def test_an_agent_that_delivers_a_message_update_to_a_1_0_configuration_is_caught(
+        self, behaviors_path, probe
+    ):
+        """The message update is delivered after the first status update, so a
+        step that stopped at the first delivery would not see it. The receiver
+        has to store it as well: one it refused could not be asserted on."""
+        def deliver_every_kind(agent: FakeAgent) -> None:
+            create = agent.create_push_config
+
+            def as_1_1(config, version):
+                stored = create(config, version)
+                answer = pb.TaskPushNotificationConfig()
+                answer.CopyFrom(stored)
+                # Reports the version that was asked for, and delivers as 1.1.
+                stored.protocol_version = '1.1'
+                return answer
+
+            agent.create_push_config = as_1_1
+
+        result = self.run(behaviors_path, probe, deliver_every_kind)['PROBE-NOT-DELIVERED']
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'no-message-update'
+        assert result.failure.assertion_path.startswith('webhook.each_event[')
+        assert result.failure.assertion_path.endswith('.message_update')
+
+    def test_an_agent_that_never_reports_the_completed_task_is_caught(
+        self, behaviors_path, probe
+    ):
+        """The delivery the step reads up to never comes."""
+        def stop_delivering_at_the_end(agent: FakeAgent) -> None:
+            post = agent._post
+
+            def all_but_completed(config, event):
+                if event.status_update.status.state != pb.TASK_STATE_COMPLETED:
+                    post(config, event)
+
+            agent._post = all_but_completed
+
+        result = self.run(
+            behaviors_path, probe, stop_delivering_at_the_end
+        )['PROBE-NOT-DELIVERED']
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'webhook.events[*]'
+        assert 'read deliveries for 10000ms' in result.failure.message
+
+    def test_a_client_that_fails_on_an_unknown_event_is_caught(
+        self, behaviors_path, probe, monkeypatch
+    ):
+        def strict(operation, wire_stream):
+            """Parses every event, and raises on a member it does not know."""
+            return {'events': [
+                MessageToDict(ParseDict(item['result'], pb.StreamResponse()))
+                for item in wire_stream
+            ]}
+
+        monkeypatch.setattr(acts_fake_agent, '_client_read_stream', strict)
+        results = self.run(behaviors_path, probe)
+        result = results['PROBE-CLIENT-SKIPS-UNKNOWN']
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'parse'
+        # The same client reads a stream of kinds it knows.
+        assert results['PROBE-CLIENT-READS-A-LIVE-DOWNLINK'].result is Outcome.PASS
+
+    def test_a_client_that_ends_the_stream_at_a_rejection_is_caught(
+        self, behaviors_path, probe, monkeypatch
+    ):
+        read = acts_fake_agent._client_read_stream
+
+        def stop_at_error(operation, wire_stream):
+            surfaced = read(operation, wire_stream)['events']
+            at = next(
+                (i for i, event in enumerate(surfaced) if 'error' in event), len(surfaced)
+            )
+            return {'events': surfaced[: at + 1]}
+
+        monkeypatch.setattr(acts_fake_agent, '_client_read_stream', stop_at_error)
+        results = self.run(behaviors_path, probe)
+        result = results['PROBE-CLIENT-READS-A-LIVE-DOWNLINK']
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'parsed.events'
+        # A stream without a rejection is read to its end all the same.
+        assert results['PROBE-CLIENT-SKIPS-UNKNOWN'].result is Outcome.PASS
 
 
 # ---------------------------------------------------------------------------
