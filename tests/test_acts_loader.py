@@ -367,3 +367,48 @@ class TestLoadedSuiteQueries:
         assert entry.suite_id == 'core'
         assert entry.source.name == 'core.acts.yaml'
         assert 'T-MUST' in str(entry) and 'core.acts.yaml' in str(entry)
+
+
+class TestSpecVersions:
+    """What the loader keeps for selecting tests by A2A version."""
+
+    @pytest.fixture
+    def loaded(self, tmp_path):
+        content = 'acts_version: "1.0"\nspec_version: "1.1"\n' + textwrap.dedent("""
+            suites:
+              - id: core
+                name: Core
+                tests:
+                  - id: T-EVERY
+                    name: every version
+                    level: must
+                    steps: [{id: s, operation: send_message, params: {}}]
+                  - id: T-ONLY-10
+                    name: 1.0 only
+                    level: must
+                    max_spec_version: "1.0"
+                    steps: [{id: s, operation: send_message, params: {}}]
+                  - id: T-FROM-11
+                    name: from 1.1
+                    level: must
+                    min_spec_version: "1.1"
+                    steps: [{id: s, operation: send_message, params: {}}]
+            """)
+        _write(tmp_path, 'core.acts.yaml', content)
+        return load_suite(
+            _write(tmp_path, 'suite.acts.yaml', _manifest('core.acts.yaml'))
+        )
+
+    def test_a_run_gets_the_tests_whose_range_contains_its_version(self, loaded):
+        assert [t.id for t in loaded.for_spec_version('1.0')] == [
+            'T-EVERY', 'T-ONLY-10',
+        ]
+        assert [t.id for t in loaded.for_spec_version('1.1')] == [
+            'T-EVERY', 'T-FROM-11',
+        ]
+
+    def test_each_document_keeps_the_version_it_was_written_against(self, loaded):
+        """Per document, because a manifest and its files may differ."""
+        assert {p.name: v for p, v in loaded.spec_versions.items()} == {
+            'suite.acts.yaml': '1.0', 'core.acts.yaml': '1.1',
+        }

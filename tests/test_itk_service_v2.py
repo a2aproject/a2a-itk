@@ -742,3 +742,55 @@ class TestRunActsEndpoint:
             acts_runner.AUTH_ENFORCED_ENV: 'http://external.sut:8790',
         }
         assert response.json()['sdk']['name'] == 'onea2a-esf'
+        # Unless the request names a version, the run targets 1.0.
+        assert captured['spec_version'] == '1.0'
+
+    def test_forwards_spec_version_to_acts_runner(self, monkeypatch, client):
+        import acts_runner
+        from test_suite.acts import load_suite
+        from test_suite.acts.runner import Outcome, TestResult
+        from test_suite.acts.schema import Level, TransportBinding
+
+        captured: dict[str, Any] = {}
+
+        async def fake_run(**kwargs):
+            captured.update(kwargs)
+            return acts_runner.ActsRun(
+                results=[
+                    TestResult(
+                        id='CORE-SEND-001', name='x', level=Level.MUST,
+                        result=Outcome.PASS, duration_ms=1,
+                    )
+                ],
+                suite=load_suite(acts_runner.DEFAULT_SUITE),
+                transport=TransportBinding.JSONRPC,
+                duration_ms=1,
+                spec_version=kwargs['spec_version'],
+            )
+
+        monkeypatch.setattr(acts_runner, 'run', fake_run)
+        response = client.post(
+            '/run-acts',
+            json={'transport': 'jsonrpc', 'sdk': 'x', 'spec_version': '1.1'},
+        )
+        assert response.status_code == 200
+        assert captured['spec_version'] == '1.1'
+        assert response.json()['spec_version'] == '1.1'
+
+    def test_a_run_the_sut_cannot_serve_is_a_bad_request(self, monkeypatch, client):
+        """An agent with no interface for the version is a configuration
+        error, reported as one rather than as a report full of failures."""
+        import acts_runner
+
+        async def refused(**kwargs):
+            raise acts_runner.ActsRunError(
+                'the agent card advertises no jsonrpc interface for A2A 1.1'
+            )
+
+        monkeypatch.setattr(acts_runner, 'run', refused)
+        response = client.post(
+            '/run-acts',
+            json={'transport': 'jsonrpc', 'sdk': 'x', 'spec_version': '1.1'},
+        )
+        assert response.status_code == 400
+        assert 'no jsonrpc interface for A2A 1.1' in response.json()['detail']

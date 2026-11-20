@@ -43,6 +43,7 @@ uv run run_acts.py --mount ../a2a-python/itk --sdk a2a-python --json
 | Flag | Effect |
 | --- | --- |
 | `--transport BINDING` | `jsonrpc`, `grpc`, `rest` or `all`. Repeatable. Default `jsonrpc` |
+| `--spec-version VERSION` | The A2A version the run targets, as `Major.Minor`. Default `1.0`. One invocation tests one version. See [The run version](#the-run-version) |
 | `-t ID` | Run only this test id. Repeatable. A test that does not target a requested binding is skipped for that binding with a note |
 | `--suite FILE` | An alternative `*.acts.yaml` manifest instead of the mirrored corpus |
 | `--out DIR` | Write `acts-report-<sdk>-<transport>-<timestamp>.json` into `DIR` |
@@ -55,7 +56,7 @@ uv run run_acts.py --mount ../a2a-python/itk --sdk a2a-python --json
 | `--sdk-version`, `--repository` | More report metadata |
 | `-v` | Debug logging, including every request and response |
 
-Exit code: 0 if conformant on every binding run, 1 if not, 2 if a run could not be set up (the SUT did not start, the card was unreadable, a test id does not exist).
+Exit code: 0 if conformant on every binding run, 1 if not, 2 if a run could not be set up (the SUT did not start, the card was unreadable or offers no interface for the run version, a test id does not exist).
 
 ### What a run looks like
 
@@ -64,7 +65,7 @@ INFO acts_runner: SUT up at http://127.0.0.1:40113 (grpc :40114)
 INFO acts_runner: Webhook receiver listening on http://127.0.0.1:40115
 INFO acts_runner: Re-running 4 capability-gated test(s) against a ITK_ACTS_REDUCED_CAPABILITIES SUT: CORE-CAP-001, CORE-CAP-002, PUSH-CFG-004, SEC-EXTCARD-003
 INFO acts_runner: Re-running 5 authentication-gated test(s) against a ITK_ACTS_AUTH SUT: SEC-AUTH-001, ...
-ACTS a2a-go / jsonrpc — 101 tests in 43850ms
+ACTS a2a-go / jsonrpc / A2A 1.0 — 101 tests in 43850ms
   MUST   56/59 passed (3 failed)
   SHOULD 24/29 passed (5 failed)
   MAY    12/13 passed (1 failed)
@@ -85,7 +86,7 @@ With `--transport all` a combined block follows:
 
 ```
 ========================================================
-ACROSS 3 BINDING(S)
+ACROSS 3 BINDING(S) AT A2A 1.0
 ========================================================
   113 test(s) in all, each scored on the binding(s) it targets
   jsonrpc   92/101 passed   must 56/59   9 failed, 0 error(s)   NOT CONFORMANT
@@ -96,11 +97,24 @@ ACROSS 3 BINDING(S)
 
 If any test was skipped for a precondition **no** agent card could satisfy - a corpus defect, not an SDK one - it is listed under `COULD NOT RUN ON ANY BINDING`. Those cost nothing in the verdict but are printed so the gap is visible.
 
+### The run version
+
+A run targets exactly one A2A version, given with `--spec-version` (or `spec_version` on the service) and `1.0` when omitted. That one value decides four things:
+
+- **Which tests take part.** One corpus serves every A2A 1.x version. A test may declare `min_spec_version` and `max_spec_version`; a test whose range does not contain the run version is left out of the run entirely, not counted as skipped. A run at 1.0 therefore reports the same tests after tests for a newer version are added.
+- **What every request carries.** `A2A-Version` is set to the run version on every request the runner builds, including the card fetch, and `{{specVersion}}` resolves to it for raw steps that write the header themselves.
+- **Which interface is dialed.** For the requested binding the runner takes the card's interface that advertises exactly the run version. Without one it takes the newest interface of the same major version that is newer than the run version, which is how a 1.0 run checks that a 1.1 server still behaves as a 1.0 one. An interface that advertises no version is the last resort. An interface for an older version or another major version, or one whose `protocolVersion` is not a version, is never used: the run stops with a configuration error instead of reporting every test as failed.
+- **What the report says.** `spec_version` in the report is the run version, and `environment.interface_protocol_version` is the version the dialed interface advertises, and is absent when it advertises none.
+
+To test an SDK at two versions, run twice. Each file of the corpus names the newest version its tests were written against, and the runner refuses to run a file at a newer version than that.
+
 ### When something goes wrong
 
 - `the code under test failed to start`: the agent did not come up within `ITK_READINESS_TIMEOUT` (35 s by default; raise it for Java or .NET). The CLI discards the agent's own output, so start the agent by hand from its `itk/` directory (`--httpPort 9000 --grpcPort 9001`) to see why. The service captures it under `/app/logs` when that directory is mounted.
 - `cannot read the agent card at .../.well-known/agent-card.json`: the agent is up but does not serve its card at the root, or serves a redirect. ACTS does not follow redirects on the card, on purpose.
 - `the agent card advertises no grpc interface`: the card's `supportedInterfaces` has no entry for the binding you asked for. The URL of every binding comes from the card, never from a convention.
+- `the agent card advertises no grpc interface for A2A 1.1`: the card has interfaces for the binding, but none a run at that version can use. The message lists the versions it found.
+- `cannot run at A2A 1.1: these documents were written against an older version`: the corpus (or the `--suite` file) does not cover the version you asked for.
 - A whole group of tests skipped with `agent card capability X=False`: the card does not advertise `X`. Either the SDK lacks the feature (correct skip) or the agent forgot to advertise it.
 - Many tests failing with `SUT does not declare behavior(s) tck-...`: the SDK's `acts/sut-behaviors.yaml` is missing prefixes. See [05_sdk-integration.md](05_sdk-integration.md).
 - `Behaviour gating is off (no acts/sut-behaviors.yaml in the SUT checkout)`, or `(no behaviors file given for the external SUT)`: a warning. The run proceeds, tests needing behaviors run anyway and will mostly fail.
@@ -151,6 +165,7 @@ Request:
 ```json
 {
   "transport": "jsonrpc",
+  "spec_version": "1.0",
   "sdk": "a2a-python",
   "sdk_version": "1.0.3",
   "language": "python",
@@ -165,6 +180,7 @@ Request:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `transport` | required | `jsonrpc`, `grpc` or `rest` |
+| `spec_version` | `1.0` | The A2A version the run targets, as `--spec-version` does. One request tests one version |
 | `sdk` | required | Name for the report's `sdk` block |
 | `sdk_version`, `language`, `repository` | `unknown` / `unknown` / omitted | More report metadata |
 | `tests` | all | Restrict to these test ids |
