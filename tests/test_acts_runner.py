@@ -632,6 +632,7 @@ class TestPreconditions:
         """Written out by hand it would drift; derived, it cannot."""
         assert KNOWN_CAPABILITIES == {
             'streaming', 'pushNotifications', 'extensions', 'extendedAgentCard',
+            'userArtifacts',
         }
 
     SECURED_CARD = {
