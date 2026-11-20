@@ -185,6 +185,21 @@ class TestAgainstTheRealMessages:
                     )
         assert not failures, '\n'.join(failures)
 
+    def test_a_variable_stands_in_for_a_string_or_a_generation_and_nothing_else(self):
+        """The check above parses requests whose variables are not resolved.
+        A variable in an enum field must still fail it."""
+        templated = {
+            'id': '{{start.taskId}}',
+            'currentGeneration': '{{start.generation}}',
+            'message': {'role': '{{role}}', 'parts': [{'text': '{{said}}'}]},
+        }
+        stood_in = _without_templates(templated)
+        assert stood_in['currentGeneration'].isdigit()
+        ParseDict({'id': stood_in['id'], 'currentGeneration': stood_in['currentGeneration']},
+                  a2a_pb2.GetTaskRequest())
+        with pytest.raises(Exception, match='role'):
+            ParseDict({'message': stood_in['message']}, a2a_pb2.SendMessageRequest())
+
     def test_unadapted_send_message_would_not_parse(self):
         """Why the adaptation exists rather than being cosmetic."""
         with pytest.raises(Exception, match='taskId'):
@@ -205,12 +220,23 @@ def _without_templates(value):
     """Replace ``{{...}}`` placeholders with a plain string.
 
     Variable substitution is the runner's job, not this layer's; here the
-    point is the *shape*, and an unsubstituted template is still a string.
+    point is the *shape*. A generation is a 64-bit integer, which ProtoJSON
+    writes as a string of digits, so those fields get one. Everywhere else
+    the stand-in is text that only a string field accepts.
     """
     if isinstance(value, dict):
-        return {k: _without_templates(v) for k, v in value.items()}
+        return {
+            k: '1' if k in _GENERATION_FIELDS and _is_template(v) else _without_templates(v)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [_without_templates(v) for v in value]
-    if isinstance(value, str) and '{{' in value:
-        return 'placeholder'
-    return value
+    return 'placeholder' if _is_template(value) else value
+
+
+#: The request fields that carry a generation.
+_GENERATION_FIELDS = frozenset({'currentGeneration', 'lastSeenGeneration', 'ifGenerationMatch'})
+
+
+def _is_template(value):
+    return isinstance(value, str) and '{{' in value

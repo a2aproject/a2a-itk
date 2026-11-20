@@ -782,9 +782,8 @@ class TestCorpus:
                 if step.expect_stream is not None:
                     yield loaded.test.id, step.id, step.expect_stream
 
-    def test_there_are_fifteen(self, suite):
-        """Thirteen before the two raw REST subscribe tests."""
-        assert len(list(self._blocks(suite))) == 15
+    def test_how_many_there_are(self, suite):
+        assert len(list(self._blocks(suite))) == 36
 
     @pytest.mark.parametrize(
         'events',

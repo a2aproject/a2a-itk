@@ -313,12 +313,15 @@ class TestAgainstTheRealContract:
     @pytest.mark.skipif(
         not CONTRACT.is_file(), reason='no sibling a2a-python checkout'
     )
-    def test_it_covers_what_the_corpus_needs(self):
+    def test_it_covers_what_a_run_at_1_0_needs(self):
+        """The tests for A2A 1.1 need behaviors an agent gains when it
+        implements 1.1; a contract is held to the version it is run at."""
+        from acts_runner import _for_version
         from test_suite.acts import load_suite
 
         corpus = (
             Path(__file__).resolve().parent.parent
             / 'scenarios' / 'acts' / 'suite.acts.yaml'
         )
-        needed = load_suite(corpus).required_behaviors()
+        needed = _for_version(load_suite(corpus), '1.0').required_behaviors()
         assert not needed - behaviors.load(self.CONTRACT).prefixes()
