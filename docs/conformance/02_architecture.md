@@ -45,6 +45,8 @@ A step says `operation: get_task` with `params: {id: ...}`. Nothing in the corpu
 | `get_task` | method `GetTask` | `GET /tasks/{id}` | `GetTask` |
 | `TaskNotFoundError` | code `-32001` | status 404, `ErrorInfo.reason` | `NOT_FOUND` + reason |
 
+One row depends on the A2A version. Over REST, `subscribe_to_task` is `POST /tasks/{id}:subscribe` in A2A 1.0 and `GET` from A2A 1.1, where every request field other than the task id travels as a query parameter. A2A 1.0 is not consistent here: its method tables say `POST` and the HTTP rule in its proto says `GET`. The map follows the tables, and A2A 1.1 corrected them. A request is written for the version its `A2A-Version` header declares, which is the run version, or the `a2a_version` of the step that sends it.
+
 The tables follow the A2A specification's own method and error mapping (sections 5.3 and 5.4) rather than the copies in the ACTS spec, because the ACTS spec says the A2A spec wins where they disagree and the copies have drifted. Divergences are noted inline in the file.
 
 [`dispatcher/`](../../test_suite/acts/dispatcher/) has one adapter per binding. All three return the same `WireResponse`: status, headers, payload and, on failure, a `WireError` that has already been normalised - error type, message, the JSON-RPC code or gRPC status that carried it, and the details list whichever key the binding used. The runner never looks at the transport.
@@ -71,8 +73,8 @@ A SUT answering in a shape the binding does not permit - for example a streaming
 Checked in this order, before any step runs:
 
 1. **Binding.** A backstop - the pipeline already scoped the corpus.
-2. **Step kinds.** The one kind the runner does not execute is a bare `assertion` step; the corpus contains none.
-3. **Runner requirements.** A test may declare it needs `header_inspection`, `auth_credentials`, `concurrent_streams`, `stream_disconnect`, `concurrent_requests` or `webhook_endpoint` (section 12.1). This runner has the first five by construction and the last whenever the receiver started.
+2. **Step kinds.** The runner does not execute two kinds. One is a bare `assertion` step; the corpus contains none. The other is a `live` step, which drives the two-way exchange A2A 1.1 adds (`SendLiveMessage`): a test with one is skipped with `contains live step(s); not yet supported`.
+3. **Runner requirements.** A test may declare it needs `header_inspection`, `auth_credentials`, `concurrent_streams`, `stream_disconnect`, `concurrent_requests`, `webhook_endpoint` or `live_stream` (section 12.1). This runner has the first five by construction, `webhook_endpoint` whenever the receiver started, and not `live_stream`.
 4. **Preconditions** (section 12.5), evaluated against the agent card:
    - `capabilities: {streaming: true}` - the card must advertise it (a card that omits a capability has not advertised it). A capability name that A2A does not define at all is reported as `PRECONDITION CANNOT BE SATISFIED`, a distinct skip that `run_acts.py` lists separately, because no SUT could ever clear it and it would otherwise look like "not applicable here".
    - `authentication: true` - the card must declare both `securitySchemes` and a non-empty `securityRequirements`. Schemes alone are an offer, not a requirement.
@@ -98,7 +100,7 @@ Each test gets a fresh variable `Scope` (section 3.2, isolation), seeded with th
 
 Every abstract operation carries `A2A-Version` set to the run version (section 12.4); on gRPC it is call metadata. A raw step is sent as written and reads the run version from `{{specVersion}}`.
 
-`a2a_version` on an operation step sends that one step as a client of another version: the header carries that version, and where the card lists an interface for it on the binding under test, the step goes to that interface. A version the agent does not list goes to the interface the run uses, which is expected to refuse it.
+`a2a_version` on an operation step sends that one step as a client of another version: the header carries that version, the request is written with the wire mapping of that version, and where the card lists an interface for it on the binding under test, the step goes to that interface. A version the agent does not list goes to the interface the run uses, which is expected to refuse it.
 
 `min_duration_ms` and `max_duration_ms` on an operation step bound the time from sending the request to the complete response. They are how a test observes that the SUT held a request open (the A2A 1.1 long poll) or answered at once; `delay_ms` before the step is not counted. A request that is still unanswered at `max_duration_ms` is abandoned and the step fails. They cannot be combined with `repeat` or `expect_stream`.
 

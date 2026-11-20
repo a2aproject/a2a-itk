@@ -135,6 +135,7 @@ class TestCorpusShape:
             # nothing about what the SUT then delivered.
             StepKind.WEBHOOK: 5,
             StepKind.ASSERTION: 0,
+            StepKind.LIVE: 0,
         }
 
     def test_transport_restricted_tests_are_a_minority(self, corpus):
