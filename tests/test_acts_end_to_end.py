@@ -975,6 +975,235 @@ class TestVersionsAndTimingEndToEnd:
 
 
 # ---------------------------------------------------------------------------
+# Background steps, end to end
+# ---------------------------------------------------------------------------
+#
+# A request that stays open while the steps after it run: a subscription that
+# is being read while a message is sent to its task, a read that is held until
+# another request changes the task, and a stream whose first event names the
+# task the later steps act on.
+
+BACKGROUND_PROBE = '''\
+acts_version: "1.0"
+spec_version: "1.1"
+suites:
+  - id: background-probe
+    name: Background probe
+    tests:
+      - id: PROBE-WATCHED
+        name: A message sent while a subscription is open reaches the subscriber
+        level: must
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-hold-working]
+        runner_requirements: [concurrent_requests]
+        preconditions:
+          capabilities: {streaming: true}
+        steps:
+          - id: start
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-hold-working 8000 watched probe"}]
+              configuration: {returnImmediately: true}
+            expect: {status: 200}
+            capture: {taskId: task.id}
+          - id: watch
+            operation: subscribe_to_task
+            background: true
+            params: {id: "{{start.taskId}}"}
+            expect_stream:
+              timeout_ms: 30000
+              events:
+                - match: any_position
+                  message_update:
+                    taskId: "{{start.taskId}}"
+                    message:
+                      role: ROLE_USER
+                      parts: [{text: a message while the subscription is open}]
+              final_event:
+                status: {state: TASK_STATE_COMPLETED}
+          - id: add-message
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                taskId: "{{start.taskId}}"
+                parts: [{text: a message while the subscription is open}]
+              configuration: {returnImmediately: true}
+            expect: {status: 200}
+      - id: PROBE-WOKEN
+        name: A held read returns when another request changes the task
+        level: should
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-multi-turn]
+        runner_requirements: [concurrent_requests]
+        steps:
+          - id: start
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-multi-turn woken probe"}]
+            expect: {status: 200}
+            capture: {taskId: task.id, generation: task.generation}
+          - id: long-poll
+            operation: get_task
+            background: true
+            params:
+              id: "{{start.taskId}}"
+              currentGeneration: "{{start.generation}}"
+            min_duration_ms: 300
+            expect:
+              status: 200
+              body:
+                generation: {gt: "{{start.generation}}"}
+          - id: answer
+            delay_ms: 500
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                taskId: "{{start.taskId}}"
+                parts: [{text: done}]
+            expect: {status: 200}
+      - id: PROBE-STREAM-NAMES-THE-TASK
+        name: A stream stays open while the client answers the task it opened
+        level: should
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-stream-input-required]
+        runner_requirements: [concurrent_requests]
+        preconditions:
+          capabilities: {streaming: true}
+        steps:
+          - id: stream
+            operation: send_streaming_message
+            background: true
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-stream-input-required background probe"}]
+            capture: {taskId: task.id}
+            expect_stream:
+              timeout_ms: 30000
+              ordering: monotonic_state
+              final_event:
+                status: {state: TASK_STATE_COMPLETED}
+          - id: wait
+            operation: get_task
+            params: {id: "{{stream.taskId}}"}
+            expect: {status: 200}
+            repeat:
+              until: status.state == TASK_STATE_INPUT_REQUIRED
+              max_attempts: 15
+              delay_ms: 1000
+          - id: answer
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                taskId: "{{stream.taskId}}"
+                parts: [{text: the requested input}]
+            expect: {status: 200}
+'''
+
+
+class TestBackgroundStepsEndToEnd:
+    @pytest.fixture
+    def probe(self, tmp_path) -> Path:
+        path = tmp_path / 'background.acts.yaml'
+        path.write_text(BACKGROUND_PROBE, encoding='utf-8')
+        return path
+
+    def run(self, behaviors_path, probe, customize=None) -> dict[str, TestResult]:
+        run = conformance_run(
+            behaviors_path, spec_version='1.1', suite_path=probe, customize=customize
+        )
+        return {r.id: r for r in run.results}
+
+    def test_a_conforming_agent_passes(self, behaviors_path, probe):
+        """Run through the pipeline, so this also shows that the pipeline
+        grants the runner requirement the tests declare."""
+        results = self.run(behaviors_path, probe)
+        assert {
+            r.id: r.failure.message if r.failure else r.skip_reason
+            for r in results.values() if r.result is not Outcome.PASS
+        } == {}
+        assert len(results) == 3
+
+    def test_every_step_is_reported_in_the_order_the_test_writes_it(
+        self, behaviors_path, probe
+    ):
+        results = self.run(behaviors_path, probe)
+        assert [s.id for s in results['PROBE-WATCHED'].steps] == [
+            'start', 'watch', 'add-message',
+        ]
+        # The subscription was compared with something.
+        watch = results['PROBE-WATCHED'].steps[1]
+        assert watch.checks > 0
+
+    def test_a_subscriber_that_is_not_sent_the_message_is_caught(
+        self, behaviors_path, probe
+    ):
+        def as_1_0(agent: FakeAgent) -> None:
+            subscribe = agent.subscribe_to_task
+            agent.subscribe_to_task = lambda request, version: subscribe(request, (1, 0))
+
+        result = self.run(behaviors_path, probe, as_1_0)['PROBE-WATCHED']
+        assert result.result is Outcome.FAIL
+        # Against the subscription, which is the step whose stream lacks it,
+        # and not against the step that sent the message.
+        assert result.failure.step_id == 'watch'
+        assert result.failure.message == 'events[0]: no event among the 2 received matched'
+
+    def test_a_read_that_is_not_held_is_caught(self, behaviors_path, probe):
+        def answer_at_once(agent: FakeAgent) -> None:
+            agent.long_poll_timeout_s = 0
+
+        result = self.run(behaviors_path, probe, answer_at_once)['PROBE-WOKEN']
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'long-poll'
+        # Answered before the second request, so with the unchanged task.
+        assert result.failure.assertion_path == 'body.generation'
+
+    def test_a_read_that_the_change_does_not_wake_is_caught(self, behaviors_path, probe):
+        """An agent that holds the read for its full patience whatever
+        happens to the task, and answers with what it had at the start."""
+        def sleep_through(agent: FakeAgent) -> None:
+            get_task = agent.get_task
+
+            async def stale(request):
+                if not request.HasField('current_generation'):
+                    return await get_task(request)
+                before = agent._view(agent._find(request.id))
+                await asyncio.sleep(agent.long_poll_timeout_s)
+                return before
+
+            agent.get_task = stale
+
+        result = self.run(behaviors_path, probe, sleep_through)['PROBE-WOKEN']
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'long-poll'
+        assert result.failure.assertion_path == 'body.generation'
+
+    def test_a_stream_that_closes_when_the_task_waits_is_caught(
+        self, behaviors_path, probe
+    ):
+        def as_1_0(agent: FakeAgent) -> None:
+            stream = agent.send_streaming_message
+            agent.send_streaming_message = lambda request, version: stream(request, (1, 0))
+
+        result = self.run(behaviors_path, probe, as_1_0)['PROBE-STREAM-NAMES-THE-TASK']
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'stream'
+        assert result.failure.assertion_path == 'final_event.status.state'
+        # The steps that used what the stream captured ran all the same.
+        assert [(s.id, s.result) for s in result.steps] == [
+            ('stream', Outcome.FAIL), ('wait', Outcome.PASS), ('answer', Outcome.PASS),
+        ]
+
+
+# ---------------------------------------------------------------------------
 # What the fake agent does at A2A 1.1
 # ---------------------------------------------------------------------------
 #

@@ -577,6 +577,12 @@ class FakeAgent:
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         """Answer one HTTP request."""
+        written = request.extensions.get('trace')
+        if written is not None:
+            # A caller that asked to follow the request is told it has been
+            # written out, as the HTTP client does on a real connection. The
+            # name is the client library's.
+            await written('http11.send_request_body.complete', {})
         await asyncio.sleep(self.latency_s)
         path = request.url.path
 

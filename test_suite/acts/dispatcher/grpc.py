@@ -20,7 +20,8 @@ offer in the first place.
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Mapping
+import asyncio
+from typing import Any, AsyncIterator, Callable, Mapping
 
 import grpc
 import httpx
@@ -35,6 +36,7 @@ from pyproto import a2a_pb2
 from test_suite.acts.dispatcher.base import (
     DispatchError,
     Dispatcher,
+    MalformedResponse,
     StreamEvent,
     StreamNotOpened,
     UnsupportedByBinding,
@@ -217,14 +219,21 @@ class GrpcDispatcher(Dispatcher):
                 f'{binding.grpc_request}: {exc}'
             ) from exc
 
-    def _callable(self, operation: Operation) -> Any:
-        """The channel callable for an operation, typed by the wire map."""
+    def _callable(self, operation: Operation, *, written_by_hand: bool = False) -> Any:
+        """The channel callable for an operation, typed by the wire map.
+
+        ``written_by_hand`` gives the form in which the caller writes the
+        request and reads the reply itself, message by message.
+        """
         binding = binding_for_operation(operation)
         method = f'/{GRPC_SERVICE}/{binding.grpc_method}'
-        factory = (
-            self._channel.unary_stream if binding.streaming
-            else self._channel.unary_unary
-        )
+        if written_by_hand:
+            factory = self._channel.stream_stream
+        else:
+            factory = (
+                self._channel.unary_stream if binding.streaming
+                else self._channel.unary_unary
+            )
         return factory(
             method,
             request_serializer=_message_type(binding.grpc_request).SerializeToString,
@@ -238,6 +247,8 @@ class GrpcDispatcher(Dispatcher):
         operation: Operation,
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        *,
+        on_sent: Callable[[], None] | None = None,
     ) -> WireResponse:
         operation = resolve_operation(operation, params)
         binding = binding_for_operation(operation)
@@ -249,13 +260,17 @@ class GrpcDispatcher(Dispatcher):
             )
 
         request = self._build_request(operation, params)
-        call = self._callable(operation)
         try:
-            response = await call(
-                request,
-                metadata=self._metadata(headers),
-                timeout=self.timeout,
-            )
+            if on_sent is not None:
+                response = await self._unary_reporting_sent(
+                    operation, request, headers, on_sent
+                )
+            else:
+                response = await self._callable(operation)(
+                    request,
+                    metadata=self._metadata(headers),
+                    timeout=self.timeout,
+                )
         except AioRpcError as exc:
             return _response_from_rpc_error(exc)
         except grpc.RpcError as exc:  # pragma: no cover - sync-style failure
@@ -266,6 +281,60 @@ class GrpcDispatcher(Dispatcher):
             payload=_to_dict(response),
             headers={},
         )
+
+    async def _unary_reporting_sent(
+        self,
+        operation: Operation,
+        request: Any,
+        headers: Mapping[str, str] | None,
+        on_sent: Callable[[], None],
+    ) -> Any:
+        """Make a unary call and say when its request has been written out.
+
+        The unary form of the channel API reports nothing before the reply.
+        In the two-way form the caller writes the request itself and is told
+        when it is out, so the call is made through that one. To the SUT the
+        two are the same call: one request message, then the end of the
+        client's side.
+
+        Raises ``AioRpcError`` for a call the SUT fails, as the unary form does.
+        """
+        call = self._callable(operation, written_by_hand=True)(
+            metadata=self._metadata(headers),
+            timeout=self.timeout,
+        )
+        try:
+            try:
+                # Raises for an agent that cannot be reached, before anything
+                # is reported as sent.
+                await call.write(request)
+                # A server may wait for the end of the client's side before it
+                # handles a unary call, so the request is not out until this is.
+                await call.done_writing()
+            except asyncio.InvalidStateError:
+                # The SUT ended the call on its headers alone, before the
+                # request was written. The read below raises its status.
+                pass
+            else:
+                on_sent()
+            response = await call.read()
+            if response is grpc.aio.EOF:
+                raise MalformedResponse(
+                    f'{operation.value}: the SUT ended the call without a '
+                    f'response message'
+                )
+            # Read on to the status: a call that failed after its message
+            # raises here.
+            if await call.read() is not grpc.aio.EOF:
+                raise MalformedResponse(
+                    f'{operation.value}: the SUT sent more than one response '
+                    f'message to a unary call'
+                )
+            return response
+        finally:
+            # A no-op once the call has finished. It ends a call that is
+            # still open when a reply of the wrong shape is refused above.
+            call.cancel()
 
     async def dispatch_raw(
         self,

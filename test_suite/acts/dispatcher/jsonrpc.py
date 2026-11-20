@@ -8,7 +8,7 @@ event carrying a JSON-RPC response envelope of its own.
 from __future__ import annotations
 
 import itertools
-from typing import Any, AsyncIterator, Mapping
+from typing import Any, AsyncIterator, Callable, Mapping
 
 import httpx
 
@@ -75,6 +75,8 @@ class JsonRpcDispatcher(HttpDispatcher):
         operation: Operation,
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        *,
+        on_sent: Callable[[], None] | None = None,
     ) -> WireResponse:
         operation = resolve_operation(operation, params)
         binding = binding_for_operation(operation)
@@ -86,6 +88,7 @@ class JsonRpcDispatcher(HttpDispatcher):
             self._url(self.rpc_path),
             headers=self._headers(headers, content_type=self.content_type),
             json=self._envelope(operation, params),
+            on_sent=on_sent,
         )
         parsed, text = parse_json_body(response)
         error = self._error_from(response, parsed)
