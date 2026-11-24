@@ -19,6 +19,7 @@ tested independently in its own module — here we only verify the glue:
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,6 +28,7 @@ from fastapi.testclient import TestClient
 
 import itk_runner
 from itk_service_v2 import app
+from test_suite.launcher import fetch
 from test_suite.launcher.errors import InfraFailure, PermanentError, Stage
 from test_suite.launcher.matrix import Matrix
 from test_suite.launcher.spec import Kind
@@ -305,6 +307,25 @@ class TestSpecBuilding:
         assert calls == [('a2aproject/a2a-python', 'main')], (
             f'ref should resolve once per (repo, ref); got {calls!r}'
         )
+
+    def test_a_line_pinned_to_a_commit_is_started_at_that_commit(self, client, monkeypatch):
+        pinned = 'd' * 40
+        monkeypatch.setattr(itk_runner, '_matrix', Matrix.from_dict({'sdks': {
+            'python': {'v11': {'repo': 'a2aproject/a2a-python', 'ref': pinned,
+                               'protocol_versions': ['1.1', '1.0', '0.3']}},
+        }}))
+        # The real resolve_ref, with a remote that has the commit.
+        monkeypatch.setattr(itk_runner, 'resolve_ref', fetch.resolve_ref)
+        monkeypatch.setattr(
+            fetch, '_run_git',
+            lambda args, **_kw: subprocess.CompletedProcess(args, 0, '', ''),
+        )
+
+        client.post('/run', json={
+            'tests': [{'name': 't', 'sdks': ['python_v11'], 'behavior': 'echo'}],
+        })
+        [spec] = _FakeCluster.instances[-1].start_all_calls[0][0]
+        assert (spec.repo, spec.sha) == ('a2aproject/a2a-python', pinned)
 
     def test_unknown_agent_id_400(self, client, stub_deps):  # noqa: ARG002
         r = client.post('/run', json={
@@ -621,13 +642,43 @@ class TestAgentTableWiring:
         # No carry-over of the first run's peer into the second.
         assert 'python_v10' not in tables[1]
 
+    def test_executor_receives_the_versions_each_agent_speaks(self, client, monkeypatch):
+        """A peer's come from its matrix line. The SUT is in no matrix line."""
+        monkeypatch.setattr(itk_runner, '_matrix', Matrix.from_dict({'sdks': {
+            'python': {
+                'v10': {'repo': 'a2aproject/a2a-python', 'ref': 'main'},
+                'v03': {'repo': 'a2aproject/a2a-python', 'ref': 'v0.3.24+itk'},
+                'v11': {'repo': 'a2aproject/a2a-python', 'ref': 'c' * 40,
+                        'protocol_versions': ['1.1', '1.0', '0.3']},
+            },
+        }}))
+        seen: dict[str, tuple[str, ...]] = {}
+
+        async def probing_execute(sdks, behavior, agents, edges=None, scenario_name=None, **_kw):  # noqa: ARG001
+            seen.update({s: agents[s].protocol_versions for s in sdks})
+            return {scenario_name: {'passed': True, 'sdks': sdks, 'edges': edges}}
+
+        monkeypatch.setattr(itk_runner, 'execute_itk_test', probing_execute)
+        client.post('/run', json={'tests': [{
+            'name': 't', 'behavior': 'echo',
+            'sdks': ['current', 'python_v10', 'python_v03', 'python_v11', 'python_v11_2'],
+        }]})
+
+        assert seen == {
+            'current': ('1.0', '0.3'),
+            'python_v10': ('1.0', '0.3'),
+            'python_v03': ('0.3',),
+            'python_v11': ('1.1', '1.0', '0.3'),
+            'python_v11_2': ('1.1', '1.0', '0.3'),
+        }
+
     def test_unknown_agent_is_a_runtime_error_not_a_value_error(self):
         """_get_valid_subgraphs swallows ValueError to skip untraversable
         subgraphs. A peer that never started must not be silently skipped
         that way — it has to surface."""
         from test_suite.agent_table import AgentEndpoint, AgentTable
 
-        table = AgentTable({'current': AgentEndpoint(1, 2)})
+        table = AgentTable({'current': AgentEndpoint(1, 2, ('1.0', '0.3'))})
         with pytest.raises(RuntimeError, match='No running agent'):
             table.card_uri('python_v10')
 

@@ -3,7 +3,8 @@
 Reads ``matrix.yaml`` from the repo root. Scenarios reference peers by
 identifier — ``python_v10``, ``go_v03``, ``python_v10_2`` (``_N`` suffix
 = "second instance of the same source") — and :meth:`Matrix.resolve`
-translates each into a :class:`MatrixEntry` (repo + ref).
+translates each into a :class:`MatrixEntry`: the repo and ref to build the
+agent from, and what that agent can speak.
 
 Special cases handled outside this module:
 
@@ -27,11 +28,16 @@ import yaml
 
 from test_suite.launcher.spec import Kind, TargetSpec
 from test_suite.transports import ALL_TRANSPORTS
+from test_suite.versions import parse_spec_version
 
 
 # `<sdk>_v<num>` with an optional `_<instance>` suffix. sdk is lowercase
 # ASCII to match the file naming convention across the repo.
 _AGENT_ID_RE = re.compile(r'^([a-z][a-z0-9]*)_(v[0-9]+)(?:_[0-9]+)?$')
+
+# What a line speaks when it does not say. Any other line has to list its
+# versions.
+_DEFAULT_PROTOCOL_VERSIONS = {'v10': ('1.0', '0.3'), 'v03': ('0.3',)}
 
 
 class MatrixError(ValueError):
@@ -46,6 +52,7 @@ class MatrixEntry:
     line: str   # 'v10', 'v03'
     repo: str   # 'a2aproject/a2a-python'
     ref: str    # 'main', 'v0.3.24+itk', or a full SHA
+    protocol_versions: tuple[str, ...]  # A2A versions it speaks, newest first
     transports: frozenset[str] = ALL_TRANSPORTS
 
     @property
@@ -125,6 +132,9 @@ class Matrix:
                     line=line,
                     repo=repo,
                     ref=ref,
+                    protocol_versions=_parse_protocol_versions(
+                        cfg.get('protocol_versions'), sdk, line
+                    ),
                     transports=_parse_transports(cfg.get('transports'), sdk, line),
                 )
         return cls(entries)
@@ -225,6 +235,38 @@ def _parse_transports(raw: object, sdk: str, line: str) -> frozenset[str]:
             f'valid: {sorted(ALL_TRANSPORTS)}'
         )
     return frozenset(raw)
+
+
+def _parse_protocol_versions(raw: object, sdk: str, line: str) -> tuple[str, ...]:
+    """Validate a line's ``protocol_versions:`` list; newest version first.
+
+    Optional on a ``v10`` line (1.0 and 0.3) or a ``v03`` line (0.3). Any
+    other line has to list its versions: nothing is read out of its name.
+    """
+    where = f'sdks.{sdk}.{line}.protocol_versions'
+    if raw is None:
+        try:
+            return _DEFAULT_PROTOCOL_VERSIONS[line]
+        except KeyError:
+            raise MatrixError(
+                f'{where}: required for a line other than '
+                f'{sorted(_DEFAULT_PROTOCOL_VERSIONS)}; list the A2A versions '
+                f'the agent speaks, such as ["1.1", "1.0", "0.3"]'
+            ) from None
+    if not isinstance(raw, list) or not all(isinstance(v, str) for v in raw):
+        raise MatrixError(
+            f'{where}: must be a list of strings; quote each version, '
+            f'because YAML reads a bare 1.0 as a number'
+        )
+    if not raw:
+        raise MatrixError(f'{where}: must not be empty')
+    try:
+        newest_first = sorted(raw, key=parse_spec_version, reverse=True)
+    except ValueError as e:
+        raise MatrixError(f'{where}: {e}') from None
+    if len(set(raw)) != len(raw):
+        raise MatrixError(f'{where}: lists a version twice: {raw}')
+    return tuple(newest_first)
 
 
 def _default_matrix_path() -> Path:

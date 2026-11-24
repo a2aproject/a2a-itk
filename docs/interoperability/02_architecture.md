@@ -41,7 +41,7 @@ Input: the resolved scenarios. Output: a running cluster and an `AgentTable` map
 `itk_runner._plan` takes the union of every agent identifier any scenario names, so each agent is started exactly once for the whole batch, and turns each into a `TargetSpec`:
 
 - `current` -> `Kind.MOUNT`. Served from `$ITK_MOUNT_DIR`, which is `/app/agents/repo/itk` in the container or whatever `--mount` points at.
-- anything else -> `Kind.CHECKOUT`. `matrix.yaml` gives the repo and ref; the ref is resolved to a 40-character SHA with `git ls-remote` right here, once per unique (repo, ref). A moving branch therefore cannot change under a run and mix versions between two peers that share an entry.
+- anything else -> `Kind.CHECKOUT`. `matrix.yaml` gives the repo and ref; the ref is resolved to a 40-character SHA with `git ls-remote` right here, once per unique (repo, ref). A moving branch therefore cannot change under a run and mix versions between two peers that share an entry. A ref that already is a 40-character SHA is used as it is, once the remote has confirmed that the commit exists.
 
 An identifier with a `_2`, `_3`... suffix (`python_v10_2`) is a second, independently ported instance of the same source, for scenarios that need two agents of the same SDK.
 
@@ -99,7 +99,7 @@ A disconnected edge list (two separate cycles) yields several circuits, each tra
 
 [`testlib.py`](../../testlib.py) serialises the instruction, base64-encodes it, and puts it in a file part of a `SendMessage` (or `SendStreamingMessage`) JSON-RPC request to the **first** agent in the scenario's `sdks` list, at `<card_uri>/jsonrpc`. ITK itself only ever speaks JSON-RPC to the entry agent; the transport under test is what the agents use between themselves.
 
-The request dialect is chosen from the first agent's identifier: an id containing `v03` gets an A2A 0.3 request (`message/send`, `kind: file`, `A2A-Version: 0.3`); anything else gets A2A 1.0 (`SendMessage`, `raw`/ `mediaType`, `A2A-Version: 1.0`). Putting a `v03` peer first is how a scenario tests the "0.3 client calling 1.0 server" direction.
+The request dialect is chosen from the first agent's `protocol_versions`, which come from its line in `matrix.yaml`; `current` is taken to speak 1.0 and 0.3. An agent whose newest version is 0.3 gets an A2A 0.3 request (`message/send`, `kind: file`, `A2A-Version: 0.3`); any other agent gets A2A 1.0 (`SendMessage`, `raw`/ `mediaType`, `A2A-Version: 1.0`). Putting a `v03` peer first is how a scenario tests the "0.3 client calling 1.0 server" direction.
 
 ### Behaviors
 

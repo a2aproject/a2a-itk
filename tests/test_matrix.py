@@ -99,6 +99,7 @@ class TestResolve:
         assert entry == MatrixEntry(
             sdk='python', line='v10',
             repo='a2aproject/a2a-python', ref='main',
+            protocol_versions=('1.0', '0.3'),
         )
 
     def test_second_instance_maps_to_same_entry(self, matrix):
@@ -285,6 +286,7 @@ class TestTransports:
     def test_supports_checks_every_requested_transport(self):
         entry = MatrixEntry(
             sdk='go', line='v03', repo='a/b', ref='x',
+            protocol_versions=('0.3',),
             transports=frozenset({'jsonrpc', 'grpc'}),
         )
         assert entry.supports(['jsonrpc']) is True
@@ -322,6 +324,71 @@ class TestTransports:
         }
         assert restricted == {
             'go_v03': ['grpc', 'jsonrpc'],
+        }
+
+
+def _line(line, **cfg):
+    """A one-line matrix, and that line's entry."""
+    matrix = Matrix.from_dict({'sdks': {'python': {line: {'repo': 'a/b', 'ref': 'main', **cfg}}}})
+    return matrix.resolve(f'python_{line}')
+
+
+class TestProtocolVersions:
+    """The A2A versions a line's agent speaks."""
+
+    @pytest.mark.parametrize(('line', 'versions'), [
+        ('v10', ('1.0', '0.3')),
+        ('v03', ('0.3',)),
+    ])
+    def test_a_v10_or_v03_line_has_a_default(self, line, versions):
+        assert _line(line).protocol_versions == versions
+
+    def test_an_explicit_list_is_read(self):
+        entry = _line('v11', protocol_versions=['1.1', '1.0', '0.3'])
+        assert entry.protocol_versions == ('1.1', '1.0', '0.3')
+
+    def test_an_explicit_list_replaces_the_default(self):
+        """An agent built from a `v10` line that does not speak 0.3 can say so."""
+        assert _line('v10', protocol_versions=['1.0']).protocol_versions == ('1.0',)
+
+    def test_is_kept_newest_first_however_it_is_written(self):
+        """Compared as numbers: as text, 1.10 would sort before 1.9."""
+        entry = _line('v11', protocol_versions=['0.3', '1.9', '1.10', '1.0'])
+        assert entry.protocol_versions == ('1.10', '1.9', '1.0', '0.3')
+
+    def test_a_line_with_no_default_has_to_list_its_versions(self):
+        """Nothing is read out of a line's name, so `v11` alone says nothing."""
+        with pytest.raises(MatrixError, match=r'sdks\.python\.v11\.protocol_versions: required'):
+            _line('v11')
+
+    @pytest.mark.parametrize(('raw', 'said'), [
+        ('1.1', 'must be a list of strings'),
+        ([1.1, 1.0], 'YAML reads a bare 1.0 as a number'),
+        ([], 'must not be empty'),
+        (['1.1', 'v1.0'], "'v1.0' is not an A2A version"),
+        (['1.1.0'], "'1.1.0' is not an A2A version"),
+        (['1.1', '1.0', '1.1'], 'lists a version twice'),
+    ])
+    def test_a_malformed_list_is_rejected(self, raw, said):
+        with pytest.raises(MatrixError, match=said):
+            _line('v11', protocol_versions=raw)
+
+    def test_the_repo_matrix_declares_what_every_line_speaks(self):
+        """What each line's agent serves. Pinned because nothing else checks
+        the file against the agents; update it when a line changes."""
+        declared = {
+            e.agent_id: e.protocol_versions for e in Matrix.from_default().entries()
+        }
+        assert declared == {
+            'dotnet_v10': ('1.0', '0.3'),
+            'go_v03': ('0.3',),
+            'go_v10': ('1.0', '0.3'),
+            'java_v10': ('1.0', '0.3'),
+            'python_v03': ('0.3',),
+            'python_v10': ('1.0', '0.3'),
+            'rust_v10': ('1.0',),
+            'ts_v03': ('0.3',),
+            'ts_v10': ('1.0', '0.3'),
         }
 
 

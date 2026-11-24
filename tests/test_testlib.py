@@ -22,7 +22,8 @@ from notifications_app import (
     _extract_task_id_v1,
     create_notifications_app,
 )
-from test_suite.agent_table import AgentTable
+from pyproto import instruction_pb2
+from test_suite.agent_table import AgentEndpoint, AgentTable
 from test_suite.launcher import config
 
 
@@ -133,6 +134,42 @@ class TestExtractTaskIdV10:
         }}
         assert testlib._read_v10_notif(event) == []
         assert testlib._read_v03_notif(event) == []
+
+
+class TestFirstRequestVersion:
+    """The first request is written in the dialect the entry agent speaks."""
+
+    @staticmethod
+    def _first_request(monkeypatch, entry, protocol_versions):
+        sent = {}
+
+        async def capture(http_client, target_url, json_rpc_request, headers):  # noqa: ARG001
+            sent.update(method=json_rpc_request['method'], version=headers['A2A-Version'])
+            return {}
+
+        monkeypatch.setattr(testlib, '_read_sync_response', capture)
+        monkeypatch.setattr(
+            test_suite, 'create_test_suite',
+            lambda *_a, **_kw: (instruction_pb2.Instruction(), []),
+        )
+        agents = AgentTable({entry: AgentEndpoint(8001, 9001, protocol_versions)})
+        asyncio.run(testlib._execute_single_itk_test(
+            sdks=[entry, 'other'], behavior='send_message', agents=agents,
+        ))
+        return sent
+
+    @pytest.mark.parametrize(('entry', 'protocol_versions', 'method', 'version'), [
+        ('python_v10', ('1.0', '0.3'), 'SendMessage', '1.0'),
+        ('python_v03', ('0.3',), 'message/send', '0.3'),
+        # The versions decide, not the name of the line.
+        ('python_v03', ('1.0', '0.3'), 'SendMessage', '1.0'),
+        ('python_v10', ('0.3',), 'message/send', '0.3'),
+    ])
+    def test_follows_the_versions_of_the_entry_agent(
+        self, monkeypatch, entry, protocol_versions, method, version,
+    ):
+        sent = self._first_request(monkeypatch, entry, protocol_versions)
+        assert sent == {'method': method, 'version': version}
 
 
 class TestExecuteItkTestExceptions:

@@ -105,11 +105,12 @@ sdks:
     v03: {repo: a2aproject/a2a-python, ref: "v0.3.24+itk"}
   go:
     v03: {repo: a2aproject/a2a-go, ref: "v0.3.15+itk", transports: [jsonrpc, grpc]}
-  dotnet:
-    v10: {repo: a2aproject/a2a-dotnet, ref: main}
+  rust:
+    v10: {repo: a2aproject/a2a-rs, ref: main, protocol_versions: ["1.0"]}
 ```
 
-- `ref` is resolved to a commit SHA when a run is planned. `main` means "whatever main is tonight", which is what the nightly wants; a tag pins the peer.
+- `ref` is resolved to a commit SHA when a run is planned. `main` means "whatever main is tonight", which is what the nightly wants. A tag or a full 40-character commit SHA pins the peer. A shortened SHA is not accepted.
+- `protocol_versions` lists the A2A versions the line's agent speaks. A `v10` line that omits it speaks 1.0 and 0.3, and a `v03` line speaks 0.3. Any other line has to list its versions, because nothing is read out of a line's name. The harness writes its first request as A2A 0.3 only to an agent that speaks nothing newer.
 - `v03` lines point at `+itk` tags: a released 0.3.x of the SDK with the ITK agent added under `itk/`. The 0.3 releases predate ITK, so the agent had to be grafted on.
 - `transports` is a **capability ceiling**: the line cannot speak anything not listed, to anyone. A peer drops out of a transport it cannot speak rather than failing the scenario. Omitted means all three.
 - `current` is not in this file. It is always the mounted checkout.

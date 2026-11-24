@@ -6,7 +6,8 @@
 # by (sdk, line). This file maps each (sdk, line) pair to the GitHub repo and
 # default ref to fetch. The service resolves the ref to a SHA at plan time via
 # `git ls-remote`, so a symbolic ref like `main` means "latest at run time"
-# (fine for nightly), while a tag or SHA pins the peer.
+# (fine for nightly), while a tag or a full 40-character commit SHA pins the
+# peer.
 #
 # Special case: "current" is the SUT and doesn't map through this file —
 # it's spawned via `Kind.MOUNT` from the container's bind mount.
@@ -20,6 +21,16 @@
 # explicitly or selected by the `peers: all` macro — a peer that cannot speak
 # a requested transport drops out of that transport's graph rather than
 # failing the traversal. Omitted means all three.
+#
+# `protocol_versions` lists the A2A versions the line's agent speaks. A `v10`
+# line that omits it speaks 1.0 and 0.3, and a `v03` line speaks 0.3. Any
+# other line has to list them. Quote each version: YAML reads a bare 1.0 as a
+# number.
+#
+# A line for an A2A version its SDK has not released yet, such as `v11`, is
+# pinned to a commit SHA, and a pull request here moves the pin. See "A line
+# for an A2A version not released yet" in
+# docs/interoperability/05_sdk-integration.md.
 
 sdks:
   python:
@@ -34,6 +45,6 @@ sdks:
   java:
     v10: {repo: a2aproject/a2a-java, ref: main}
   rust:
-    v10: {repo: a2aproject/a2a-rs, ref: main}
+    v10: {repo: a2aproject/a2a-rs, ref: main, protocol_versions: ["1.0"]}
   dotnet:
     v10: {repo: a2aproject/a2a-dotnet, ref: main}
