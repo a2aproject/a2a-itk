@@ -447,6 +447,44 @@ class TestGenerationOrdering:
         only_a_message = [normalize({'message': {'role': 'ROLE_AGENT'}}, 0)]
         assert check_generation(only_a_message, contiguous=True).ok
 
+    def test_an_event_of_an_unknown_kind_may_advance_the_generation(self):
+        """A server may send a kind added after this runner was written, and
+        that event may carry the next generation. The update after it is
+        checked for order, not for the step of one."""
+        unknown = normalize({'futureUpdate': {'taskId': 'T1', 'generation': '3'}}, 1)
+        assert check_generation([snapshot('2', 0), unknown, gen_status('4', 2)], contiguous=True).ok
+        result = check_generation([snapshot('2', 0), unknown, gen_status('2', 2)], contiguous=True)
+        assert 'not greater than the 2 already seen at event 0' in result.first.message
+
+    def test_a_gap_after_an_unknown_event_is_reported_at_the_next_update(self):
+        unknown = normalize({'futureUpdate': {'taskId': 'T1', 'generation': '3'}}, 1)
+        events = [snapshot('2', 0), unknown, gen_status('4', 2), gen_status('6', 3)]
+        result = check_generation(events, contiguous=True)
+        assert [f.path for f in result.failures] == ['events[3].generation']
+
+    def test_a_snapshot_that_jumps_ahead_fails_only_on_a_contiguous_stream(self):
+        """Every change is its own event, so on a stream that is sent every
+        event a snapshot cannot be ahead of the updates before it. Ahead, it
+        would hide the updates that were left out."""
+        events = [
+            snapshot('2', 0),
+            normalize({'artifactUpdate': {'taskId': 'T1', 'generation': '3'}}, 1),
+            snapshot('5', 2),
+        ]
+        assert check_generation(events).ok
+        result = check_generation(events, contiguous=True)
+        assert len(result.failures) == 1
+        failure = result.first
+        assert failure.path == 'events[2].generation'
+        assert (failure.expected, failure.actual) == (3, 5)
+        assert 'a snapshot repeats the latest generation' in failure.message
+
+    def test_a_snapshot_after_a_missing_generation_is_not_held_to_it(self):
+        """The missing value is reported once, at the event that lacks it."""
+        events = [gen_status('3', 0), gen_status(None, 1), snapshot('5', 2)]
+        result = check_generation(events, contiguous=True)
+        assert [f.path for f in result.failures] == ['events[1].generation']
+
     def test_a_stream_may_open_with_an_update(self):
         """A subscriber that resumes is not sent the task first."""
         events = [gen_status('7', 0), gen_status('8', 1)]

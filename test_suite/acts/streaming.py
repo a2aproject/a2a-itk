@@ -232,23 +232,29 @@ def check_generation(
       state of the task and is not a change to it.
 
     With ``contiguous`` each update must also be exactly one above the
-    latest generation before it. That holds only on a stream that is
-    sent every event: a subscriber that asked for A2A 1.0 is not sent message
-    updates, and sees a gap wherever a client message was added.
+    latest generation before it, and a snapshot after the first event may
+    not be above it. That holds only on a stream that is sent every event:
+    a subscriber that asked for A2A 1.0 is not sent message updates, and sees
+    a gap wherever a client message was added.
 
-    A `message` and an `error` carry no generation and are skipped, as is an
-    event of a kind this runner does not know.
+    A `message` and an `error` carry no generation and are skipped. An event
+    of a kind this runner does not know is skipped too, but it may have
+    advanced the generation, so the event after it is not checked for a gap.
     """
     result = AssertionResult()
     #: The greatest generation seen so far, and where.
     highest: int | None = None
     highest_index = -1
-    #: The event before this one had a generation that could not be read. The
-    #: update after it is not checked for a gap, so that one missing value is
-    #: reported once.
+    #: The event before this one had a generation that could not be read, or
+    #: was of a kind this runner does not know. The event after it is not
+    #: checked for a gap: a missing value is reported once, and an unknown
+    #: kind may have advanced the generation.
     after_unreadable = False
 
     for event in events:
+        if event.kind is None:
+            after_unreadable = True
+            continue
         if event.kind != 'task' and event.kind not in UPDATE_KINDS:
             continue
         snapshot = event.kind == 'task'
@@ -290,6 +296,13 @@ def check_generation(
                 path, 'ordering', f'greater than {highest}', generation,
                 f'{label} has generation {generation}, which is not greater '
                 f'than the {highest} already seen at event {highest_index}',
+            )
+        elif contiguous and snapshot and not after_unreadable and generation > highest:
+            result += _fail(
+                path, 'ordering', highest, generation,
+                f'{label} is at generation {generation}, but the latest before '
+                f'it was {highest}, at event {highest_index}; on a stream that '
+                f'misses no change a snapshot repeats the latest generation',
             )
         elif (
             contiguous

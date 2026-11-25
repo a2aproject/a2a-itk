@@ -113,9 +113,9 @@ An event of a kind the runner does not know is kept as it arrived and counts as 
 | --- | --- |
 | `monotonic_state` | a state returns to `SUBMITTED`, or anything follows a terminal state |
 | `monotonic_generation` | a status, artifact or message update has no `generation`, one below 1, or one that is not greater than every generation before it; or a task snapshot has one below 1 or lower than one before it. A snapshot may repeat the latest value |
-| `contiguous_generation` | any of the above, or an update is not exactly one above the latest generation before it. Only for a stream that is sent every event |
+| `contiguous_generation` | any of the above, or an update is not exactly one above the latest generation before it, or a snapshot after the first event is above it. Only for a stream that is sent every event |
 
-`message` and `error` events carry no generation and are skipped by the two generation rules.
+`message` and `error` events carry no generation and are skipped by the two generation rules. An event of a kind the runner does not know is skipped too, but it may have advanced the generation, so under `contiguous_generation` the event after it is checked for order and not for a gap.
 
 ### Assertions
 
