@@ -90,6 +90,11 @@ For each transport in the scenario:
 1. Find an Euler circuit over the scenario's edges - a walk that uses every directed edge exactly once and returns to the start. Hierholzer's algorithm does this; a plain DFS would skip edges that lead back to visited nodes. The graph must be balanced (in-degree equals out-degree at every node) or the scenario is rejected with a `ValueError`. Named topologies are balanced by construction.
 2. Walk the circuit backwards, wrapping each hop around the one after it. Hop `u -> v` becomes a `SeriesOfSteps` with two children: a `ReturnResponse` carrying the trace token `[u -> v (transport)]`, and a `CallAgent` telling `u` to fetch `v`'s agent card at `agent_card_uri`, call it over `transport`, and hand it the remaining instruction. The innermost instruction is a `ReturnResponse` with `traversal-completed:<transport>`.
 3. Record the expected tokens - every trace token plus the terminal one.
+4. Ask each agent that speaks A2A 1.1 to report the version it is called at. Its `ReturnResponse` nodes get `report_protocol_version`, and each of its expected tokens then ends in ` served:<version>`: the newest version that it and the agent calling it both speak, as `protocol_versions` in `matrix.yaml` says. This is how a traversal proves the version a hop was made at. The token `[u -> v (transport)]` is said by `u`, so the version with it is the one `u` was called at, not the version of the call from `u` to `v`. ITK makes the first call to the entry agent itself, so the entry agent is not asked for its first token. It is asked later in the circuit, when another agent calls it.
+
+No step that an agent speaking nothing newer than A2A 1.0 carries out has a field about versions set. A traversal among such agents is, byte for byte, the instruction it was before those fields existed. In a traversal that also has an agent speaking A2A 1.1, an older agent passes those fields on inside the instruction it hands to the next agent.
+
+The compiler can also force every hop to one A2A version: each `CallAgent` carried out by an agent that speaks A2A 1.1 gets that `protocol_version`, and the expected `served:` versions follow. No scenario asks for this yet.
 
 If the scenario lists several transports, one circuit per transport is built and all of them are concatenated into a single top-level `SeriesOfSteps`. This is why the shared sets split transports into separate scenarios: a bundled scenario fails as a whole and its name does not say which transport broke.
 
@@ -99,7 +104,7 @@ A disconnected edge list (two separate cycles) yields several circuits, each tra
 
 [`testlib.py`](../../testlib.py) serialises the instruction, base64-encodes it, and puts it in a file part of a `SendMessage` (or `SendStreamingMessage`) JSON-RPC request to the **first** agent in the scenario's `sdks` list, at `<card_uri>/jsonrpc`. ITK itself only ever speaks JSON-RPC to the entry agent; the transport under test is what the agents use between themselves.
 
-The request dialect is chosen from the first agent's `protocol_versions`, which come from its line in `matrix.yaml`; `current` is taken to speak 1.0 and 0.3. An agent whose newest version is 0.3 gets an A2A 0.3 request (`message/send`, `kind: file`, `A2A-Version: 0.3`); any other agent gets A2A 1.0 (`SendMessage`, `raw`/ `mediaType`, `A2A-Version: 1.0`). Putting a `v03` peer first is how a scenario tests the "0.3 client calling 1.0 server" direction.
+The request dialect is chosen from the first agent's `protocol_versions`, which come from its line in `matrix.yaml`; `current` is taken to speak 1.0 and 0.3. An agent whose newest version is 0.3 gets an A2A 0.3 request (`message/send`, `kind: file`, `A2A-Version: 0.3`). Any other agent gets the request of A2A 1.0 and later (`SendMessage`, `raw`/ `mediaType`), with its newest version as `A2A-Version`. Putting a `v03` peer first is how a scenario tests the "0.3 client calling 1.0 server" direction.
 
 ### Behaviors
 

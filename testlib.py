@@ -263,13 +263,15 @@ def _verify_send_message(
 
     logger.info('Test Result for %s: %s', label, full_response)
 
-    if all(token in full_response for token in expected_end_tokens):
+    missing = [token for token in expected_end_tokens if token not in full_response]
+    if not missing:
         logger.info('--- INTEGRATION TEST PASSED: %s ---', label)
         return True
 
     logger.error(
-        '--- INTEGRATION TEST FAILED: Verification tokens missing for %s ---',
+        '--- INTEGRATION TEST FAILED: Verification tokens missing for %s: %s ---',
         label,
+        missing,
     )
     return False
 
@@ -415,6 +417,7 @@ async def _execute_single_itk_test(  # noqa: PLR0913
     scenario_name: str | None = None,
     protocols: list[str] | None = None,
     streaming: bool = False,
+    hop_protocol_version: str | None = None,
 ) -> bool:
     """Executes a traversal test against an ALREADY RUNNING cluster.
 
@@ -426,6 +429,7 @@ async def _execute_single_itk_test(  # noqa: PLR0913
         scenario_name: Optional label for logging.
         protocols: Optional list of protocols to test.
         streaming: Whether to use streaming.
+        hop_protocol_version: The A2A version to force every hop to.
     """
     label = scenario_name or 'euler'
 
@@ -456,15 +460,18 @@ async def _execute_single_itk_test(  # noqa: PLR0913
             streaming=streaming,
             behavior=behavior,
             notification_server_url=notification_server_url,
+            hop_protocol_version=hop_protocol_version,
         )
 
         logger.info('Executing %s traversal test...', label)
         logger.info('Test instruction: %s', test_instruction)
         first_sdk = sdks[0]
         base_uri = agents.card_uri(first_sdk)
-        # The first request is written as A2A 0.3 only for an agent that
-        # speaks nothing newer.
-        is_v0 = agents[first_sdk].protocol_versions[0] == '0.3'
+        # The first request is sent at the newest A2A version the entry agent
+        # speaks. It is written as A2A 0.3 only for an agent that speaks
+        # nothing newer; every later version has the same request.
+        first_version = agents[first_sdk].protocol_versions[0]
+        is_v0 = first_version == '0.3'
 
         target_url = f'{base_uri.rstrip("/")}/jsonrpc'
 
@@ -509,11 +516,7 @@ async def _execute_single_itk_test(  # noqa: PLR0913
                 json_rpc_request['params']['configuration'],
             )
 
-        headers = {}
-        if is_v0:
-            headers['A2A-Version'] = '0.3'
-        else:
-            headers['A2A-Version'] = '1.0'
+        headers = {'A2A-Version': first_version}
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(15, read=120)) as http_client:
             if streaming:
@@ -600,6 +603,7 @@ async def execute_itk_test(  # noqa: PLR0913
     protocols: list[str] | None = None,
     streaming: bool = False,
     build_subtests: bool = False,
+    hop_protocol_version: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Executes a traversal test against an ALREADY RUNNING cluster, optionally expanding subtests."""
     label = scenario_name or 'euler'
@@ -614,6 +618,7 @@ async def execute_itk_test(  # noqa: PLR0913
                 scenario_name=label,
                 protocols=protocols,
                 streaming=streaming,
+                hop_protocol_version=hop_protocol_version,
             )
         except Exception as e:
             logger.exception('Test %s failed with exception: %s', label, e)
@@ -659,6 +664,7 @@ async def execute_itk_test(  # noqa: PLR0913
                 scenario_name=sub_name,
                 protocols=protocols,
                 streaming=streaming,
+                hop_protocol_version=hop_protocol_version,
             )
         except Exception as e:
             logger.exception('Subtest %s failed with exception: %s', sub_name, e)

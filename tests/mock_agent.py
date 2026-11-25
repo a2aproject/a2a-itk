@@ -233,6 +233,8 @@ class _Record:
     task: pb.Task
     behavior: str
     argument: str
+    #: The A2A version of the request that created the task.
+    version: tuple[int, int]
     #: Every mutation as the event that reported it, with its generation.
     #: What a subscriber resuming from a generation is replayed from.
     log: list[tuple[int, pb.StreamResponse]] = field(default_factory=list)
@@ -1223,7 +1225,7 @@ class MockAgent:
                     role=pb.ROLE_AGENT,
                     parts=[_text_part('a direct message response')],
                 )
-            record = self._create(context_id or str(uuid.uuid4()), behavior, argument)
+            record = self._create(context_id or str(uuid.uuid4()), behavior, argument, version)
 
         if push_config is not None:
             # Registered before the task changes, so that every change from
@@ -1270,11 +1272,13 @@ class MockAgent:
             )
         return self._find(task_id)
 
-    def _create(self, context_id: str, behavior: str, argument: str) -> _Record:
+    def _create(
+        self, context_id: str, behavior: str, argument: str, version: tuple[int, int]
+    ) -> _Record:
         task = pb.Task(id=str(uuid.uuid4()), context_id=context_id, generation=1)
         task.status.state = pb.TASK_STATE_SUBMITTED
         task.status.timestamp.GetCurrentTime()
-        record = _Record(task=task, behavior=behavior, argument=argument)
+        record = _Record(task=task, behavior=behavior, argument=argument, version=version)
         self._tasks[task.id] = record
         self._touch(record)
         return record
@@ -1741,7 +1745,8 @@ class MockAgent:
             instruction = instruction_pb2.Instruction.FromString(
                 _instruction_in(request.message)
             )
-            reply = '\n'.join(await self._carry_out(instruction))
+            major, minor = record.version
+            reply = '\n'.join(await self._carry_out(instruction, f'{major}.{minor}'))
         except Exception as exc:  # noqa: BLE001
             # Whatever went wrong, the agent that sent the instruction is
             # told. Left to end the behavior, it would leave the task working
@@ -1757,15 +1762,23 @@ class MockAgent:
         else:
             self._set_status(record, pb.TASK_STATE_COMPLETED, reply)
 
-    async def _carry_out(self, instruction: instruction_pb2.Instruction) -> list[str]:
-        """What the instruction makes this agent say, in order."""
+    async def _carry_out(
+        self, instruction: instruction_pb2.Instruction, served: str
+    ) -> list[str]:
+        """What the instruction makes this agent say, in order.
+
+        ``served`` is the A2A version of the request that carried it.
+        """
         step = instruction.WhichOneof('step')
         if step == 'return_response':
-            return [instruction.return_response.response]
+            response = instruction.return_response
+            if response.report_protocol_version:
+                return [f'{response.response} served:{served}']
+            return [response.response]
         if step == 'steps':
             said: list[str] = []
             for child in instruction.steps.instructions:
-                said += await self._carry_out(child)
+                said += await self._carry_out(child, served)
             return said
         if step == 'call_agent':
             return await self._call_agent(instruction.call_agent)
@@ -1818,8 +1831,9 @@ class MockAgent:
     async def _interface_of(self, call: instruction_pb2.CallAgent) -> tuple[str, str]:
         """The URL to call the agent at, and the A2A version to call it at.
 
-        The newest version that this agent serves and the other agent's card
-        lists for JSON-RPC.
+        The version the instruction asks for. When it asks for none, the
+        newest version that this agent serves and the other agent's card lists
+        for JSON-RPC.
         """
         card = (await self._client.get(f'{call.agent_card_uri.rstrip("/")}{CARD_PATH}')).json()
         listed = {
@@ -1827,11 +1841,14 @@ class MockAgent:
             for interface in card['supportedInterfaces']
             if interface['protocolBinding'] == 'JSONRPC'
         }
-        for major, minor in self.versions:
-            if f'{major}.{minor}' in listed:
-                return listed[f'{major}.{minor}'], f'{major}.{minor}'
+        wanted = [f'{major}.{minor}' for major, minor in self.versions]
+        if call.protocol_version:
+            wanted = [call.protocol_version]
+        for version in wanted:
+            if version in listed:
+                return listed[version], version
         raise InstructionError(
-            f'{call.agent_card_uri} lists no JSON-RPC interface for a version this agent speaks'
+            f'{call.agent_card_uri} lists no JSON-RPC interface for A2A {" or ".join(wanted)}'
         )
 
     async def _send_and_subscribe_again(

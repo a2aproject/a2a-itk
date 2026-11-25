@@ -39,7 +39,7 @@ The `behavior` on a `CallAgent` changes how the call is made:
 
 Trace tokens are just text the agent concatenates; it does not need to know what they mean.
 
-**Fields for A2A 1.1.** An agent that speaks A2A 1.1 also reads the fields below. The harness does not set them yet, so every agent receives the instructions it received before.
+**Fields for A2A 1.1.** An agent that speaks A2A 1.1 also reads the fields below. The harness sets the first two only on steps carried out by an agent whose line in `matrix.yaml` lists A2A 1.1. An agent that speaks 1.0 or 0.3 is asked nothing new, and a traversal among such agents is the instruction it was before. An agent has to keep these fields when it passes an instruction on, whatever it speaks itself: a traversal that mixes versions carries them through every agent. The harness does not set the last two fields yet.
 
 | Field | Agent does |
 | --- | --- |
