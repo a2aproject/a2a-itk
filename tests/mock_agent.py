@@ -24,13 +24,20 @@ Three things keep it honest as a fixture:
   a task for seconds and a test that polls it both take no real time, and the
   order of events does not depend on how fast the machine is.
 
-Only the JSON-RPC binding is served.
+It is also an ITK agent. A first message that names a `tck-*` behavior is
+played as ACTS defines it. A first message that carries an `itk.Instruction`
+is carried out instead: the agent replies with text, calls other agents, or
+does both in order.
+
+Only the JSON-RPC binding is served, and the agent calls other agents over
+JSON-RPC only.
 """
 
 from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import hashlib
 import json
 import re
@@ -44,6 +51,7 @@ import httpx
 from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
 
 from pyproto import a2a_pb2 as pb
+from pyproto import instruction_pb2
 
 
 _T = TypeVar('_T')
@@ -132,8 +140,15 @@ VALID_TOKEN = 'itk-valid-token'
 #: A token that authenticates and does not authorize.
 INSUFFICIENT_TOKEN = 'itk-insufficient-token'
 
+#: The media type of the message part that carries an ITK instruction.
+INSTRUCTION_MEDIA_TYPE = 'application/x-protobuf'
+
+#: What an agent that holds its task open ends its reply with. A caller that
+#: subscribes to the task again reads up to it and then has the whole reply.
+TASK_FINISHED = 'task-finished'
+
 #: Media types a message part may declare.
-INPUT_MODES = ('text/plain', 'application/json')
+INPUT_MODES = ('text/plain', 'application/json', INSTRUCTION_MEDIA_TYPE)
 
 VERSION_HEADER = 'A2A-Version'
 
@@ -178,6 +193,10 @@ PARSE_ERROR = ErrorKind(-32700)
 INVALID_REQUEST = ErrorKind(-32600)
 METHOD_NOT_FOUND = ErrorKind(-32601)
 INVALID_PARAMS = ErrorKind(-32602)
+
+
+class InstructionError(Exception):
+    """An ITK instruction that cannot be carried out. It fails the task."""
 
 
 class AgentError(Exception):
@@ -338,6 +357,54 @@ def _text_part(text: str) -> pb.Part:
     return pb.Part(text=text)
 
 
+def _instruction_in(message: pb.Message) -> bytes | None:
+    """The serialized ITK instruction a message carries, if it carries one."""
+    for part in message.parts:
+        if part.media_type == INSTRUCTION_MEDIA_TYPE:
+            return part.raw
+    return None
+
+
+def _holds(instruction: instruction_pb2.Instruction) -> bool:
+    """Does the instruction ask the agent to hold its own task open?
+
+    Only the replies the agent itself gives count, not the ones in an
+    instruction it passes on.
+    """
+    step = instruction.WhichOneof('step')
+    if step == 'return_response':
+        return instruction.return_response.hold_task
+    if step == 'steps':
+        return any(_holds(child) for child in instruction.steps.instructions)
+    return False
+
+
+def _agent_texts(reply: dict[str, Any]) -> list[str]:
+    """The text an agent says in one response or stream event.
+
+    A message the agent answers with, or the message of a task's status. A
+    client's message reported back on a stream is not the agent's text.
+    """
+    if 'message' in reply:
+        message = reply['message']
+    else:
+        update = reply.get('task') or reply.get('statusUpdate') or {}
+        message = update.get('status', {}).get('message', {})
+    return [part['text'] for part in message.get('parts', []) if 'text' in part]
+
+
+def _envelope(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    """A JSON-RPC call this agent makes."""
+    return {'jsonrpc': '2.0', 'id': str(uuid.uuid4()), 'method': method, 'params': params}
+
+
+def _result(method: str, body: dict[str, Any]) -> dict[str, Any]:
+    """The result of a JSON-RPC call this agent made."""
+    if 'error' in body:
+        raise InstructionError(f'{method} was refused: {body["error"].get("message")}')
+    return body['result']
+
+
 def _data_part(data: Any) -> pb.Part:
     part = pb.Part()
     ParseDict(data, part.data)
@@ -461,7 +528,7 @@ def _client_read_stream(operation: str, wire_stream: Any) -> Any:
 PushSender = Callable[[str, dict[str, str], dict[str, Any]], Awaitable[Any]]
 
 
-class FakeAgent:
+class MockAgent:
     """An A2A agent serving JSON-RPC, for one event loop.
 
     Use :meth:`handle` as an ``httpx.MockTransport`` handler.
@@ -479,6 +546,8 @@ class FakeAgent:
             on every operation. What `ITK_ACTS_AUTH` asks of a real agent.
         push_sender: Delivers one push notification: ``(url, headers, body)``.
             Without one the agent does not advertise push notifications.
+        client: What the agent calls other agents with when an instruction
+            tells it to. Without one such a call fails.
     """
 
     #: Seconds a request takes to arrive. On the virtual clock this is what
@@ -501,12 +570,14 @@ class FakeAgent:
         reduced_capabilities: bool = False,
         require_auth: bool = False,
         push_sender: PushSender | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
         self.base_url = base_url.rstrip('/')
         self.versions = tuple(sorted({_version(v) for v in versions}, reverse=True))
         self.reduced_capabilities = reduced_capabilities
         self.require_auth = require_auth
         self._push_sender = push_sender
+        self._client = client
 
         self._tasks: dict[str, _Record] = {}
         self._sequence = 0
@@ -568,10 +639,10 @@ class FakeAgent:
         """The public agent card."""
         optional = not self.reduced_capabilities
         card: dict[str, Any] = {
-            'name': 'ACTS fake agent',
+            'name': 'ACTS mock agent',
             'description': (
                 'An in-process agent that follows the A2A specification, for '
-                'testing the ACTS runner.'
+                'testing the ACTS runner and the traversal harness.'
             ),
             'version': '1.0.0',
             'supportedInterfaces': [
@@ -584,7 +655,7 @@ class FakeAgent:
             ],
             'capabilities': {
                 'streaming': optional,
-                'pushNotifications': optional and self._push_sender is not None,
+                'pushNotifications': self._pushes,
                 'extendedAgentCard': optional,
             },
             'defaultInputModes': list(INPUT_MODES),
@@ -808,7 +879,7 @@ class FakeAgent:
     async def send_message(
         self, request: pb.SendMessageRequest, version: tuple[int, int]
     ) -> pb.SendMessageResponse:
-        accepted = self._accept(request)
+        accepted = self._accept(request, version)
         if isinstance(accepted, pb.Message):
             return pb.SendMessageResponse(message=accepted)
 
@@ -828,7 +899,7 @@ class FakeAgent:
     ) -> _Stream:
         if self.reduced_capabilities:
             raise AgentError(UNSUPPORTED_OPERATION, 'this agent does not support streaming')
-        accepted = self._accept(request)
+        accepted = self._accept(request, version)
         if isinstance(accepted, pb.Message):
             return _Stream([pb.StreamResponse(message=accepted)], None, lambda: None)
 
@@ -941,9 +1012,9 @@ class FakeAgent:
         send = getattr(request, _LIVE_SEND)
         exchange = self._tasks.get(send.message.task_id) if send.HasField('message') else None
         if exchange is not None and any(s.live for s in exchange.subscribers):
-            return self._live_uplink(exchange, send)
+            return self._live_uplink(exchange, send, version)
 
-        accepted = self._accept(send)
+        accepted = self._accept(send, version)
         if isinstance(accepted, pb.Message):
             return _Stream([pb.StreamResponse(message=accepted)], None, lambda: None)
         # The snapshot that opens the downlink already has the message in it.
@@ -951,7 +1022,9 @@ class FakeAgent:
         self._hand_over(accepted, send)
         return stream
 
-    def _live_uplink(self, record: _Record, send: pb.SendMessageRequest) -> pb.Task:
+    def _live_uplink(
+        self, record: _Record, send: pb.SendMessageRequest, version: tuple[int, int]
+    ) -> pb.Task:
         """A later request of an open live exchange.
 
         Answered with the task as it is now. A request the agent does not
@@ -965,7 +1038,7 @@ class FakeAgent:
         try:
             if declined:
                 raise AgentError(INVALID_PARAMS, 'the agent declined this message, as asked')
-            self._hand_over(self._accept(send), send)
+            self._hand_over(self._accept(send, version), send)
         except AgentError as exc:
             rejection = pb.StreamResponse()
             rejection.error.task_id = record.task.id
@@ -1058,7 +1131,9 @@ class FakeAgent:
 
     # -- accepting a request ----------------------------------------------------
 
-    def _accept(self, request: pb.SendMessageRequest) -> _Record | pb.Message:
+    def _accept(
+        self, request: pb.SendMessageRequest, version: tuple[int, int]
+    ) -> _Record | pb.Message:
         """Validate a send and record it on the task it creates or continues.
 
         Returns the task, or a `Message` when the agent answers without one.
@@ -1068,6 +1143,23 @@ class FakeAgent:
         has_message = request.HasField('message')
         message = request.message
         updates = list(request.artifact_updates)
+        push_config = (
+            request.configuration.task_push_notification_config
+            if request.configuration.HasField('task_push_notification_config')
+            else None
+        )
+
+        if push_config is not None:
+            if not self._pushes:
+                raise AgentError(
+                    PUSH_NOTIFICATION_NOT_SUPPORTED,
+                    'this agent does not support push notifications',
+                )
+            if not push_config.url:
+                raise AgentError(
+                    INVALID_PARAMS,
+                    'Invalid parameters: a push notification config needs a url',
+                )
 
         if updates and not self._accepts_user_artifacts:
             raise AgentError(
@@ -1133,6 +1225,14 @@ class FakeAgent:
                 )
             record = self._create(context_id or str(uuid.uuid4()), behavior, argument)
 
+        if push_config is not None:
+            # Registered before the task changes, so that every change from
+            # here on is delivered.
+            config = pb.TaskPushNotificationConfig()
+            config.CopyFrom(push_config)
+            config.task_id = record.task.id
+            self.create_push_config(config, version)
+
         # The message first, then the artifacts in the order they were listed.
         if has_message:
             self._add_client_message(record, message)
@@ -1158,8 +1258,12 @@ class FakeAgent:
             )
         return record
 
+    @property
+    def _pushes(self) -> bool:
+        return not self.reduced_capabilities and self._push_sender is not None
+
     def _push_target(self, task_id: str) -> _Record:
-        if self.reduced_capabilities or self._push_sender is None:
+        if not self._pushes:
             raise AgentError(
                 PUSH_NOTIFICATION_NOT_SUPPORTED,
                 'this agent does not support push notifications',
@@ -1401,6 +1505,8 @@ class FakeAgent:
         """Run the task's behavior from its first request to its end."""
         first = await self._next_request(record)
         behavior = self.behaviors.get(record.behavior, self._complete)
+        if not record.behavior and _instruction_in(first.message) is not None:
+            behavior = self._follow_instruction
         try:
             if record.behavior and record.behavior not in self.behaviors:
                 # A message plainly meant for ACTS that names something this
@@ -1622,6 +1728,164 @@ class FakeAgent:
             answered += 1
             self._set_status(record, pb.TASK_STATE_WORKING, f'live-echo:{answered}')
 
+    # -- ITK instructions ---------------------------------------------------------
+    #
+    # What the agent does with a message that carries an instruction: reply
+    # with text, call another agent, or a series of both.
+
+    async def _follow_instruction(
+        self, record: _Record, request: pb.SendMessageRequest
+    ) -> None:
+        self._set_status(record, pb.TASK_STATE_WORKING)
+        try:
+            instruction = instruction_pb2.Instruction.FromString(
+                _instruction_in(request.message)
+            )
+            reply = '\n'.join(await self._carry_out(instruction))
+        except Exception as exc:  # noqa: BLE001
+            # Whatever went wrong, the agent that sent the instruction is
+            # told. Left to end the behavior, it would leave the task working
+            # and that agent waiting.
+            self._set_status(
+                record, pb.TASK_STATE_FAILED, f'the instruction failed: {exc!r}'
+            )
+            return
+        if _holds(instruction):
+            self._set_status(record, pb.TASK_STATE_WORKING, f'{reply}\n{TASK_FINISHED}')
+            # Nobody sets this. Canceling the task cancels the wait.
+            await asyncio.Event().wait()
+        else:
+            self._set_status(record, pb.TASK_STATE_COMPLETED, reply)
+
+    async def _carry_out(self, instruction: instruction_pb2.Instruction) -> list[str]:
+        """What the instruction makes this agent say, in order."""
+        step = instruction.WhichOneof('step')
+        if step == 'return_response':
+            return [instruction.return_response.response]
+        if step == 'steps':
+            said: list[str] = []
+            for child in instruction.steps.instructions:
+                said += await self._carry_out(child)
+            return said
+        if step == 'call_agent':
+            return await self._call_agent(instruction.call_agent)
+        raise InstructionError('the instruction names no step')
+
+    async def _call_agent(self, call: instruction_pb2.CallAgent) -> list[str]:
+        """Pass the nested instruction to another agent; return what it says.
+
+        An agent that fails says why, and that text is returned like any
+        other reply.
+        """
+        if self._client is None:
+            raise InstructionError('this agent was given nothing to call other agents with')
+        if call.transport != 'jsonrpc':
+            raise InstructionError(
+                f'this agent calls over jsonrpc only, not over {call.transport}'
+            )
+        behavior = call.WhichOneof('behavior') or 'send_message'
+        if behavior not in ('send_message', 'push_notification', 'resubscribe'):
+            raise InstructionError(f'this agent does not implement {behavior}')
+        if behavior == 'resubscribe' and not call.streaming:
+            raise InstructionError('subscribing again needs a streaming call')
+        if behavior == 'push_notification' and not call.push_notification.url:
+            raise InstructionError('push_notification names no url')
+        url, version = await self._interface_of(call)
+
+        request = pb.SendMessageRequest()
+        request.message.message_id = str(uuid.uuid4())
+        request.message.role = pb.ROLE_USER
+        request.message.parts.add(
+            raw=call.instruction.SerializeToString(),
+            media_type=INSTRUCTION_MEDIA_TYPE,
+            filename='instruction.bin',
+        )
+        if behavior == 'push_notification':
+            config = request.configuration.task_push_notification_config
+            config.url = f'{call.push_notification.url}/notifications'
+            config.token = 'itk-token'
+        params = MessageToDict(request)
+
+        if behavior == 'resubscribe':
+            return await self._send_and_subscribe_again(url, version, params)
+        if not call.streaming:
+            return _agent_texts(await self._rpc(url, version, 'SendMessage', params))
+        said: list[str] = []
+        async for event in self._rpc_stream(url, version, 'SendStreamingMessage', params):
+            said += _agent_texts(event)
+        return said
+
+    async def _interface_of(self, call: instruction_pb2.CallAgent) -> tuple[str, str]:
+        """The URL to call the agent at, and the A2A version to call it at.
+
+        The newest version that this agent serves and the other agent's card
+        lists for JSON-RPC.
+        """
+        card = (await self._client.get(f'{call.agent_card_uri.rstrip("/")}{CARD_PATH}')).json()
+        listed = {
+            interface.get('protocolVersion'): interface['url']
+            for interface in card['supportedInterfaces']
+            if interface['protocolBinding'] == 'JSONRPC'
+        }
+        for major, minor in self.versions:
+            if f'{major}.{minor}' in listed:
+                return listed[f'{major}.{minor}'], f'{major}.{minor}'
+        raise InstructionError(
+            f'{call.agent_card_uri} lists no JSON-RPC interface for a version this agent speaks'
+        )
+
+    async def _send_and_subscribe_again(
+        self, url: str, version: str, params: dict[str, Any]
+    ) -> list[str]:
+        """Start a stream, hang up after its first event, and subscribe again.
+
+        The other agent holds its task open, and marks the end of its reply
+        with `task-finished`. Once that has arrived the task is canceled.
+        """
+        opening = self._rpc_stream(url, version, 'SendStreamingMessage', params)
+        async with contextlib.aclosing(opening):
+            task = (await anext(opening, {})).get('task')
+        if task is None:
+            raise InstructionError('the stream did not open with the task')
+
+        subscribed = self._rpc_stream(url, version, 'SubscribeToTask', {'id': task['id']})
+        async with contextlib.aclosing(subscribed):
+            async for event in subscribed:
+                for text in _agent_texts(event):
+                    if text.endswith(TASK_FINISHED):
+                        await self._rpc(url, version, 'CancelTask', {'id': task['id']})
+                        return [text.removesuffix(f'\n{TASK_FINISHED}')]
+        raise InstructionError(f'task {task["id"]} ended before it had finished its reply')
+
+    async def _rpc(
+        self, url: str, version: str, method: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """One JSON-RPC call to another agent."""
+        response = await self._client.post(
+            url, headers={VERSION_HEADER: version}, json=_envelope(method, params)
+        )
+        return _result(method, response.json())
+
+    async def _rpc_stream(
+        self, url: str, version: str, method: str, params: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """The events of one streaming JSON-RPC call to another agent.
+
+        Close the generator to hang up.
+        """
+        async with self._client.stream(
+            'POST', url, headers={VERSION_HEADER: version}, json=_envelope(method, params)
+        ) as response:
+            if not response.headers.get('Content-Type', '').startswith('text/event-stream'):
+                refusal = json.loads(await response.aread())
+                raise InstructionError(
+                    f'{method} was not answered with a stream: '
+                    f'{refusal.get("error", {}).get("message", refusal)}'
+                )
+            async for line in response.aiter_lines():
+                if line.startswith('data: '):
+                    yield _result(method, json.loads(line.removeprefix('data: ')))
+
     # -- shutdown -----------------------------------------------------------------
 
     async def aclose(self) -> None:
@@ -1653,7 +1917,7 @@ __all__ = [
     'JSONRPC_PATH',
     'VALID_TOKEN',
     'AgentError',
-    'FakeAgent',
+    'MockAgent',
     'VirtualTimeLoop',
     'run_virtual',
 ]

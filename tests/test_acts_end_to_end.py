@@ -1,4 +1,4 @@
-"""The whole stack against a fake agent: pipeline, dispatcher, runner, assertions.
+"""The whole stack against a mock agent: pipeline, dispatcher, runner, assertions.
 
 Every other ACTS test isolates one layer. This one runs the *real* pipeline,
 the *real* JSON-RPC dispatcher and the *real* runner over the mirrored corpus,
@@ -12,7 +12,7 @@ shows the stack can recognize a conforming implementation, which is the thing
 a conformance runner is actually for. The broken-agent controls below show
 the other half: the same stack notices when the agent misbehaves.
 
-The agent is :class:`tests.acts_fake_agent.FakeAgent`. It keeps real task
+The agent is :class:`tests.mock_agent.MockAgent`. It keeps real task
 state and runs on virtual time, so a corpus that polls for seconds and holds
 tasks for seconds runs in well under one real second. Only the tested SUT is
 replaced: the webhook receiver is the real `notifications_app`, in process.
@@ -42,12 +42,12 @@ from test_suite.acts import report as report_writer
 from test_suite.acts.dispatcher import JsonRpcDispatcher
 from test_suite.acts.runner import VERSION_HEADER, Outcome, Runner, TestResult
 from test_suite.acts.schema import ErrorType, Operation, RunnerRequirement, TransportBinding
-from tests import acts_fake_agent
-from tests.acts_fake_agent import (
+from tests import mock_agent
+from tests.mock_agent import (
     CARD_PATH,
     UNSUPPORTED_OPERATION,
     AgentError,
-    FakeAgent,
+    MockAgent,
     VirtualTimeLoop,
     _Stream,
     run_virtual,
@@ -74,9 +74,9 @@ WEBHOOK = 'http://webhook.test'
 
 @pytest.fixture(scope='module')
 def behaviors_path(tmp_path_factory) -> Path:
-    """The fake agent's behavior contract, as the file an SDK would ship."""
-    path = tmp_path_factory.mktemp('fake-agent') / 'sut-behaviors.yaml'
-    path.write_text(FakeAgent().behaviors_file(), encoding='utf-8')
+    """The mock agent's behavior contract, as the file an SDK would ship."""
+    path = tmp_path_factory.mktemp('mock-agent') / 'sut-behaviors.yaml'
+    path.write_text(MockAgent().behaviors_file(), encoding='utf-8')
     return path
 
 
@@ -86,13 +86,13 @@ def conformance_run(
     spec_version: str = '1.0',
     test_ids: list[str] | None = None,
     suite_path: Path = CORPUS,
-    customize: Callable[[FakeAgent], None] | None = None,
+    customize: Callable[[MockAgent], None] | None = None,
     versions: tuple[str, ...] = ('1.0', '1.1'),
 ) -> acts_runner.ActsRun:
     """One conformance run over JSON-RPC, through `acts_runner.run`.
 
     The pass that starts a SUT, fetches its card and starts the webhook
-    receiver is replaced: the three SUTs are fake agents in this process,
+    receiver is replaced: the three SUTs are mock agents in this process,
     reached through a mock transport. Test selection, the dispatcher, the
     deviation passes and the splicing of their verdicts are the pipeline's
     own.
@@ -115,12 +115,12 @@ def conformance_run(
             return reply.json()['notifications']
 
         agents = {
-            MAIN: FakeAgent(base_url=MAIN, versions=versions, push_sender=push),
-            REDUCED: FakeAgent(
+            MAIN: MockAgent(base_url=MAIN, versions=versions, push_sender=push),
+            REDUCED: MockAgent(
                 base_url=REDUCED, versions=versions, push_sender=push,
                 reduced_capabilities=True,
             ),
-            AUTH: FakeAgent(
+            AUTH: MockAgent(
                 base_url=AUTH, versions=versions, push_sender=push, require_auth=True
             ),
         }
@@ -252,7 +252,7 @@ class TestAConformingAgentPasses:
         }
 
     def test_the_report_is_conformant(self, whole_corpus):
-        report = acts_runner.to_report(whole_corpus, sdk_name='fake-agent')
+        report = acts_runner.to_report(whole_corpus, sdk_name='mock-agent')
         assert report['summary']['passed'] == len(whole_corpus.results)
         assert report['summary']['total'] == len(whole_corpus.results)
         assert report['spec_version'] == '1.0'
@@ -323,7 +323,7 @@ class TestAConformingAgentPassesAt11:
         }
 
     def test_the_report_is_conformant(self, whole_corpus_at_1_1):
-        report = acts_runner.to_report(whole_corpus_at_1_1, sdk_name='fake-agent')
+        report = acts_runner.to_report(whole_corpus_at_1_1, sdk_name='mock-agent')
         assert report['spec_version'] == '1.1'
         assert report['environment']['interface_protocol_version'] == '1.1'
         ran = len(whole_corpus_at_1_1.results)
@@ -347,7 +347,7 @@ class TestABrokenAgentFails:
         return result
 
     def test_a_wrong_task_state_is_caught(self, behaviors_path):
-        def fail_instead_of_completing(agent: FakeAgent) -> None:
+        def fail_instead_of_completing(agent: MockAgent) -> None:
             agent.behaviors['tck-complete-task'] = agent.behaviors['tck-task-failure']
 
         result = self.run_one(behaviors_path, 'CORE-SEND-001', fail_instead_of_completing)
@@ -357,7 +357,7 @@ class TestABrokenAgentFails:
 
     def test_a_missing_error_is_caught(self, behaviors_path):
         """`CORE-ERR-001` expects `TaskNotFoundError` for an unknown task."""
-        def invent_the_task(agent: FakeAgent) -> None:
+        def invent_the_task(agent: MockAgent) -> None:
             async def get_task(params, version):
                 return {'id': params.get('id'), 'status': {'state': 'TASK_STATE_WORKING'}}
 
@@ -369,7 +369,7 @@ class TestABrokenAgentFails:
 
     def test_the_wrong_error_is_caught(self, behaviors_path):
         """An error is not enough; it has to be the one the test names."""
-        def refuse_with_another_error(agent: FakeAgent) -> None:
+        def refuse_with_another_error(agent: MockAgent) -> None:
             def find(task_id):
                 raise AgentError(UNSUPPORTED_OPERATION, 'this operation is not supported')
 
@@ -382,7 +382,7 @@ class TestABrokenAgentFails:
 
     def test_a_stream_that_regresses_is_caught(self, behaviors_path):
         """Nothing may return to SUBMITTED once the task has left it."""
-        def regress(agent: FakeAgent) -> None:
+        def regress(agent: MockAgent) -> None:
             async def stream_basic(record, request):
                 agent._set_status(record, pb.TASK_STATE_WORKING)
                 agent._set_status(record, pb.TASK_STATE_SUBMITTED)
@@ -399,7 +399,7 @@ class TestABrokenAgentFails:
         it uses produces an artifact, so one delivery is an artifact update.
         The receiver has to store that kind for the test to see it: a
         delivery it refused could be anything."""
-        def without_the_artifact_id(agent: FakeAgent) -> None:
+        def without_the_artifact_id(agent: MockAgent) -> None:
             post = agent._post
 
             def stripped(config, event):
@@ -419,7 +419,7 @@ class TestABrokenAgentFails:
 
     def test_a_notification_without_its_credential_is_caught(self, behaviors_path):
         """`SEC-PUSH-001` reads the delivery off the real receiver."""
-        def forget_the_credential(agent: FakeAgent) -> None:
+        def forget_the_credential(agent: MockAgent) -> None:
             send = agent._push_sender
 
             async def push(url, headers, body):
@@ -504,7 +504,7 @@ class TestTheRunVersionReachesTheAgent:
     def test_a_1_1_run_dials_the_1_1_interface_and_speaks_1_1(self, behaviors_path, probe):
         seen: list[str | None] = []
 
-        def record_versions(agent: FakeAgent) -> None:
+        def record_versions(agent: MockAgent) -> None:
             negotiate = agent._negotiate
 
             def recording(header):
@@ -520,7 +520,7 @@ class TestTheRunVersionReachesTheAgent:
         # Once from the operation the runner built, once from the raw step
         # that wrote the header itself.
         assert seen == ['1.1', '1.1']
-        report = acts_runner.to_report(run, sdk_name='fake-agent')
+        report = acts_runner.to_report(run, sdk_name='mock-agent')
         assert report['spec_version'] == '1.1'
         assert report['environment']['interface_protocol_version'] == '1.1'
 
@@ -713,7 +713,7 @@ class TestGenerationEndToEnd:
         }
 
     def test_a_generation_that_does_not_advance_is_caught(self, behaviors_path, probe):
-        def stand_still(agent: FakeAgent) -> None:
+        def stand_still(agent: MockAgent) -> None:
             agent._advance = lambda record: record.task.generation
 
         result = self.run(behaviors_path, probe, stand_still)['PROBE-GENERATION-ADVANCES']
@@ -724,7 +724,7 @@ class TestGenerationEndToEnd:
     def test_an_agent_without_generation_fails_on_the_assertion(self, behaviors_path, probe):
         """Reported as the missing generation, which is what the agent got
         wrong, and not as a value the step could not capture."""
-        def no_generation(agent: FakeAgent) -> None:
+        def no_generation(agent: MockAgent) -> None:
             view = agent._view
 
             def without(record, **kwargs):
@@ -745,7 +745,7 @@ class TestGenerationEndToEnd:
     ):
         """An agent that raises the generation once for a chunked artifact and
         reports every chunk at that value."""
-        def one_generation_for_all_chunks(agent: FakeAgent) -> None:
+        def one_generation_for_all_chunks(agent: MockAgent) -> None:
             add, advance = agent._add_artifact, agent._advance
 
             def add_chunk(record, chunk, *, append=False, **kwargs):
@@ -770,7 +770,7 @@ class TestGenerationEndToEnd:
     def test_a_1_1_subscriber_served_as_a_1_0_one_is_caught(self, behaviors_path, probe):
         """A client of A2A 1.0 is not sent message updates, so an agent that
         ignores the version a subscriber asked for leaves the update out."""
-        def as_1_0(agent: FakeAgent) -> None:
+        def as_1_0(agent: MockAgent) -> None:
             subscribe = agent.subscribe_to_task
             agent.subscribe_to_task = lambda request, version: subscribe(request, (1, 0))
 
@@ -785,7 +785,7 @@ class TestGenerationEndToEnd:
     def test_a_resume_that_starts_over_is_caught(self, behaviors_path, probe):
         """An agent that ignores the generation the client has and opens with
         the task again."""
-        def start_over(agent: FakeAgent) -> None:
+        def start_over(agent: MockAgent) -> None:
             subscribe = agent.subscribe_to_task
 
             def ignoring(request, version):
@@ -974,12 +974,12 @@ class TestVersionsAndTimingEndToEnd:
     def test_an_agent_that_ignores_the_generation_guard_is_caught(
         self, behaviors_path, probe
     ):
-        def ignore_the_guard(agent: FakeAgent) -> None:
+        def ignore_the_guard(agent: MockAgent) -> None:
             accept = agent._accept
 
-            def unguarded(request):
+            def unguarded(request, version):
                 request.configuration.ClearField('if_generation_match')
-                return accept(request)
+                return accept(request, version)
 
             agent._accept = unguarded
 
@@ -991,7 +991,7 @@ class TestVersionsAndTimingEndToEnd:
     def test_an_agent_that_does_not_hold_a_long_poll_is_caught(
         self, behaviors_path, probe
     ):
-        def answer_at_once(agent: FakeAgent) -> None:
+        def answer_at_once(agent: MockAgent) -> None:
             agent.long_poll_timeout_s = 0
 
         result = self.run(behaviors_path, probe, answer_at_once)['PROBE-HELD']
@@ -1007,7 +1007,7 @@ class TestVersionsAndTimingEndToEnd:
     ):
         """One that waits for the next change whatever generation the client
         has. The task changes nothing for eight seconds."""
-        def always_wait_for_a_change(agent: FakeAgent) -> None:
+        def always_wait_for_a_change(agent: MockAgent) -> None:
             get_task = agent.get_task
 
             async def waiting(request):
@@ -1030,7 +1030,7 @@ class TestVersionsAndTimingEndToEnd:
         self, behaviors_path, probe
     ):
         """As A2A 1.0 had it, and as 1.1 no longer does."""
-        def as_1_0(agent: FakeAgent) -> None:
+        def as_1_0(agent: MockAgent) -> None:
             stream = agent.send_streaming_message
             agent.send_streaming_message = lambda request, version: stream(request, (1, 0))
 
@@ -1040,7 +1040,7 @@ class TestVersionsAndTimingEndToEnd:
         assert 'the SUT closed the stream' in result.failure.message
 
     def test_an_agent_that_serves_any_version_is_caught(self, behaviors_path, probe):
-        def serve_anything(agent: FakeAgent) -> None:
+        def serve_anything(agent: MockAgent) -> None:
             agent._negotiate = lambda header: (1, 1)
 
         result = self.run(behaviors_path, probe, serve_anything)['PROBE-UNSUPPORTED-VERSION']
@@ -1054,7 +1054,7 @@ class TestVersionsAndTimingEndToEnd:
         as the run's 1.1 it would stay open, and the step would time out."""
         seen: list[str | None] = []
 
-        def record_versions(agent: FakeAgent) -> None:
+        def record_versions(agent: MockAgent) -> None:
             negotiate = agent._negotiate
 
             def recording(header):
@@ -1255,7 +1255,7 @@ class TestBackgroundStepsEndToEnd:
     def test_a_subscriber_that_is_not_sent_the_message_is_caught(
         self, behaviors_path, probe
     ):
-        def as_1_0(agent: FakeAgent) -> None:
+        def as_1_0(agent: MockAgent) -> None:
             subscribe = agent.subscribe_to_task
             agent.subscribe_to_task = lambda request, version: subscribe(request, (1, 0))
 
@@ -1267,7 +1267,7 @@ class TestBackgroundStepsEndToEnd:
         assert result.failure.message == 'events[0]: no event among the 2 received matched'
 
     def test_a_read_that_is_not_held_is_caught(self, behaviors_path, probe):
-        def answer_at_once(agent: FakeAgent) -> None:
+        def answer_at_once(agent: MockAgent) -> None:
             agent.long_poll_timeout_s = 0
 
         result = self.run(behaviors_path, probe, answer_at_once)['PROBE-WOKEN']
@@ -1279,7 +1279,7 @@ class TestBackgroundStepsEndToEnd:
     def test_a_read_that_the_change_does_not_wake_is_caught(self, behaviors_path, probe):
         """An agent that holds the read for its full patience whatever
         happens to the task, and answers with what it had at the start."""
-        def sleep_through(agent: FakeAgent) -> None:
+        def sleep_through(agent: MockAgent) -> None:
             get_task = agent.get_task
 
             async def stale(request):
@@ -1299,7 +1299,7 @@ class TestBackgroundStepsEndToEnd:
     def test_a_stream_that_closes_when_the_task_waits_is_caught(
         self, behaviors_path, probe
     ):
-        def as_1_0(agent: FakeAgent) -> None:
+        def as_1_0(agent: MockAgent) -> None:
             stream = agent.send_streaming_message
             agent.send_streaming_message = lambda request, version: stream(request, (1, 0))
 
@@ -1466,7 +1466,7 @@ class TestDeliveriesAndClientStreamsEndToEnd:
         """The message update is delivered after the first status update, so a
         step that stopped at the first delivery would not see it. The receiver
         has to store it as well: one it refused could not be asserted on."""
-        def deliver_every_kind(agent: FakeAgent) -> None:
+        def deliver_every_kind(agent: MockAgent) -> None:
             create = agent.create_push_config
 
             def as_1_1(config, version):
@@ -1489,7 +1489,7 @@ class TestDeliveriesAndClientStreamsEndToEnd:
         self, behaviors_path, probe
     ):
         """The delivery the step reads up to never comes."""
-        def stop_delivering_at_the_end(agent: FakeAgent) -> None:
+        def stop_delivering_at_the_end(agent: MockAgent) -> None:
             post = agent._post
 
             def all_but_completed(config, event):
@@ -1515,7 +1515,7 @@ class TestDeliveriesAndClientStreamsEndToEnd:
                 for item in wire_stream
             ]}
 
-        monkeypatch.setattr(acts_fake_agent, '_client_read_stream', strict)
+        monkeypatch.setattr(mock_agent, '_client_read_stream', strict)
         results = self.run(behaviors_path, probe)
         result = results['PROBE-CLIENT-SKIPS-UNKNOWN']
         assert result.result is Outcome.FAIL
@@ -1526,7 +1526,7 @@ class TestDeliveriesAndClientStreamsEndToEnd:
     def test_a_client_that_ends_the_stream_at_a_rejection_is_caught(
         self, behaviors_path, probe, monkeypatch
     ):
-        read = acts_fake_agent._client_read_stream
+        read = mock_agent._client_read_stream
 
         def stop_at_error(operation, wire_stream):
             surfaced = read(operation, wire_stream)['events']
@@ -1535,7 +1535,7 @@ class TestDeliveriesAndClientStreamsEndToEnd:
             )
             return {'events': surfaced[: at + 1]}
 
-        monkeypatch.setattr(acts_fake_agent, '_client_read_stream', stop_at_error)
+        monkeypatch.setattr(mock_agent, '_client_read_stream', stop_at_error)
         results = self.run(behaviors_path, probe)
         result = results['PROBE-CLIENT-READS-A-LIVE-DOWNLINK']
         assert result.result is Outcome.FAIL
@@ -1643,10 +1643,10 @@ class TestLiveExchangesEndToEnd:
         """It takes every call for one that opens an exchange. The message
         still reaches the task, so the downlink looks right; what is wrong
         is the answer to the call."""
-        def always_open(agent: FakeAgent) -> None:
-            def as_a_new_exchange(record, send):
-                agent._hand_over(agent._accept(send), send)
-                return agent._follow(record, (1, 1), [agent._snapshot(record)], live=True)
+        def always_open(agent: MockAgent) -> None:
+            def as_a_new_exchange(record, send, version):
+                agent._hand_over(agent._accept(send, version), send)
+                return agent._follow(record, version, [agent._snapshot(record)], live=True)
 
             agent._live_uplink = as_a_new_exchange
 
@@ -1657,11 +1657,11 @@ class TestLiveExchangesEndToEnd:
         assert 'with an event stream' in result.failure.message
 
     def test_an_agent_that_acknowledges_with_another_task_is_caught(self, behaviors_path):
-        def another_task(agent: FakeAgent) -> None:
+        def another_task(agent: MockAgent) -> None:
             uplink = agent._live_uplink
 
-            def renamed(record, send):
-                task = uplink(record, send)
+            def renamed(record, send, version):
+                task = uplink(record, send, version)
                 task.id = 'some-other-task'
                 return task
 
@@ -1674,7 +1674,7 @@ class TestLiveExchangesEndToEnd:
     def test_an_agent_that_does_not_answer_on_the_downlink_is_caught(self, behaviors_path):
         """It takes the messages and echoes none. The request held for the
         second echo is never sent, and the step says so."""
-        def silent(agent: FakeAgent) -> None:
+        def silent(agent: MockAgent) -> None:
             async def never_echoes(record, request):
                 agent._set_status(record, pb.TASK_STATE_WORKING)
                 while True:
@@ -1695,7 +1695,7 @@ class TestLiveExchangesEndToEnd:
 
     def test_a_downlink_that_does_not_open_with_the_task_is_caught(self, behaviors_path):
         """The requests of the test name the task the first event gives."""
-        def no_snapshot(agent: FakeAgent) -> None:
+        def no_snapshot(agent: MockAgent) -> None:
             follow = agent._follow
 
             def without_first(record, version, first, *, live=False):
@@ -1711,7 +1711,7 @@ class TestLiveExchangesEndToEnd:
     def test_an_agent_that_opens_an_exchange_for_a_task_it_does_not_have_is_caught(
         self, behaviors_path
     ):
-        def any_task(agent: FakeAgent) -> None:
+        def any_task(agent: MockAgent) -> None:
             subscribe = agent.subscribe_to_task
 
             def lenient(request, version, *, live=False):
@@ -1746,8 +1746,8 @@ class TestLiveExchangesEndToEnd:
     def test_an_agent_that_never_reports_the_rejection_is_caught(
         self, behaviors_path, probe
     ):
-        def swallow(agent: FakeAgent) -> None:
-            agent._live_uplink = lambda record, send: agent._view(record)
+        def swallow(agent: MockAgent) -> None:
+            agent._live_uplink = lambda record, send, version: agent._view(record)
 
         result = self.run_one(
             behaviors_path, 'PROBE-LIVE-DECLINED', swallow, suite_path=probe
@@ -1758,13 +1758,13 @@ class TestLiveExchangesEndToEnd:
     def test_a_rejection_that_moves_the_task_on_is_caught(self, behaviors_path, probe):
         """A rejected request does not change the task, so the generation
         must not move: the events after it would otherwise skip a value."""
-        def counts_it(agent: FakeAgent) -> None:
+        def counts_it(agent: MockAgent) -> None:
             uplink = agent._live_uplink
 
-            def advancing(record, send):
+            def advancing(record, send, version):
                 if send.message.message_id == 'probe-declined':
                     agent._advance(record)
-                return uplink(record, send)
+                return uplink(record, send, version)
 
             agent._live_uplink = advancing
 
@@ -1776,7 +1776,7 @@ class TestLiveExchangesEndToEnd:
 
 
 # ---------------------------------------------------------------------------
-# What the fake agent does at A2A 1.1
+# What the mock agent does at A2A 1.1
 # ---------------------------------------------------------------------------
 #
 # These read the agent's 1.1 behavior through the real dispatcher, one piece
@@ -1795,12 +1795,12 @@ def message(text: str, **fields: Any) -> dict[str, Any]:
 
 
 def play(
-    scenario: Callable[[FakeAgent, JsonRpcDispatcher], Awaitable[Any]], **agent_kwargs: Any
+    scenario: Callable[[MockAgent, JsonRpcDispatcher], Awaitable[Any]], **agent_kwargs: Any
 ) -> Any:
     """Run ``scenario`` against a fresh agent, on virtual time."""
 
     async def go() -> Any:
-        agent = FakeAgent(**agent_kwargs)
+        agent = MockAgent(**agent_kwargs)
         client = httpx.AsyncClient(transport=httpx.MockTransport(agent.handle))
         dispatcher = JsonRpcDispatcher(
             agent.jsonrpc_url, rpc_path='/', client=client, agent_card_url=agent.base_url
@@ -1846,7 +1846,7 @@ def kinds(events: list[dict]) -> list[str]:
     return [next(iter(event)) for event in events]
 
 
-class TestTheFakeAgentAt11:
+class TestTheMockAgentAt11:
     def test_every_mutation_is_one_event_one_generation_higher(self):
         async def scenario(agent, dispatcher):
             stream = dispatcher.stream(
@@ -1950,7 +1950,7 @@ class TestTheFakeAgentAt11:
 
         task, reply, waited = play(scenario)
         assert reply['generation'] == task['generation']
-        assert waited == pytest.approx(FakeAgent.long_poll_timeout_s, abs=0.1)
+        assert waited == pytest.approx(MockAgent.long_poll_timeout_s, abs=0.1)
 
     def test_a_client_message_is_reported_to_a_1_1_subscriber_only(self):
         async def scenario(agent, dispatcher):
@@ -2131,8 +2131,52 @@ class TestWhatTheCorpusDoesNotReachOverJsonRpc:
 
     The extended card's credential check is tested by the corpus over REST
     only. `CORE-LIST-002` asks for a listing without artifacts of a task that
-    has none, so it passes whether or not the agent leaves them out.
+    has none, so it passes whether or not the agent leaves them out. No test
+    sends a push notification config together with a message.
     """
+
+    @staticmethod
+    async def _no_delivery(*_delivery: Any) -> None:
+        pass
+
+    @pytest.mark.parametrize('headers', [AT_1_0, AT_1_1])
+    def test_a_push_config_sent_with_a_message_is_for_the_version_of_the_request(
+        self, headers
+    ):
+        async def scenario(agent, dispatcher):
+            sent = await send(
+                dispatcher, 'tck-complete-task', headers,
+                configuration={'taskPushNotificationConfig': {'url': f'{WEBHOOK}/notifications'}},
+            )
+            task_id = sent.payload['task']['id']
+            listed = await dispatcher.dispatch(
+                Operation.LIST_PUSH_CONFIGS, {'taskId': task_id}, headers
+            )
+            return task_id, listed.payload['configs']
+
+        task_id, (config,) = play(scenario, push_sender=self._no_delivery)
+        assert config['taskId'] == task_id
+        assert config['protocolVersion'] == headers[VERSION_HEADER]
+
+    @pytest.mark.parametrize(('config', 'agent_kwargs', 'error'), [
+        ({'url': f'{WEBHOOK}/notifications'}, {}, ErrorType.PUSH_NOTIFICATION_NOT_SUPPORTED),
+        ({'token': 't'}, {'push_sender': _no_delivery}, ErrorType.INVALID_PARAMS),
+    ])
+    def test_a_push_config_the_agent_cannot_take_refuses_the_message_and_leaves_no_task(
+        self, config, agent_kwargs, error
+    ):
+        async def scenario(agent, dispatcher):
+            context = str(uuid.uuid4())
+            refused = await send(
+                dispatcher, 'tck-complete-task', AT_1_0, contextId=context,
+                configuration={'taskPushNotificationConfig': config},
+            )
+            listed = await dispatcher.dispatch(Operation.LIST_TASKS, {'contextId': context}, AT_1_0)
+            return refused, listed.payload['tasks']
+
+        refused, tasks = play(scenario, **agent_kwargs)
+        assert refused.error.error_type is error
+        assert tasks == []
 
     def test_the_extended_card_is_shown_only_to_an_authenticated_client(self):
         async def scenario(agent, dispatcher):
