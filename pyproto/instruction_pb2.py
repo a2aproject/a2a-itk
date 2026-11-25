@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11instruction.proto\x12\x03itk\"\x90\x01\n\x0bInstruction\x12$\n\ncall_agent\x18\x01 \x01(\x0b\x32\x0e.itk.CallAgentH\x00\x12.\n\x0freturn_response\x18\x02 \x01(\x0b\x32\x13.itk.ReturnResponseH\x00\x12#\n\x05steps\x18\x03 \x01(\x0b\x32\x12.itk.SeriesOfStepsH\x00\x42\x06\n\x04step\"\x15\n\x13SendMessageBehavior\"\'\n\x18PushNotificationBehavior\x12\x0b\n\x03url\x18\x01 \x01(\t\"\x15\n\x13ResubscribeBehavior\"\x9b\x02\n\tCallAgent\x12\x11\n\ttransport\x18\x01 \x01(\t\x12\x16\n\x0e\x61gent_card_uri\x18\x02 \x01(\t\x12%\n\x0binstruction\x18\x03 \x01(\x0b\x32\x10.itk.Instruction\x12\x11\n\tstreaming\x18\x04 \x01(\x08\x12\x30\n\x0csend_message\x18\x05 \x01(\x0b\x32\x18.itk.SendMessageBehaviorH\x00\x12:\n\x11push_notification\x18\x06 \x01(\x0b\x32\x1d.itk.PushNotificationBehaviorH\x00\x12/\n\x0bresubscribe\x18\x07 \x01(\x0b\x32\x18.itk.ResubscribeBehaviorH\x00\x42\n\n\x08\x62\x65havior\"5\n\x0eReturnResponse\x12\x10\n\x08response\x18\x01 \x01(\t\x12\x11\n\thold_task\x18\x02 \x01(\x08\"\xd1\x01\n\rSeriesOfSteps\x12&\n\x0cinstructions\x18\x01 \x03(\x0b\x32\x10.itk.Instruction\x12@\n\x12response_generator\x18\x02 \x01(\x0e\x32$.itk.SeriesOfSteps.ResponseGenerator\"V\n\x11ResponseGenerator\x12\"\n\x1eRESPONSE_GENERATOR_UNSPECIFIED\x10\x00\x12\x1d\n\x19RESPONSE_GENERATOR_CONCAT\x10\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11instruction.proto\x12\x03itk\"\x90\x01\n\x0bInstruction\x12$\n\ncall_agent\x18\x01 \x01(\x0b\x32\x0e.itk.CallAgentH\x00\x12.\n\x0freturn_response\x18\x02 \x01(\x0b\x32\x13.itk.ReturnResponseH\x00\x12#\n\x05steps\x18\x03 \x01(\x0b\x32\x12.itk.SeriesOfStepsH\x00\x42\x06\n\x04step\"\x15\n\x13SendMessageBehavior\"A\n\x18PushNotificationBehavior\x12\x0b\n\x03url\x18\x01 \x01(\t\x12\x18\n\x10protocol_version\x18\x02 \x01(\t\"8\n\x13ResubscribeBehavior\x12!\n\x19\x66rom_last_seen_generation\x18\x01 \x01(\x08\"G\n\x13LiveMessageBehavior\x12\x12\n\nfollow_ups\x18\x01 \x01(\x05\x12\x1c\n\x14\x66oreign_task_request\x18\x02 \x01(\x08\"%\n\x15UserArtifactsBehavior\x12\x0c\n\x04text\x18\x01 \x01(\t\"*\n\x11MultiTurnBehavior\x12\x15\n\rstale_attempt\x18\x01 \x01(\x08\"\x12\n\x10LongPollBehavior\"\xf7\x03\n\tCallAgent\x12\x11\n\ttransport\x18\x01 \x01(\t\x12\x16\n\x0e\x61gent_card_uri\x18\x02 \x01(\t\x12%\n\x0binstruction\x18\x03 \x01(\x0b\x32\x10.itk.Instruction\x12\x11\n\tstreaming\x18\x04 \x01(\x08\x12\x30\n\x0csend_message\x18\x05 \x01(\x0b\x32\x18.itk.SendMessageBehaviorH\x00\x12:\n\x11push_notification\x18\x06 \x01(\x0b\x32\x1d.itk.PushNotificationBehaviorH\x00\x12/\n\x0bresubscribe\x18\x07 \x01(\x0b\x32\x18.itk.ResubscribeBehaviorH\x00\x12\x30\n\x0clive_message\x18\x08 \x01(\x0b\x32\x18.itk.LiveMessageBehaviorH\x00\x12\x34\n\x0euser_artifacts\x18\t \x01(\x0b\x32\x1a.itk.UserArtifactsBehaviorH\x00\x12,\n\nmulti_turn\x18\n \x01(\x0b\x32\x16.itk.MultiTurnBehaviorH\x00\x12*\n\tlong_poll\x18\x0b \x01(\x0b\x32\x15.itk.LongPollBehaviorH\x00\x12\x18\n\x10protocol_version\x18\x0c \x01(\tB\n\n\x08\x62\x65havior\"|\n\x0eReturnResponse\x12\x10\n\x08response\x18\x01 \x01(\t\x12\x11\n\thold_task\x18\x02 \x01(\x08\x12\x1f\n\x17report_protocol_version\x18\x03 \x01(\x08\x12\x0f\n\x07hold_ms\x18\x04 \x01(\x05\x12\x13\n\x0b\x61wait_input\x18\x05 \x01(\x08\"\xd1\x01\n\rSeriesOfSteps\x12&\n\x0cinstructions\x18\x01 \x03(\x0b\x32\x10.itk.Instruction\x12@\n\x12response_generator\x18\x02 \x01(\x0e\x32$.itk.SeriesOfSteps.ResponseGenerator\"V\n\x11ResponseGenerator\x12\"\n\x1eRESPONSE_GENERATOR_UNSPECIFIED\x10\x00\x12\x1d\n\x19RESPONSE_GENERATOR_CONCAT\x10\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -36,15 +36,23 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_SENDMESSAGEBEHAVIOR']._serialized_start=173
   _globals['_SENDMESSAGEBEHAVIOR']._serialized_end=194
   _globals['_PUSHNOTIFICATIONBEHAVIOR']._serialized_start=196
-  _globals['_PUSHNOTIFICATIONBEHAVIOR']._serialized_end=235
-  _globals['_RESUBSCRIBEBEHAVIOR']._serialized_start=237
-  _globals['_RESUBSCRIBEBEHAVIOR']._serialized_end=258
-  _globals['_CALLAGENT']._serialized_start=261
-  _globals['_CALLAGENT']._serialized_end=544
-  _globals['_RETURNRESPONSE']._serialized_start=546
-  _globals['_RETURNRESPONSE']._serialized_end=599
-  _globals['_SERIESOFSTEPS']._serialized_start=602
-  _globals['_SERIESOFSTEPS']._serialized_end=811
-  _globals['_SERIESOFSTEPS_RESPONSEGENERATOR']._serialized_start=725
-  _globals['_SERIESOFSTEPS_RESPONSEGENERATOR']._serialized_end=811
+  _globals['_PUSHNOTIFICATIONBEHAVIOR']._serialized_end=261
+  _globals['_RESUBSCRIBEBEHAVIOR']._serialized_start=263
+  _globals['_RESUBSCRIBEBEHAVIOR']._serialized_end=319
+  _globals['_LIVEMESSAGEBEHAVIOR']._serialized_start=321
+  _globals['_LIVEMESSAGEBEHAVIOR']._serialized_end=392
+  _globals['_USERARTIFACTSBEHAVIOR']._serialized_start=394
+  _globals['_USERARTIFACTSBEHAVIOR']._serialized_end=431
+  _globals['_MULTITURNBEHAVIOR']._serialized_start=433
+  _globals['_MULTITURNBEHAVIOR']._serialized_end=475
+  _globals['_LONGPOLLBEHAVIOR']._serialized_start=477
+  _globals['_LONGPOLLBEHAVIOR']._serialized_end=495
+  _globals['_CALLAGENT']._serialized_start=498
+  _globals['_CALLAGENT']._serialized_end=1001
+  _globals['_RETURNRESPONSE']._serialized_start=1003
+  _globals['_RETURNRESPONSE']._serialized_end=1127
+  _globals['_SERIESOFSTEPS']._serialized_start=1130
+  _globals['_SERIESOFSTEPS']._serialized_end=1339
+  _globals['_SERIESOFSTEPS_RESPONSEGENERATOR']._serialized_start=1253
+  _globals['_SERIESOFSTEPS_RESPONSEGENERATOR']._serialized_end=1339
 # @@protoc_insertion_point(module_scope)
