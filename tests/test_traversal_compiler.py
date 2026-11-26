@@ -75,6 +75,8 @@ class TestAgentsThatSpeakNothingNewer:
         'push_notification': '2f5c1a54b26ca1b6e38b3657fce4793ea5f4ef611bf2a1385c43391158cf1f1f',
         'resubscribe': '2955279c3b1e11f63de07bee71f48256564323d450f53e3150e42335ce065e0c',
     }
+    # Resuming needs A2A 1.1. Among older agents it is `resubscribe`.
+    BEFORE['resubscribe_from_generation'] = BEFORE['resubscribe']
     ALL = ['jsonrpc', 'grpc', 'http_json']
     SCENARIOS = {
         'send_message': {'protocols': ALL},
@@ -86,6 +88,11 @@ class TestAgentsThatSpeakNothingNewer:
             'notification_server_url': 'http://127.0.0.1:7000',
         },
         'resubscribe': {'protocols': ALL, 'behavior': 'resubscribe', 'streaming': True},
+        'resubscribe_from_generation': {
+            'protocols': ALL,
+            'behavior': 'resubscribe_from_generation',
+            'streaming': True,
+        },
     }
 
     @pytest.mark.parametrize('forced', [None, '1.0'])
@@ -186,6 +193,106 @@ class TestReportingTheVersion:
         instruction, tokens = build(table(a=('1.1',), b=V03))
         assert [h['reports'] for h in hops(instruction)] == [False, False, False]
         assert not [token for token in tokens if 'served:' in token]
+
+
+def calls(instruction: instruction_pb2.Instruction) -> dict[str, instruction_pb2.CallAgent]:
+    """The call of every hop of a circuit, by `caller->callee`."""
+    found = {}
+    while instruction.WhichOneof('step') == 'steps':
+        said, call = instruction.steps.instructions
+        caller, callee = re.fullmatch(
+            r'\[(\S+) -> (\S+) \(\w+\)\]', said.return_response.response
+        ).groups()
+        found[f'{caller}->{callee}'] = call.call_agent
+        instruction = call.call_agent.instruction
+    return found
+
+
+class TestWhatACallAt11Asks:
+    """Two fields ask the calling agent for something A2A 1.1 added to a
+    request. Only a call made at 1.1 can carry it."""
+
+    #: `current` calls `a` at 1.0, `a` calls `b` at 1.1, `b` calls `current` at 1.0.
+    AGENTS = {'current': V10, 'a': V11, 'b': V11}
+    RING = ['0->1', '1->2', '2->0']
+
+    def test_a_push_config_is_asked_to_name_the_version_of_the_call(self):
+        instruction, _ = build(
+            table(**self.AGENTS), edges=self.RING,
+            behavior='push_notification', notification_server_url='http://127.0.0.1:7000',
+        )
+        assert {
+            hop: call.push_notification.protocol_version
+            for hop, call in calls(instruction).items()
+        } == {'current->a': '', 'a->b': '1.1', 'b->current': ''}
+
+    def test_the_version_a_push_config_names_is_the_one_of_its_call(self):
+        """Not 1.1 as such: two agents that speak a later version call each
+        other at it, and the config is for that version."""
+        later = ('1.2', '1.1', '1.0')
+        instruction, _ = build(
+            table(a=later, b=later, c=V11), edges=['0->1', '1->2', '2->0'],
+            behavior='push_notification', notification_server_url='http://127.0.0.1:7000',
+        )
+        assert {
+            hop: call.push_notification.protocol_version
+            for hop, call in calls(instruction).items()
+        } == {'a->b': '1.2', 'b->c': '1.1', 'c->a': '1.1'}
+
+    def test_a_forced_version_is_the_one_a_push_config_names(self):
+        """Two agents that would call each other at 1.2 are forced to 1.1."""
+        later = ('1.2', '1.1', '1.0')
+        instruction, _ = build(
+            table(a=later, b=later), hop_protocol_version='1.1',
+            behavior='push_notification', notification_server_url='http://127.0.0.1:7000',
+        )
+        assert {
+            hop: (call.protocol_version, call.push_notification.protocol_version)
+            for hop, call in calls(instruction).items()
+        } == {'a->b': ('1.1', '1.1'), 'b->a': ('1.1', '1.1')}
+
+    @pytest.mark.parametrize('behavior', ['send_message', 'resubscribe'])
+    def test_a_forced_version_is_not_read_where_no_field_needs_it(self, behavior):
+        """It is passed on as it is. Checking it is the job of whoever sets it."""
+        instruction, _ = build(
+            table(a=V11, b=V11), hop_protocol_version='latest',
+            behavior=behavior, streaming=True,
+        )
+        assert {call.protocol_version for call in calls(instruction).values()} == {'latest'}
+
+    def test_a_subscription_is_resumed_when_the_behavior_asks_for_it(self):
+        instruction, _ = build(
+            table(**self.AGENTS), edges=self.RING,
+            behavior='resubscribe_from_generation', streaming=True,
+        )
+        found = calls(instruction)
+        assert {
+            hop: call.resubscribe.from_last_seen_generation for hop, call in found.items()
+        } == {'current->a': False, 'a->b': True, 'b->current': False}
+        # Every call subscribes again, resumed or not.
+        assert all(call.WhichOneof('behavior') == 'resubscribe' for call in found.values())
+
+    def test_plain_resubscribe_resumes_nothing(self):
+        instruction, _ = build(
+            table(a=V11, b=V11), behavior='resubscribe', streaming=True
+        )
+        assert not [
+            hop for hop, call in calls(instruction).items()
+            if call.resubscribe.from_last_seen_generation
+        ]
+
+    @pytest.mark.parametrize(('behavior', 'extra'), [
+        ('push_notification', {'notification_server_url': 'http://127.0.0.1:7000'}),
+        ('resubscribe_from_generation', {'streaming': True}),
+    ])
+    def test_a_call_forced_to_an_older_version_asks_for_neither(self, behavior, extra):
+        instruction, _ = build(
+            table(a=V11, b=V11), behavior=behavior, hop_protocol_version='1.0', **extra
+        )
+        for call in calls(instruction).values():
+            assert call.protocol_version == '1.0'
+            assert call.push_notification.protocol_version == ''
+            assert not call.resubscribe.from_last_seen_generation
 
 
 class TestForcingTheVersion:

@@ -39,16 +39,16 @@ The `behavior` on a `CallAgent` changes how the call is made:
 
 Trace tokens are just text the agent concatenates; it does not need to know what they mean.
 
-**Fields for A2A 1.1.** An agent that speaks A2A 1.1 also reads the fields below. The harness sets the first two only on steps carried out by an agent whose line in `matrix.yaml` lists A2A 1.1. An agent that speaks 1.0 or 0.3 is asked nothing new, and a traversal among such agents is the instruction it was before. An agent has to keep these fields when it passes an instruction on, whatever it speaks itself: a traversal that mixes versions carries them through every agent. The harness does not set the last two fields yet.
+**Fields for A2A 1.1.** An agent that speaks A2A 1.1 also reads the fields below. The harness sets them only on steps carried out by an agent whose line in `matrix.yaml` lists A2A 1.1, and the last two only on a call made at A2A 1.1 or later. An agent that speaks 1.0 or 0.3 is asked nothing new, and a traversal among such agents is the instruction it was before. An agent has to keep these fields when it passes an instruction on, whatever it speaks itself: a traversal that mixes versions carries them through every agent.
 
 | Field | Agent does |
 | --- | --- |
 | `CallAgent.protocol_version` | Use the interface of the called agent's card that lists this version for `transport`, and send the version as `A2A-Version`. Fail the call when the card lists no such interface. When the field is empty, use the version the SDK negotiates |
 | `ReturnResponse.report_protocol_version` | Follow `response` with a space and `served:<version>`, where `<version>` is the `A2A-Version` of the request the agent is answering, or `0.3` when the request carries none. This is how a scenario proves the version a hop was made at |
-| `PushNotificationBehavior.protocol_version` | Put this version in the push notification config registered for the call |
-| `ResubscribeBehavior.from_last_seen_generation` | Subscribe again from the last generation seen on the first stream, and accept a stream that starts with the task or one that continues from that generation |
+| `PushNotificationBehavior.protocol_version` | Put this version in the push notification config registered for the call, as `protocolVersion`. When the field is empty, leave it out of the config |
+| `ResubscribeBehavior.from_last_seen_generation` | Subscribe again with `lastSeenGeneration` set to the last generation seen on the first stream. Accept a stream that continues from that generation and one that opens with the task again: the called agent may do either |
 
-The proto also defines four behaviors that need A2A 1.1 at both ends of a call. The harness does not send these either.
+The proto also defines four behaviors that need A2A 1.1 at both ends of a call. The harness does not send these yet.
 
 | Behavior | Calling agent | Called agent |
 | --- | --- | --- |

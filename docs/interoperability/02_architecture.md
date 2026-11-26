@@ -96,6 +96,11 @@ No step that an agent speaking nothing newer than A2A 1.0 carries out has a fiel
 
 The compiler can also force every hop to one A2A version: each `CallAgent` carried out by an agent that speaks A2A 1.1 gets that `protocol_version`, and the expected `served:` versions follow. No scenario asks for this yet.
 
+Two more fields ask the calling agent for something A2A 1.1 added to a request, and are set only on a call made at A2A 1.1 or later:
+
+- With `push_notification`, the call names its version for the push notification config it registers (`PushNotificationBehavior.protocol_version`).
+- With `resubscribe_from_generation`, the call resumes its second subscription from the last generation it saw (`ResubscribeBehavior.from_last_seen_generation`). A scenario in the legacy format can name this behavior. The shared format cannot yet. On a call made at an older version it is `resubscribe`.
+
 If the scenario lists several transports, one circuit per transport is built and all of them are concatenated into a single top-level `SeriesOfSteps`. This is why the shared sets split transports into separate scenarios: a bundled scenario fails as a whole and its name does not say which transport broke.
 
 A disconnected edge list (two separate cycles) yields several circuits, each traversed in turn.
@@ -113,6 +118,7 @@ The request dialect is chosen from the first agent's `protocol_versions`, which 
 | `send_message` | Calls the next agent and returns its reply concatenated with its own trace token | The final JSON-RPC result (or the joined SSE stream when `streaming: true`) must contain every expected token |
 | `push_notification` | Same, but every agent also registers a push notification config pointing at ITK's mock receiver and pushes its status updates there | ITK starts [`notifications_app.py`](../../notifications_app.py) on a free port for the scenario, then reads `GET /notifications` and checks both the final text and that every intermediate state was pushed - proof that each hop pushed, not just the last one |
 | `resubscribe` | Streaming only. The caller starts a stream, reads the task id, disconnects, resubscribes to the task, then cancels it. `hold_task` keeps every task in `WORKING` so there is something to resubscribe to | Same token check as `send_message` on the aggregated stream |
+| `resubscribe_from_generation` | As `resubscribe`. On a call made at A2A 1.1 or later the caller also passes the generation of the task it read as `lastSeenGeneration` when it resubscribes. The called agent may continue from that generation or open with the task again | Same token check. It shows that the caller reaches the end of the task, not which of the two the called agent did |
 
 Streaming reads use SSE and stop as soon as every expected token has been seen, so a stream the agent keeps open after completing does not stall the run. The HTTP read timeout is 120 s, but an SSE keep-alive resets it, so on its own it cannot end a hop that is stuck. Each traversal (a scenario, or one subtest) therefore also runs under a deadline, `ITK_SCENARIO_TIMEOUT` (60 s by default): when it expires the scenario is logged as `did not finish within Ns (ITK_SCENARIO_TIMEOUT)`, recorded as failed, and the run moves on to the next one.
 
