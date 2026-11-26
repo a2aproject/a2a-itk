@@ -8,6 +8,16 @@ from test_suite.versions import parse_spec_version
 
 _END_OF_TRAVERSAL_TOKEN = 'traversal-completed'  # noqa: S105
 
+# The behaviors that subscribe again. The second one also resumes the new
+# subscription from the last generation the caller saw. Resuming needs A2A
+# 1.1, so on a call made at an older version the two are the same.
+_RESUBSCRIBE = ('resubscribe', 'resubscribe_from_generation')
+
+
+def _since_1_1(version: str | None) -> bool:
+    """Is ``version`` A2A 1.1 or later?"""
+    return version is not None and parse_spec_version(version) >= (1, 1)
+
 
 def _speaks_1_1(agents: AgentTable, agent_id: str) -> bool:
     """Does the agent speak A2A 1.1 or newer?
@@ -17,7 +27,23 @@ def _speaks_1_1(agents: AgentTable, agent_id: str) -> bool:
     An older agent still passes on the ones in the instruction it hands to
     the next agent.
     """
-    return parse_spec_version(agents.protocol_versions(agent_id)[0]) >= (1, 1)
+    return _since_1_1(agents.protocol_versions(agent_id)[0])
+
+
+def _call_version(
+    agents: AgentTable, caller: str, callee: str, forced: str | None
+) -> str | None:
+    """The A2A version the call from ``caller`` to ``callee`` is made at.
+
+    The forced one when the caller reads it from the instruction, and
+    otherwise the newest version both speak, which is what a caller
+    negotiates. ``None`` when they speak no version in common: the call
+    cannot be made at all.
+    """
+    if forced and _speaks_1_1(agents, caller):
+        return forced
+    theirs = agents.protocol_versions(callee)
+    return next((v for v in agents.protocol_versions(caller) if v in theirs), None)
 
 
 def _served(
@@ -25,23 +51,14 @@ def _served(
 ) -> str | None:
     """The A2A version the agent at ``position`` of the circuit reports.
 
-    That is the version it is called at: the forced one when the agent that
-    calls it reads it from the instruction, and otherwise the newest version
-    both speak, which is what a caller negotiates.
-
-    ``None`` when the agent is not asked to report. The harness calls the
-    first agent itself. An agent that does not speak A2A 1.1 does not read
-    the request to report. Two agents with no version in common cannot make
-    the call at all.
+    That is the version it is called at. ``None`` when the agent is not asked
+    to report: the harness calls the first agent itself, and an agent that
+    does not speak A2A 1.1 does not read the request to report.
     """
     callee = circuit[position]
     if position == 0 or not _speaks_1_1(agents, callee):
         return None
-    caller = circuit[position - 1]
-    if forced and _speaks_1_1(agents, caller):
-        return forced
-    theirs = agents.protocol_versions(callee)
-    return next((v for v in agents.protocol_versions(caller) if v in theirs), None)
+    return _call_version(agents, circuit[position - 1], callee, forced)
 
 
 def _say(
@@ -184,7 +201,7 @@ def _traversal_to_instruction(  # noqa: PLR0913
         f'{_END_OF_TRAVERSAL_TOKEN}:{transport}',
         _served(agents, circuit, len(circuit) - 1, hop_protocol_version),
     )
-    hold_task = behavior == 'resubscribe'
+    hold_task = behavior in _RESUBSCRIBE
     current_inst.return_response.hold_task = hold_task
     trace_tokens = []
 
@@ -216,20 +233,29 @@ def _traversal_to_instruction(  # noqa: PLR0913
         call_step.call_agent.streaming = streaming
         call_step.call_agent.instruction.CopyFrom(current_inst)
 
+        # Two fields ask the calling agent for something A2A 1.1 added to a
+        # request. They are set only on a call made at 1.1 or later, which
+        # also means that the agent making it reads them.
+        version = _call_version(agents, u, v, hop_protocol_version)
+
         if behavior == 'push_notification':
             call_step.call_agent.push_notification.CopyFrom(
                 instruction_pb2.PushNotificationBehavior(
                     url=notification_server_url
                 )
             )
+            if _since_1_1(version):
+                call_step.call_agent.push_notification.protocol_version = version
         elif behavior == 'send_message':
             call_step.call_agent.send_message.CopyFrom(
                 instruction_pb2.SendMessageBehavior()
             )
-        elif behavior == 'resubscribe':
+        elif behavior in _RESUBSCRIBE:
             call_step.call_agent.resubscribe.CopyFrom(
                 instruction_pb2.ResubscribeBehavior()
             )
+            if behavior == 'resubscribe_from_generation' and _since_1_1(version):
+                call_step.call_agent.resubscribe.from_last_seen_generation = True
         if hop_protocol_version and _speaks_1_1(agents, u):
             call_step.call_agent.protocol_version = hop_protocol_version
 
@@ -259,6 +285,10 @@ def create_test_suite(  # noqa: PLR0913
     so a traversal among such agents is the instruction it was before those
     fields existed.
 
+    A call made at A2A 1.1 also names that version for the push notification
+    config it registers, and with ``resubscribe_from_generation`` it resumes
+    the second subscription from the last generation the caller saw.
+
     Args:
         sdks: Agent identifiers taking part, traversal start first.
         agents: Where this run's agents are listening, and what they speak.
@@ -267,7 +297,9 @@ def create_test_suite(  # noqa: PLR0913
         edges: Optional explicit edges; a complete digraph when omitted.
         protocols: Transports to build a circuit for; all three when omitted.
         streaming: Whether hops stream.
-        behavior: What each hop asks the next agent to do.
+        behavior: What each hop asks the next agent to do: ``send_message``,
+            ``push_notification``, ``resubscribe`` or
+            ``resubscribe_from_generation``.
         notification_server_url: Where push notifications are POSTed.
         hop_protocol_version: The A2A version every call is made at, for the
             agents that speak A2A 1.1. ``None`` leaves each call to the

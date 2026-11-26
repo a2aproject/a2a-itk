@@ -423,7 +423,8 @@ async def _execute_single_itk_test(  # noqa: PLR0913
 
     Args:
         sdks: List of SDK identifiers to include in the test.
-        behavior: The behavior to test ('send_message' or 'push_notification').
+        behavior: The behavior to test: 'send_message', 'push_notification',
+            'resubscribe' or 'resubscribe_from_generation'.
         agents: Where this run's agents are listening.
         edges: Optional custom edges.
         scenario_name: Optional label for logging.
@@ -544,7 +545,7 @@ async def _execute_single_itk_test(  # noqa: PLR0913
                 test_result = _verify_send_message(
                     result, expected_end_tokens, label
                 )
-            elif behavior == 'resubscribe':
+            elif behavior in ('resubscribe', 'resubscribe_from_generation'):
                 test_result = _verify_send_message(
                     result,
                     expected_end_tokens,

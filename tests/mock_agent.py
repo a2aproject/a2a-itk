@@ -1817,10 +1817,13 @@ class MockAgent:
             config = request.configuration.task_push_notification_config
             config.url = f'{call.push_notification.url}/notifications'
             config.token = 'itk-token'
+            config.protocol_version = call.push_notification.protocol_version
         params = MessageToDict(request)
 
         if behavior == 'resubscribe':
-            return await self._send_and_subscribe_again(url, version, params)
+            return await self._send_and_subscribe_again(
+                url, version, params, resume=call.resubscribe.from_last_seen_generation
+            )
         if not call.streaming:
             return _agent_texts(await self._rpc(url, version, 'SendMessage', params))
         said: list[str] = []
@@ -1852,12 +1855,17 @@ class MockAgent:
         )
 
     async def _send_and_subscribe_again(
-        self, url: str, version: str, params: dict[str, Any]
+        self, url: str, version: str, params: dict[str, Any], *, resume: bool
     ) -> list[str]:
         """Start a stream, hang up after its first event, and subscribe again.
 
         The other agent holds its task open, and marks the end of its reply
         with `task-finished`. Once that has arrived the task is canceled.
+
+        With ``resume`` the second subscription names the generation of the
+        task the first stream opened with. The other agent may then continue
+        from that generation or open with the task again, and the reply is
+        read from either.
         """
         opening = self._rpc_stream(url, version, 'SendStreamingMessage', params)
         async with contextlib.aclosing(opening):
@@ -1865,7 +1873,10 @@ class MockAgent:
         if task is None:
             raise InstructionError('the stream did not open with the task')
 
-        subscribed = self._rpc_stream(url, version, 'SubscribeToTask', {'id': task['id']})
+        subscription = {'id': task['id']}
+        if resume:
+            subscription['lastSeenGeneration'] = task['generation']
+        subscribed = self._rpc_stream(url, version, 'SubscribeToTask', subscription)
         async with contextlib.aclosing(subscribed):
             async for event in subscribed:
                 for text in _agent_texts(event):

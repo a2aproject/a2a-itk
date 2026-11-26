@@ -32,7 +32,7 @@ What each SDK's `itk/scenarios.json` used before the shared sets. Agents are nam
 | --- | --- | --- |
 | `name` | yes | Result key. Must be unique within a run |
 | `sdks` | yes | Agent identifiers. Index 0 is where the traversal starts |
-| `behavior` | yes | `send_message`, `push_notification` or `resubscribe` |
+| `behavior` | yes | `send_message`, `push_notification`, `resubscribe` or `resubscribe_from_generation` |
 | `protocols` | no | Transports to walk, one circuit each in the same scenario. Default: all three |
 | `edges` | no | Directed edges as `"i->j"`. Default: complete digraph |
 | `streaming` | no | Stream every hop. Default `false` |

@@ -78,6 +78,18 @@ class _Network(httpx.AsyncBaseTransport):
             if request.method == 'POST' and str(request.url).startswith(agent.jsonrpc_url)
         ]
 
+    def params_sent_to(self, agent: MockAgent, method: str) -> list[dict[str, Any]]:
+        """The params of every call of ``method`` an agent received."""
+        return [
+            body['params']
+            for body in (
+                json.loads(request.content)
+                for request in self.requests
+                if request.method == 'POST' and str(request.url).startswith(agent.jsonrpc_url)
+            )
+            if body['method'] == method
+        ]
+
 
 class _Cluster:
     """Mock agents on one network, and the table the harness finds them in."""
@@ -143,6 +155,7 @@ def traverse(
     hop_protocol_version: str | None = None,
     calls: dict[str, list[tuple[str, str]]] | None = None,
     build_subtests: bool = False,
+    sent: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
 ) -> bool:
     """One traversal through `testlib.execute_itk_test`. Did it pass?
 
@@ -151,8 +164,10 @@ def traverse(
     receiver it starts is the real application, served on that network.
 
     ``calls``, when given, is filled with the JSON-RPC calls each agent
-    received: method and A2A version, in order. With ``build_subtests`` the
-    scenario is run once for every subset of its agents, and all have to pass.
+    received: method and A2A version, in order. ``sent``, when given, is
+    filled with the params of those calls, by agent and then by method. With
+    ``build_subtests`` the scenario is run once for every subset of its
+    agents, and all have to pass.
     """
 
     async def scenario(cluster: _Cluster) -> bool:
@@ -183,6 +198,10 @@ def traverse(
             calls.update({
                 name: cluster.network.calls_to(agent) for name, agent in cluster.agents.items()
             })
+        if sent is not None:
+            for name, agent in cluster.agents.items():
+                methods = {method for method, _ in cluster.network.calls_to(agent)}
+                sent[name] = {m: cluster.network.params_sent_to(agent, m) for m in methods}
         return all(result['passed'] for result in results.values())
 
     return in_a_cluster(scenario, versions, customize)
@@ -455,6 +474,85 @@ class TestTheVersionOfEachCall:
         assert calls['only_1_1'] == []
 
 
+class TestWhatACallAt11Asks:
+    """A call made at A2A 1.1 names its version for the push notification
+    config, and can resume a subscription from a generation. The harness asks
+    an agent for either only on such a call."""
+
+    def test_a_push_config_names_1_1_only_where_the_call_is_made_at_1_1(self):
+        sent: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        assert traverse('push_notification', versions=MIXED, sent=sent)
+
+        def named(agent: str) -> list[str]:
+            return sorted(
+                params['configuration']['taskPushNotificationConfig'].get('protocolVersion', '')
+                for params in sent[agent]['SendMessage']
+            )
+
+        # Each agent is called twice: by the harness or the other newer agent,
+        # and by the older agent, whose config names no version.
+        assert named('python_v11') == ['', '1.1']
+        assert named('ts_v10') == ['', '']
+        # The harness opens the traversal itself, and names no version.
+        assert named('current') == ['', '', '1.1']
+
+    @pytest.mark.parametrize(('behavior', 'resumed'), [
+        ('resubscribe_from_generation', True),
+        ('resubscribe', False),
+    ])
+    def test_a_subscription_is_resumed_only_when_the_behavior_asks(self, behavior, resumed):
+        sent: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        versions = dict.fromkeys(SDKS, ('1.0', '1.1'))
+        assert traverse(behavior, streaming=True, versions=versions, sent=sent)
+        subscriptions = [
+            params for agent in SDKS for params in sent[agent].get('SubscribeToTask', [])
+        ]
+        assert len(subscriptions) == 6
+        assert ['lastSeenGeneration' in params for params in subscriptions] == [resumed] * 6
+
+    def test_a_subscription_to_an_older_agent_is_not_resumed(self):
+        sent: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        assert traverse(
+            'resubscribe_from_generation', streaming=True, versions=MIXED, sent=sent
+        )
+        resumed = {
+            agent: sorted('lastSeenGeneration' in p for p in sent[agent]['SubscribeToTask'])
+            for agent in MIXED
+        }
+        # Each newer agent is subscribed to twice: once by the other newer
+        # agent, which resumes, and once by the older one, which does not.
+        assert resumed == {
+            'current': [False, True], 'python_v11': [False, True], 'ts_v10': [False, False],
+        }
+
+    def test_a_resumed_subscription_may_be_answered_with_the_task_again(self):
+        """An agent may ignore the generation and open with the task. The
+        traversal reaches the end of every task either way."""
+        def start_over(agents: dict[str, MockAgent]) -> None:
+            for agent in agents.values():
+                subscribe = agent.subscribe_to_task
+
+                def from_the_start(request, version, *, subscribe=subscribe, **kwargs):
+                    request.ClearField('last_seen_generation')
+                    return subscribe(request, version, **kwargs)
+
+                agent.subscribe_to_task = from_the_start
+
+        versions = dict.fromkeys(SDKS, ('1.0', '1.1'))
+        assert traverse(
+            'resubscribe_from_generation', streaming=True, versions=versions,
+            customize=start_over,
+        )
+
+    def test_among_older_agents_it_is_plain_resubscribe(self):
+        sent: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        assert traverse('resubscribe_from_generation', streaming=True, sent=sent)
+        assert not [
+            params for agent in SDKS for params in sent[agent]['SubscribeToTask']
+            if 'lastSeenGeneration' in params
+        ]
+
+
 class TestATraversalThatDidNotWorkFails:
     """Each agent here breaks one thing. The harness has to notice."""
 
@@ -648,6 +746,51 @@ class TestAnInstruction:
         (config,) = in_a_cluster(scenario)
         assert config['url'] == 'http://127.0.0.1:7000/notifications'
         assert config['token'] == 'itk-token'
+
+    @pytest.mark.parametrize(('asked', 'stored'), [('1.1', '1.1'), ('1.0', '1.0'), ('', '1.1')])
+    def test_a_push_config_carries_the_version_the_instruction_names(self, asked, stored):
+        """With none named, the called agent takes the version of the call."""
+        async def scenario(cluster: _Cluster) -> tuple[dict[str, Any], dict[str, Any]]:
+            other = cluster.agents['ts_v10']
+            await ask(cluster, 'current', calling(
+                other, saying('x'),
+                push_notification={'url': 'http://127.0.0.1:7000', 'protocol_version': asked},
+            ))
+            (params,) = cluster.network.params_sent_to(other, 'SendMessage')
+            (task,) = (await call(cluster, 'ts_v10', 'ListTasks', {}))['tasks']
+            (config,) = (await call(
+                cluster, 'ts_v10', 'ListTaskPushNotificationConfigs', {'taskId': task['id']}
+            ))['configs']
+            return params['configuration']['taskPushNotificationConfig'], config
+
+        sent, config = in_a_cluster(scenario, {'current': ('1.0', '1.1'), 'ts_v10': ('1.0', '1.1')})
+        assert sent.get('protocolVersion', '') == asked
+        assert config['protocolVersion'] == stored
+
+    @pytest.mark.parametrize('resume', [False, True])
+    def test_a_call_that_subscribes_again_resumes_when_the_instruction_asks(self, resume):
+        async def scenario(cluster: _Cluster) -> tuple[dict[str, Any], dict, dict]:
+            other = cluster.agents['ts_v10']
+            asked = await ask(cluster, 'current', calling(
+                other, saying('held', hold_task=True), streaming=True,
+                resubscribe={'from_last_seen_generation': resume},
+            ))
+            (opened,) = cluster.network.params_sent_to(other, 'SendStreamingMessage')
+            (subscription,) = cluster.network.params_sent_to(other, 'SubscribeToTask')
+            (held,) = (await call(cluster, 'ts_v10', 'ListTasks', {}))['tasks']
+            return asked, subscription, held
+
+        asked, subscription, held = in_a_cluster(
+            scenario, {'current': ('1.0', '1.1'), 'ts_v10': ('1.0', '1.1')}
+        )
+        assert said(asked) == ('TASK_STATE_COMPLETED', 'held')
+        assert held['status']['state'] == 'TASK_STATE_CANCELED'
+        # The generation of the task the first stream opened with. The mock
+        # agent creates a task at generation 1, and the message that carries
+        # the instruction is its first change.
+        assert subscription == (
+            {'id': held['id'], 'lastSeenGeneration': '2'} if resume else {'id': held['id']}
+        )
 
     def test_an_agent_given_no_client_fails_a_call(self):
         def take_the_client(agents: dict[str, MockAgent]) -> None:
