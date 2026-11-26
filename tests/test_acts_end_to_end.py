@@ -422,6 +422,158 @@ class TestTheRunVersionReachesTheAgent:
 
 
 # ---------------------------------------------------------------------------
+# Generation, end to end
+# ---------------------------------------------------------------------------
+#
+# `generation` is a 64-bit integer, which a JSON binding sends as a string of
+# digits. These run tests that compare it, capture it from a response and from
+# the first event of a stream, and compare later values with the captured one.
+
+GENERATION_PROBE = '''\
+acts_version: "1.0"
+spec_version: "1.1"
+suites:
+  - id: generation-probe
+    name: Generation probe
+    tests:
+      - id: PROBE-GENERATION-ADVANCES
+        name: A client message advances the generation
+        level: must
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-multi-turn]
+        steps:
+          - id: turn1
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-multi-turn generation probe"}]
+            expect:
+              status: 200
+              body:
+                task:
+                  generation: {gte: 1}
+            capture: {taskId: task.id, generation: task.generation}
+          - id: turn2
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                taskId: "{{turn1.taskId}}"
+                parts: [{text: more input}]
+            expect:
+              status: 200
+              body:
+                task:
+                  generation: {gt: "{{turn1.generation}}"}
+      - id: PROBE-RESUME
+        name: A subscriber that resumes is sent only what is newer
+        level: must
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-hold-working]
+        runner_requirements: [stream_disconnect]
+        preconditions:
+          capabilities: {streaming: true}
+        steps:
+          - id: start
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-hold-working 8000 resume probe"}]
+              configuration: {returnImmediately: true}
+            expect: {status: 200}
+            capture: {taskId: task.id}
+          - id: interrupted
+            operation: subscribe_to_task
+            params: {id: "{{start.taskId}}"}
+            expect_stream:
+              min_count: 1
+              streams:
+                - disconnect_after: 1
+            capture: {generation: task.generation}
+          - id: resubscribe
+            operation: subscribe_to_task
+            params:
+              id: "{{start.taskId}}"
+              lastSeenGeneration: "{{interrupted.generation}}"
+            expect_stream:
+              timeout_ms: 20000
+              final_event:
+                status: {state: TASK_STATE_COMPLETED}
+              each_event:
+                status_update:
+                  generation: {gt: "{{interrupted.generation}}"}
+'''
+
+
+class TestGenerationEndToEnd:
+    @pytest.fixture
+    def probe(self, tmp_path) -> Path:
+        path = tmp_path / 'generation.acts.yaml'
+        path.write_text(GENERATION_PROBE, encoding='utf-8')
+        return path
+
+    def run(self, behaviors_path, probe, customize=None) -> dict[str, TestResult]:
+        run = conformance_run(
+            behaviors_path, spec_version='1.1', suite_path=probe, customize=customize
+        )
+        return {r.id: r for r in run.results}
+
+    def test_a_conforming_agent_passes(self, behaviors_path, probe):
+        results = self.run(behaviors_path, probe)
+        assert {
+            r.id: r.failure.message for r in results.values() if r.result is not Outcome.PASS
+        } == {}
+        assert set(results) == {'PROBE-GENERATION-ADVANCES', 'PROBE-RESUME'}
+
+    def test_a_generation_that_does_not_advance_is_caught(self, behaviors_path, probe):
+        def stand_still(agent: FakeAgent) -> None:
+            agent._advance = lambda record: record.task.generation
+
+        result = self.run(behaviors_path, probe, stand_still)['PROBE-GENERATION-ADVANCES']
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'turn2'
+        assert result.failure.message == 'body.task.generation should be > 1, got 1'
+
+    def test_an_agent_without_generation_fails_on_the_assertion(self, behaviors_path, probe):
+        """Reported as the missing generation, which is what the agent got
+        wrong, and not as a value the step could not capture."""
+        def no_generation(agent: FakeAgent) -> None:
+            view = agent._view
+
+            def without(record, **kwargs):
+                task = view(record, **kwargs)
+                task.ClearField('generation')
+                return task
+
+            agent._view = without
+
+        result = self.run(behaviors_path, probe, no_generation)['PROBE-GENERATION-ADVANCES']
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'turn1'
+        assert result.failure.assertion_path == 'body.task.generation'
+        assert 'is missing' in result.failure.message
+
+    def test_a_resume_that_starts_over_is_caught(self, behaviors_path, probe):
+        """An agent that ignores the generation the client has and opens with
+        the task again."""
+        def start_over(agent: FakeAgent) -> None:
+            subscribe = agent.subscribe_to_task
+
+            def ignoring(request, version):
+                request.ClearField('last_seen_generation')
+                return subscribe(request, version)
+
+            agent.subscribe_to_task = ignoring
+
+        result = self.run(behaviors_path, probe, start_over)['PROBE-RESUME']
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'resubscribe'
+        assert result.failure.assertion_path.startswith('each_event[0]')
+
+
+# ---------------------------------------------------------------------------
 # What the fake agent does at A2A 1.1
 # ---------------------------------------------------------------------------
 #
