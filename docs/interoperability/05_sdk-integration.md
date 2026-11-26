@@ -39,6 +39,26 @@ The `behavior` on a `CallAgent` changes how the call is made:
 
 Trace tokens are just text the agent concatenates; it does not need to know what they mean.
 
+**Fields for A2A 1.1.** An agent that speaks A2A 1.1 also reads the fields below. The harness does not set them yet, so every agent receives the instructions it received before.
+
+| Field | Agent does |
+| --- | --- |
+| `CallAgent.protocol_version` | Use the interface of the called agent's card that lists this version for `transport`, and send the version as `A2A-Version`. Fail the call when the card lists no such interface. When the field is empty, use the version the SDK negotiates |
+| `ReturnResponse.report_protocol_version` | Follow `response` with a space and `served:<version>`, where `<version>` is the `A2A-Version` of the request the agent is answering, or `0.3` when the request carries none. This is how a scenario proves the version a hop was made at |
+| `PushNotificationBehavior.protocol_version` | Put this version in the push notification config registered for the call |
+| `ResubscribeBehavior.from_last_seen_generation` | Subscribe again from the last generation seen on the first stream, and accept a stream that starts with the task or one that continues from that generation |
+
+The proto also defines four behaviors that need A2A 1.1 at both ends of a call. The harness does not send these either.
+
+| Behavior | Calling agent | Called agent |
+| --- | --- | --- |
+| `live_message{follow_ups, foreign_task_request}` | Open a live exchange (`SendLiveMessage`) with the instruction as its first message. Send `follow_ups` more messages to the task, and one request that names another task if `foreign_task_request` is set. Read the exchange until the reply and an answer to every request have arrived. Return the reply, the text of each answer, and `stream-error:<code>` for a request that was refused | Carry out the instruction. Answer the n-th later message with a status update whose text is `live-echo:<n>`, counting from 1. Refuse a request for another task with a `StreamError` and keep the exchange open |
+| `user_artifacts{text}` | Send the instruction together with one artifact in `artifactUpdates`. The artifact has one text part, `text`, and no generation. Return the reply | Store the artifact and add `artifact-received:<text>` to the reply |
+| `multi_turn{stale_attempt}` | Send the instruction on a stream and read it until the task asks for input, without waiting for the stream to close. Send a message to the task with `ifGenerationMatch` set to the last generation seen, and return the reply. If `stale_attempt` is set, first send one message with an older generation, expect a generation mismatch error, and add `generation-mismatch:ok` to what is returned | Honor `ReturnResponse.await_input`: move the task to `INPUT_REQUIRED` first, and carry out the whole instruction when the next message for the task arrives |
+| `long_poll` | Send the instruction with `returnImmediately`. Repeat `GetTask` with `currentGeneration` set to the last generation seen until the task is in a terminal state, up to a limit of the agent's own. Return the reply and `long-poll:<generation>`, the generation of the task at the end | Honor `ReturnResponse.hold_ms`: after carrying out the instruction, wait that long with the task in `WORKING`, then complete it |
+
+`hold_ms` and `await_input` are about the task, as `hold_task` is. An agent honors one when any `ReturnResponse` it gives itself sets it; one in an instruction that the agent passes on does not count. The largest `hold_ms` applies, and `hold_task` overrides it.
+
 **Version negotiation.** Peers on a `v03` line send A2A 0.3 requests and expect 0.3 responses. An SDK that has a 0.3 compatibility layer should serve it on the same HTTP port (the ITK agents publish a 0.3 interface alongside the 1.0 one). An SDK without one records the fact in [`known_failures.yaml`](../../known_failures.yaml), as a2a-rs does.
 
 ### 2. Proto stubs
