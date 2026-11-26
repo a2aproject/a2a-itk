@@ -106,7 +106,7 @@ Every abstract operation carries `A2A-Version` set to the run version (section 1
 
 `events` in `expect_webhook` names individual deliveries, in the forms `expect_stream.events` uses, and makes the step read on until they have arrived. An entry with `match: any_position` is waited for until a delivery matches it; an entry at a position is waited for until that many deliveries have arrived, and is then decided. An entry that is decided and does not hold fails the step at once, without waiting for the others. A webhook step without `events` stops at `min_count`, which is usually the first delivery, so a test of what is delivered later, or of a kind that must never be delivered, names in `events` a delivery that comes after it, such as the one that reports the task completed.
 
-The receiver stores `task`, `statusUpdate` and `messageUpdate` payloads. It still refuses `artifactUpdate` and `message` payloads, so a webhook step never sees a delivery of those two kinds.
+The receiver stores `task`, `statusUpdate`, `artifactUpdate` and `messageUpdate` payloads. It still refuses a `message` payload, so a webhook step never sees a delivery of that kind.
 
 `send_live_message`, the two-way exchange A2A 1.1 adds, is in the wire map so that a client step can name it. An operation step cannot name it, because the runner does not drive a live exchange yet.
 
@@ -155,11 +155,11 @@ Failures record the assertion path (`task.status.state`), the expected and actua
 
 ## Deviations
 
-Four tests assert that an agent **lacking** a capability answers `UnsupportedOperationError`; five assert that an agent **requiring** a credential rejects a request without one. Their preconditions are the opposite of what the rest of the corpus needs, and no single agent can be both. Rather than leave those branches of the protocol untested by anyone, the pipeline starts a second agent that meets them.
+Four tests of a run at A2A 1.0, and two more at 1.1, assert that an agent **lacking** a capability answers `UnsupportedOperationError`. One of the two is a live exchange test, which the runner skips for now. Five tests assert that an agent **requiring** a credential rejects a request without one. Their preconditions are the opposite of what the rest of the corpus needs, and no single agent can be both. Rather than leave those branches of the protocol untested by anyone, the pipeline starts a second agent that meets them.
 
 | Deviation | Env var set in the SUT's environment | Re-runs tests skipped as | Checks on the second card |
 | --- | --- | --- | --- |
-| reduced capabilities | `ITK_ACTS_REDUCED_CAPABILITIES=1` | `agent card capability X=True, needs False` | `streaming`, `pushNotifications`, `extendedAgentCard` no longer advertised |
+| reduced capabilities | `ITK_ACTS_REDUCED_CAPABILITIES=1` | `agent card capability X=True, needs False` | `streaming`, `pushNotifications`, `extendedAgentCard` no longer advertised, and in a run at A2A 1.1 `userArtifacts` |
 | authentication | `ITK_ACTS_AUTH=1` | `agent card authentication=False, needs True` | `securitySchemes` and `securityRequirements` present |
 
 The selection is keyed on the **skip reason**, not on a list of test ids: the corpus is authored upstream, and a hard-coded list would silently stop matching when a test is renamed, whereas a derived selector leaves an uncleared skip visible in the report.

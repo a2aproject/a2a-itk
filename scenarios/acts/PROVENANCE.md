@@ -3,15 +3,28 @@
 The `*.acts.yaml` files in this directory are a **byte-identical mirror** of
 `tests/acts/*.acts.yaml` in the A2A repository:
 
-    a2aproject/A2A @ a8c99376687151d2277a63a16a0f56f82a9e7f01
-    branch: conformance-spec-adjustments
+    a2aproject/A2A @ 3252da724681a50daa15b0f7c414564974b1aa06
+    branch: conformance-spec-1.1
 
-- [#2227](https://github.com/a2aproject/A2A/pull/2227) — the commit above, which
-  brings the corpus into line with the normative A2A sources.
+- [#2468](https://github.com/a2aproject/A2A/pull/2468) — the commit above, which
+  adds the tests for A2A 1.1 and the version range a test may declare. It
+  targets the branch of #2227.
+- [#2227](https://github.com/a2aproject/A2A/pull/2227) — brings the corpus into
+  line with the normative A2A sources. It targets the branch of #1882.
 - [#1882](https://github.com/a2aproject/A2A/pull/1882) — where the ACTS
-  specification and this corpus originate. #2227 targets its branch.
+  specification and this corpus originate.
 
-Fifteen files, 113 tests, loaded strictly with no errors and no rewriting.
+None of the three is merged, so the specification and the tests can still
+change under review.
+
+Nineteen files, 173 tests, loaded strictly with no errors and no rewriting.
+
+One corpus serves A2A 1.0 and A2A 1.1. A run at 1.0 takes 113 tests, the same
+test ids as the last pin that had only tests for 1.0; a run at 1.1 takes 172.
+What changed in the 113: a raw step that wrote `A2A-Version: "1.0"` now writes
+the run version as `{{specVersion}}`, `REST-SUB-POST-001` ends at 1.0,
+`PUSH-DELIV-003` accepts an artifact update as a delivered payload, and two
+names and one description were reworded.
 
 ## Refreshing
 
@@ -32,7 +45,7 @@ arrive here as a copy.
 4. Verify against the commit, from the repo root:
 
    ```bash
-   SHA=a8c99376687151d2277a63a16a0f56f82a9e7f01
+   SHA=3252da724681a50daa15b0f7c414564974b1aa06
    for f in scenarios/acts/*.acts.yaml; do
      git -C ../A2A show "$SHA:tests/acts/$(basename "$f")" \
        | cmp -s - "$f" || echo "DRIFT: $f"

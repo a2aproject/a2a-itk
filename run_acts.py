@@ -6,6 +6,7 @@ The dev counterpart of ``POST /run-acts``: same pipeline, no container.
     ./run_acts.py --mount ../a2a-python/itk --sdk a2a-python --language python
     ./run_acts.py --mount ../a2a-python/itk --sdk a2a-python --transport all
     ./run_acts.py --mount ../a2a-python/itk --sdk a2a-python -t CORE-SEND-001
+    ./run_acts.py --mount ../a2a-python/itk --sdk a2a-python --spec-version 1.1
     ./run_acts.py --sut-url http://127.0.0.1:8080 --sdk my-sdk --behaviors acts/sut-behaviors.yaml
 
 ``--mount`` points the SUT at a checkout's ``itk/`` directory, exactly as the

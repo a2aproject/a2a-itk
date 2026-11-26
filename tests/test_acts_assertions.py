@@ -764,14 +764,31 @@ class TestCorpus:
         still matters for hand-written documents and is exercised in
         `TestDisambiguation`; this measures that the shipped corpus does not
         depend on it. A refresh that reintroduces such a site fails here.
+
+        An argument that is a variable (`gt: "{{start.generation}}"`) is left
+        out: what it is compared with is known only once the earlier step has
+        run, and the runner substitutes it before it reads the tree.
         """
         shadowing = [
             (test_id, step_id, key)
             for test_id, step_id, tree in self._assertion_trees(suite)
             for key, argument in _walk_keys(tree)
-            if key in OPERATORS and not _accepts(key, argument)
+            if key in OPERATORS
+            and not _is_a_variable(argument)
+            and not _accepts(key, argument)
         ]
         assert shadowing == []
+
+    def test_a_variable_is_only_ever_the_operand_of_a_comparison(self, suite):
+        """What the exemption above lets through, so that it stays narrow:
+        the tests for A2A 1.1 compare a generation with one captured earlier."""
+        operators = {
+            key
+            for _, _, tree in self._assertion_trees(suite)
+            for key, argument in _walk_keys(tree)
+            if key in OPERATORS and _is_a_variable(argument)
+        }
+        assert operators == {'gt', 'gte', 'lte'}
 
     def test_every_until_expression_parses(self, suite):
         seen = 0
@@ -780,7 +797,7 @@ class TestCorpus:
                 if step.repeat:
                     evaluate_until(step.repeat.until, {})
                     seen += 1
-        assert seen == 3
+        assert seen == 8
 
     def test_every_named_assertion_evaluates(self, suite):
         seen = 0
@@ -792,7 +809,16 @@ class TestCorpus:
             for assertion in named:
                 evaluate_named(assertion, {})
                 seen += 1
-        assert seen == 13
+        assert seen == 22
+
+
+def _is_a_variable(argument):
+    """Is this argument a `{{...}}` reference and nothing else?"""
+    return (
+        isinstance(argument, str)
+        and argument.startswith('{{')
+        and argument.endswith('}}')
+    )
 
 
 def _walk_keys(node):
