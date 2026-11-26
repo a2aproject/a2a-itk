@@ -25,6 +25,7 @@ from test_suite.acts.dispatcher import (
     GrpcDispatcher,
     UnsupportedByBinding,
 )
+from test_suite.acts.dispatcher.base import MalformedResponse
 from test_suite.acts.dispatcher.grpc import STATUS_DETAILS_KEY, _to_dict
 from test_suite.acts.schema import (
     ErrorType,
@@ -33,6 +34,7 @@ from test_suite.acts.schema import (
     RawBlock,
     TransportBinding,
 )
+from test_suite.acts.wire_map import GRPC_SERVICE
 
 
 def error_trailers(
@@ -478,6 +480,227 @@ class TestStreaming:
     def test_non_streaming_operation_is_rejected(self):
         with pytest.raises(DispatchError, match='not a streaming operation'):
             self._collect(FakeAgent(), Operation.GET_TASK, {'id': 't1'})
+
+
+class TestRequestWritten:
+    """`on_sent`: the caller is told when the request has been written out.
+
+    The unary form of a gRPC call says nothing before the reply, so a call
+    that asks is made in a form that does. The SUT must not be able to tell.
+    """
+
+    class Holding(FakeAgent):
+        """Holds `GetTask` until released, and says when it arrived."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.arrived = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def GetTask(self, request, context):
+            self.arrived.set()
+            await self.release.wait()
+            return await super().GetTask(request, context)
+
+    def test_it_is_called_before_the_reply_arrives(self):
+        agent = self.Holding()
+        order: list[str] = []
+
+        async def factory(dispatcher):
+            call_ = asyncio.ensure_future(dispatcher.dispatch(
+                Operation.GET_TASK, {'id': 't1'}, {'A2A-Version': '1.1'},
+                on_sent=lambda: order.append('sent'),
+            ))
+            await asyncio.wait_for(agent.arrived.wait(), 10)
+            # The agent has the request and is holding its reply.
+            await asyncio.sleep(0.05)
+            order.append('released')
+            agent.release.set()
+            response = await call_
+            order.append('answered')
+            return response
+
+        response = call(agent, factory)
+        assert order == ['sent', 'released', 'answered']
+        assert response.status == 200
+        assert response.payload['id'] == 't1'
+
+    def test_the_sut_sees_the_same_call_either_way(self):
+        agent = FakeAgent()
+
+        async def factory(dispatcher):
+            headers = {'A2A-Version': '1.1'}
+            plain = await dispatcher.dispatch(Operation.GET_TASK, {'id': 't1'}, headers)
+            asked = await dispatcher.dispatch(
+                Operation.GET_TASK, {'id': 't1'}, headers, on_sent=lambda: None
+            )
+            return plain, asked
+
+        plain, asked = call(agent, factory)
+        assert asked == plain
+        (name, request, metadata), (name2, request2, metadata2) = agent.calls
+        assert (name, request) == (name2, request2)
+        assert ('a2a-version', '1.1') in [tuple(m) for m in metadata2]
+
+    def test_an_error_reads_the_same_either_way(self):
+        agent = FakeAgent()
+        agent.fail_with['GetTask'] = (
+            grpc.StatusCode.NOT_FOUND, 'TASK_NOT_FOUND', 'no such task'
+        )
+        sent: list[bool] = []
+
+        async def factory(dispatcher):
+            plain = await dispatcher.dispatch(Operation.GET_TASK, {'id': 'x'})
+            asked = await dispatcher.dispatch(
+                Operation.GET_TASK, {'id': 'x'}, on_sent=lambda: sent.append(True)
+            )
+            return plain, asked
+
+        plain, asked = call(agent, factory)
+        for response in (plain, asked):
+            assert response.status == 404
+            assert response.error.error_type is ErrorType.TASK_NOT_FOUND
+            assert response.error.status == 'NOT_FOUND'
+            assert response.error.message == 'no such task'
+        assert sent == [True]
+
+    def test_an_empty_reply_is_still_a_reply(self):
+        """`delete_push_config` answers with an empty message, which is not
+        the same as ending the call without one."""
+        async def factory(dispatcher):
+            return await dispatcher.dispatch(
+                Operation.DELETE_PUSH_CONFIG, {'taskId': 't1', 'id': 'c1'},
+                on_sent=lambda: None,
+            )
+
+        response = call(FakeAgent(), factory)
+        assert response.ok
+        assert response.payload == {}
+
+    @staticmethod
+    def _with_get_task_served_by(handler, coro_factory, **dispatcher_kwargs):
+        """Run against a server whose `GetTask` is ``handler``, which is
+        given the form of the call and not only its one request."""
+        loop = asyncio.new_event_loop()
+
+        async def run():
+            server = grpc.aio.server()
+            server.add_generic_rpc_handlers((
+                grpc.method_handlers_generic_handler(GRPC_SERVICE, {'GetTask': handler}),
+            ))
+            port = server.add_insecure_port('127.0.0.1:0')
+            await server.start()
+            dispatcher = GrpcDispatcher(f'127.0.0.1:{port}', **dispatcher_kwargs)
+            try:
+                return await coro_factory(dispatcher)
+            finally:
+                await dispatcher.aclose()
+                await server.stop(None)
+
+        try:
+            return loop.run_until_complete(run())
+        finally:
+            loop.close()
+
+    def test_the_client_side_is_closed_after_the_one_request(self):
+        """A server may wait for that before it handles a unary call. This
+        one does, and counts what it was sent."""
+        async def read_to_the_end(requests, context):
+            received = [request async for request in requests]
+            return a2a_pb2.Task(id=f'{len(received)} request(s)')
+
+        handler = grpc.stream_unary_rpc_method_handler(
+            read_to_the_end,
+            request_deserializer=a2a_pb2.GetTaskRequest.FromString,
+            response_serializer=a2a_pb2.Task.SerializeToString,
+        )
+        response = self._with_get_task_served_by(
+            handler,
+            lambda d: d.dispatch(Operation.GET_TASK, {'id': 't1'}, on_sent=lambda: None),
+            timeout=5,
+        )
+        assert response.ok, response.error
+        assert response.payload['id'] == '1 request(s)'
+
+    @pytest.mark.parametrize(
+        ('replies', 'said'),
+        [(0, 'without a response message'), (2, 'more than one response message')],
+    )
+    def test_a_unary_call_answered_with_another_number_of_messages(self, replies, said):
+        async def answer(request, context):
+            for _ in range(replies):
+                yield a2a_pb2.Task(id='t1')
+
+        handler = grpc.unary_stream_rpc_method_handler(
+            answer,
+            request_deserializer=a2a_pb2.GetTaskRequest.FromString,
+            response_serializer=a2a_pb2.Task.SerializeToString,
+        )
+        with pytest.raises(MalformedResponse, match=said):
+            self._with_get_task_served_by(
+                handler,
+                lambda d: d.dispatch(
+                    Operation.GET_TASK, {'id': 't1'}, on_sent=lambda: None
+                ),
+            )
+
+    def test_a_call_refused_before_the_request_is_written_reads_as_refused(self):
+        """An agent may refuse a call on its headers alone: a method it does
+        not serve, a credential it rejects. When that reaches the client
+        before the request is written, the call is over and the write is
+        refused. It is the agent's answer all the same, not a broken run."""
+        sent: list[bool] = []
+
+        def writing_only_after_the_refusal(open_call):
+            def opened(*args, **kwargs):
+                call = open_call(*args, **kwargs)
+                write = call.write
+
+                async def late(request):
+                    while not call.done():
+                        await asyncio.sleep(0.01)
+                    await write(request)
+
+                call.write = late
+                return call
+            return opened
+
+        async def run():
+            server = grpc.aio.server()  # Serves no method at all.
+            port = server.add_insecure_port('127.0.0.1:0')
+            await server.start()
+            dispatcher = GrpcDispatcher(f'127.0.0.1:{port}', timeout=5)
+            callable_for = dispatcher._callable
+            dispatcher._callable = lambda operation, **form: (
+                writing_only_after_the_refusal(callable_for(operation, **form))
+            )
+            try:
+                return await dispatcher.dispatch(
+                    Operation.GET_TASK, {'id': 't1'}, on_sent=lambda: sent.append(True)
+                )
+            finally:
+                await dispatcher.aclose()
+                await server.stop(None)
+
+        response = asyncio.run(run())
+        assert response.error.status == 'UNIMPLEMENTED'
+        assert sent == []
+
+    def test_an_agent_that_cannot_be_reached_is_not_reported_as_sent(self):
+        sent: list[bool] = []
+
+        async def run():
+            dispatcher = GrpcDispatcher('127.0.0.1:1', timeout=5)
+            try:
+                return await dispatcher.dispatch(
+                    Operation.GET_TASK, {'id': 't1'}, on_sent=lambda: sent.append(True)
+                )
+            finally:
+                await dispatcher.aclose()
+
+        response = asyncio.run(run())
+        assert response.error.status == 'UNAVAILABLE'
+        assert sent == []
 
 
 class TestAgentCardOverHttp:

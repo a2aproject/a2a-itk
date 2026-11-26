@@ -28,12 +28,18 @@ and the corpus contains none. A test can still be skipped for four reasons: it
 targets another binding, it needs a runner capability this run does not
 provide, its preconditions are unmet, or it contains a step kind that does not
 execute.
+
+Steps run one after another, with one exception: a `background` step. Its
+request is sent, the steps after it run while it is open, and it is evaluated
+after the last of them. It is how a test sends a message to a task while a
+subscription to that task is being read.
 """
 
 from __future__ import annotations
 
 import asyncio
 import enum
+import functools
 import math
 import time
 import uuid
@@ -248,6 +254,48 @@ class _Reading(NamedTuple):
     closed_by_sut: bool
 
 
+@dataclass(eq=False)
+class _Background:
+    """A background step whose request is out and whose result is to come."""
+
+    step: Step
+    started: float
+    #: The exchange with the SUT. Its result is the response, or what reading
+    #: the step's streams produced.
+    exchange: asyncio.Future[Any]
+    #: Turns what the exchange produced into the step's result.
+    conclude: Callable[[Any], StepResult]
+    #: The exchange was over before the next step started: the request could
+    #: not be sent, or no stream of the step produced an event. Nothing a
+    #: later step did can have changed how it went.
+    over_at_once: bool = False
+    #: Why the first event of its stream did not give the step's `capture`,
+    #: if it did not. The steps that follow cannot use what was not captured.
+    missed: str | None = None
+
+
+async def _until_either(exchange: asyncio.Future[Any], signal: Awaitable[Any]) -> None:
+    """Wait for ``signal``, or for the exchange to be over, whichever is first.
+
+    An exchange that is over will never give the signal: a request that was
+    refused has no first event, and one that could not be sent never left.
+    """
+    waiter = asyncio.ensure_future(signal)
+    try:
+        await asyncio.wait({exchange, waiter}, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        # The run is being torn down. Nothing else holds the exchange yet.
+        exchange.cancel()
+        raise
+    finally:
+        waiter.cancel()
+
+
+def _plans(block: Any | None) -> tuple[StreamPlan | None, ...]:
+    """The streams a step opens: one per `streams` entry, or a single one."""
+    return tuple(block.streams) if block is not None and block.streams else (None,)
+
+
 def _stays_open_ms(block: Any | None, plan: StreamPlan | None) -> int | None:
     """How long a stream has to stay open: the longer of its own bound and
     the step's, which applies to every stream."""
@@ -283,6 +331,19 @@ def _evaluate_duration(step: Step, elapsed_ms: float) -> AssertionResult:
     elif high is not None:
         result += AssertionResult(checks=1)
     return result
+
+
+def _held_too_long(step: Step) -> AssertionResult:
+    """A request the SUT had not answered at the step's `max_duration_ms`.
+
+    The request is abandoned then. Waiting on would show only how late the
+    response is, and that after the transport's own timeout, minutes later.
+    """
+    longest = step.max_duration_ms
+    return _duration_failure(
+        'max_duration_ms', f'at most {longest}ms', 'no response',
+        f'no response after {longest}ms',
+    )
 
 
 def _duration_failure(
@@ -551,17 +612,60 @@ class Runner:
             {**(variables or {}), **self.variables}, new_uuid=self._new_uuid
         )
 
-        steps: list[StepResult] = []
+        background: list[_Background] = []
+        try:
+            return await self._run_steps(test, scope, started, background)
+        finally:
+            # Every background step is settled before `_run_steps` returns.
+            # One is still open here only when the run is being torn down.
+            for pending in background:
+                pending.exchange.cancel()
+
+    async def _run_steps(
+        self,
+        test: Test,
+        scope: Scope,
+        started: float,
+        background: list[_Background],
+    ) -> TestResult:
+        """Run the steps of a test and say what they came to.
+
+        ``background`` collects the background steps as they are started, so
+        the caller can close them if this is interrupted.
+        """
+        by_id: dict[str, StepResult] = {}
+        stopped = False
         for step in test.steps:
-            result = await self._run_step(step, scope)
-            steps.append(result)
+            if step.background:
+                opened = await self._start_background(step, scope)
+                if isinstance(opened, _Background):
+                    background.append(opened)
+                    continue
+                result = opened
+            else:
+                result = await self._run_step(step, scope)
+            by_id[step.id] = result
             if result.result is not Outcome.PASS:
                 # Later steps read this one's captures, so continuing produces
                 # a cascade of failures that all describe the same cause.
-                return self._result(
-                    test, result.result, started,
-                    failure=result.failure, steps=steps,
-                )
+                stopped = True
+                break
+
+        for pending in background:
+            result = await self._settle(pending, stopped=stopped)
+            if result is not None:
+                by_id[pending.step.id] = result
+
+        # In the order the test writes them, whenever each was evaluated. The
+        # first step that did not pass is the test's verdict: a background
+        # stream that was refused is the cause of the later step that could
+        # not use its captures, and not the other way round.
+        steps = [by_id[step.id] for step in test.steps if step.id in by_id]
+        failed = next((s for s in steps if s.result is not Outcome.PASS), None)
+        if failed is not None:
+            return self._result(
+                test, failed.result, started, failure=failed.failure, steps=steps
+            )
 
         try:
             outcome = self._evaluate_named(test.assertions, scope, step_id=None)
@@ -733,21 +837,179 @@ class Runner:
             if _is_streaming(step):
                 return await self._run_streaming_step(step, scope, started)
             return await self._run_unary_step(step, scope, started)
-        except MalformedResponse as exc:
+        except (DispatchError, UnresolvedVariable, PathError) as exc:
+            return self._broken_step(step, started, exc)
+
+    def _broken_step(self, step: Step, started: float, exc: Exception) -> StepResult:
+        """The result of a step that ended in an exception."""
+        if isinstance(exc, MalformedResponse):
             # The SUT answered in a shape the binding does not permit. That is
             # a finding about the SUT, so it must not be filed as a broken run.
             return self._step(step, Outcome.FAIL, started, message=str(exc))
-        except DispatchError as exc:
-            # The exchange did not complete, so the SUT has not been shown
-            # non-conformant. `UnsupportedByBinding` arrives here too, which is
-            # right: a raw step on gRPC is a test that should have declared a
-            # transport, not a defect in the agent.
-            return self._step(step, Outcome.ERROR, started, message=str(exc))
+        # A `DispatchError`: the exchange did not complete, so the SUT has not
+        # been shown non-conformant. `UnsupportedByBinding` arrives here too,
+        # which is right: a raw step on gRPC is a test that should have
+        # declared a transport, not a defect in the agent.
+        #
+        # Otherwise an assertion names a variable nothing defines, or a path
+        # that cannot be read: the test is wrong, not the SUT. Left to escape,
+        # it would end the whole run and lose every other result.
+        return self._step(step, Outcome.ERROR, started, message=str(exc))
+
+    # -- background steps --------------------------------------------------
+
+    async def _start_background(
+        self, step: Step, scope: Scope
+    ) -> _Background | StepResult:
+        """Send a background step's request and return once the SUT has it.
+
+        For a streaming operation that is when the first event of every
+        stream has arrived, which shows the SUT has the stream in place. Any
+        other request gives no such sign, so it is when the request has been
+        written out.
+
+        Returns a result instead when the request could not be built, which
+        ends the test as it would for any step.
+        """
+        started = self._clock()
+        if step.delay_ms:
+            await self._sleep(step.delay_ms / 1000)
+        try:
+            if _is_streaming(step):
+                return await self._open_in_background(step, scope, started)
+            return await self._send_in_background(step, scope, started)
         except (UnresolvedVariable, PathError) as exc:
-            # An assertion names a variable nothing defines, or a path that
-            # cannot be read: the test is wrong, not the SUT. Left to escape,
-            # it would end the whole run and lose every other result.
+            # Raised before anything was sent.
             return self._step(step, Outcome.ERROR, started, message=str(exc))
+
+    async def _send_in_background(
+        self, step: Step, scope: Scope, started: float
+    ) -> _Background:
+        """A background step that is answered with one response."""
+        params = self._prepare_params(step, scope)
+        headers = self._headers(step)
+        dispatcher = self._dispatcher_for(step)
+        sent = asyncio.Event()
+
+        longest = step.max_duration_ms
+
+        async def exchange() -> tuple[WireResponse | None, float]:
+            """The response and how long it took, or no response if the SUT
+            was still holding the request at the step's `max_duration_ms`."""
+            began = self._clock()
+            try:
+                async with asyncio.timeout(
+                    None if longest is None else longest / 1000
+                ) as bound:
+                    response = await dispatcher.dispatch(
+                        step.operation, params, headers, on_sent=sent.set
+                    )
+            except TimeoutError:
+                if not bound.expired():
+                    raise
+                return None, longest
+            return response, (self._clock() - began) * 1000
+
+        def conclude(outcome: tuple[WireResponse | None, float]) -> StepResult:
+            response, elapsed_ms = outcome
+            if response is None:
+                return self._finish(step, scope, _held_too_long(step), started, 1)
+            return self._conclude_unary(
+                step, scope, started, response, attempts=1, elapsed_ms=elapsed_ms
+            )
+
+        task = asyncio.ensure_future(exchange())
+        await _until_either(task, sent.wait())
+        return _Background(
+            step, started, task, conclude,
+            # It raised before the request was out. A reply that came before
+            # the request was seen leaving is not that, however soon it came.
+            over_at_once=task.done() and task.exception() is not None,
+        )
+
+    async def _open_in_background(
+        self, step: Step, scope: Scope, started: float
+    ) -> _Background:
+        """A background step that opens a stream, or several."""
+        open_stream = self._stream_opener(step, scope)
+        streams = len(_plans(step.expect_stream))
+        #: Per stream, its first event, or ``None`` if it ended without one.
+        first: dict[int, StreamedEvent | None] = {}
+        in_place = asyncio.Event()
+
+        def arrived(index: int, event: StreamedEvent | None) -> None:
+            if index not in first:
+                first[index] = event
+                if len(first) == streams:
+                    in_place.set()
+
+        task = asyncio.ensure_future(
+            self._read_streams(step, open_stream, on_first_event=arrived)
+        )
+        await _until_either(task, in_place.wait())
+        # Every read has ended without an event: the SUT refused the request,
+        # or closed each stream empty.
+        nothing_arrived = all(event is None for event in first.values())
+
+        missed = None
+        opening = first.get(0)
+        if opening is not None:
+            # `capture` reads the first event, and the steps that follow may
+            # use what it captured. The step is evaluated later, and reads
+            # the same event again then.
+            try:
+                missed = self._capture_from_stream(step, scope, [opening])
+            except PathError:
+                # The test wrote a path that cannot be read. The caller
+                # reports it against this step.
+                task.cancel()
+                raise
+        return _Background(
+            step, started, task,
+            lambda read: self._conclude_streams(step, scope, started, *read),
+            over_at_once=nothing_arrived,
+            missed=missed,
+        )
+
+    async def _settle(
+        self, pending: _Background, *, stopped: bool
+    ) -> StepResult | None:
+        """Wait for a background step to end and evaluate it.
+
+        Returns ``None`` for a step that is not reported.
+
+        ``stopped`` says a step did not pass and the test ended early. A
+        background step is then closed and not reported: how it went depended
+        on steps that never ran, so evaluating it would produce a failure that
+        only repeats the one that ended the test.
+
+        A background step is reported all the same when it went wrong before
+        the step after it began, because it is then the likely reason a later
+        step did not pass: its request could not be sent, its stream was
+        refused or ended without an event, or its first event did not give
+        its `capture`.
+        """
+        if stopped and not pending.over_at_once:
+            # Cancelling also marks what an exchange that already ended in an
+            # exception ended with as read, so the event loop does not log it.
+            pending.exchange.cancel()
+            await asyncio.wait({pending.exchange})
+            if pending.missed is not None:
+                return self._step(
+                    pending.step, Outcome.FAIL, pending.started,
+                    message=pending.missed,
+                )
+            return None
+        try:
+            return pending.conclude(await pending.exchange)
+        except UnresolvedVariable as exc:
+            if stopped:
+                # Its assertions refer to a step the test never reached. The
+                # step that ended the test is the one to report.
+                return None
+            return self._broken_step(pending.step, pending.started, exc)
+        except (DispatchError, PathError) as exc:
+            return self._broken_step(pending.step, pending.started, exc)
 
     async def _run_webhook_step(
         self, step: Step, scope: Scope, started: float
@@ -924,6 +1186,7 @@ class Runner:
     ) -> StepResult:
         """One request, one reply — an operation step or a raw one."""
         attempts = 1
+        elapsed_ms: float | None = None
 
         if step.kind() is StepKind.RAW:
             try:
@@ -957,14 +1220,9 @@ class Runner:
             except TimeoutError:
                 if not bound.expired():
                     raise
-                # The SUT is holding the request. Waiting on would show only
-                # how late the response is, and that after the transport's
-                # own timeout, minutes later.
-                held = _duration_failure(
-                    'max_duration_ms', f'at most {longest}ms', 'no response',
-                    f'no response after {longest}ms',
+                return self._finish(
+                    step, scope, _held_too_long(step), started, attempts
                 )
-                return self._finish(step, scope, held, started, attempts)
             elapsed_ms = (self._clock() - sent) * 1000
 
             if not converged:
@@ -976,6 +1234,24 @@ class Runner:
                     ),
                 )
 
+        return self._conclude_unary(
+            step, scope, started, response, attempts=attempts, elapsed_ms=elapsed_ms
+        )
+
+    def _conclude_unary(
+        self,
+        step: Step,
+        scope: Scope,
+        started: float,
+        response: WireResponse,
+        *,
+        attempts: int,
+        elapsed_ms: float | None,
+    ) -> StepResult:
+        """Capture from a response and evaluate the step against it.
+
+        ``elapsed_ms`` is how long the response to an operation took.
+        """
         scope.record_response(step.id, response.payload)
         missed = self._capture(step, scope, response.payload, error=response.error)
         try:
@@ -985,7 +1261,7 @@ class Runner:
                 raise
             # The step's own assertions use a value its capture could not read.
             result = AssertionResult()
-        if step.kind() is StepKind.OPERATION:
+        if elapsed_ms is not None:
             result += _evaluate_duration(step, elapsed_ms)
         return self._finish(step, scope, result, started, attempts, missed=missed)
 
@@ -1003,25 +1279,55 @@ class Runner:
                 message='`repeat` cannot re-dispatch a streaming step',
             )
 
-        block = step.expect_stream
-        plans: tuple[StreamPlan | None, ...] = (
-            tuple(block.streams) if block is not None and block.streams else (None,)
-        )
-
         try:
             open_stream = self._stream_opener(step, scope)
         except (UnresolvedVariable, PathError) as exc:
             return self._step(step, Outcome.ERROR, started, message=str(exc))
 
+        gathered, duration = await self._read_streams(step, open_stream)
+        return self._conclude_streams(step, scope, started, gathered, duration)
+
+    async def _read_streams(
+        self,
+        step: Step,
+        open_stream: Callable[[], AsyncIterator[StreamEvent]],
+        *,
+        on_first_event: Callable[[int, StreamedEvent | None], None] | None = None,
+    ) -> tuple[list[_Reading | BaseException], AssertionResult]:
+        """Open the step's streams, all at once, and read each to its end.
+
+        Returns what each stream produced, an exception for one that could
+        not be read, and how the time taken compares with the step's duration
+        bounds.
+
+        ``on_first_event`` is called once per stream with its position among
+        the step's streams: with the first event when it arrives, or with
+        ``None`` when the read ends without one.
+        """
+        block = step.expect_stream
+
+        async def read(
+            index: int, plan: StreamPlan | None, source: AsyncIterator[StreamEvent]
+        ) -> _Reading:
+            try:
+                return await self._collect(
+                    source, block,
+                    disconnect_after=None if plan is None else plan.disconnect_after,
+                    stays_open_ms=_stays_open_ms(block, plan),
+                    on_first_event=(
+                        None if on_first_event is None
+                        else functools.partial(on_first_event, index)
+                    ),
+                )
+            finally:
+                if on_first_event is not None:
+                    on_first_event(index, None)
+
         sent = self._clock()
         gathered = await asyncio.gather(
             *(
-                self._collect(
-                    open_stream(), block,
-                    disconnect_after=None if plan is None else plan.disconnect_after,
-                    stays_open_ms=_stays_open_ms(block, plan),
-                )
-                for plan in plans
+                read(index, plan, open_stream())
+                for index, plan in enumerate(_plans(block))
             ),
             # `False` would propagate the first exception while the other
             # streams read on, leaking their connections for the rest of the run.
@@ -1030,6 +1336,19 @@ class Runner:
         # A streaming step without `expect_stream` may bound its duration. It
         # is timed over the whole call: until it is refused, or the stream ends.
         duration = _evaluate_duration(step, (self._clock() - sent) * 1000)
+        return gathered, duration
+
+    def _conclude_streams(
+        self,
+        step: Step,
+        scope: Scope,
+        started: float,
+        gathered: list[_Reading | BaseException],
+        duration: AssertionResult,
+    ) -> StepResult:
+        """Capture from what the step's streams produced and evaluate it."""
+        block = step.expect_stream
+        plans = _plans(block)
 
         raised = next((r for r in gathered if isinstance(r, BaseException)), None)
         if raised is not None:
@@ -1180,6 +1499,7 @@ class Runner:
         *,
         disconnect_after: int | None = None,
         stays_open_ms: int | None = None,
+        on_first_event: Callable[[StreamedEvent], None] | None = None,
     ) -> _Reading:
         """Read a stream into a list, bounded by `timeout_ms` and `max_count`.
 
@@ -1198,6 +1518,9 @@ class Runner:
         the SUT is required *not* to close: once an event has arrived, the
         read stops when that long passes without another. Whether the SUT
         closed the stream first is reported, since that is the failure.
+
+        ``on_first_event`` is called with the first event as soon as it has
+        arrived, while the read goes on.
         """
         events: list[StreamedEvent] = []
         status: int | None = None
@@ -1231,6 +1554,8 @@ class Runner:
                 if status is None:
                     status = event.status
                 events.append(normalize(event.data, event.index))
+                if on_first_event is not None and len(events) == 1:
+                    on_first_event(events[0])
                 if limit is not None and len(events) >= limit:
                     return
 

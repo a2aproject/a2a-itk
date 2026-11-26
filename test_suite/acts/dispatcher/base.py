@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Mapping
+from typing import Any, AsyncIterator, Callable, Mapping
 
 from test_suite.acts.schema import (
     ErrorType,
@@ -180,11 +180,20 @@ class Dispatcher(abc.ABC):
         operation: Operation,
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        *,
+        on_sent: Callable[[], None] | None = None,
     ) -> WireResponse:
         """Perform ``operation`` and return the reply.
 
         An error *from the SUT* is returned as ``response.error``, not raised.
         Only a failure to complete the exchange raises :class:`DispatchError`.
+
+        ``on_sent`` is called once the request has been written out, which is
+        before the reply arrives. A step that stays open while later steps run
+        uses it to learn when the next step may start. It is not called when
+        the request never leaves. Nor is it called for the agent card, which
+        is fetched over plain HTTP on every binding; the reply is then the
+        only sign a caller gets.
         """
 
     @abc.abstractmethod

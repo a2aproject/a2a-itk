@@ -409,6 +409,62 @@ class TestStepDuration:
             })
 
 
+class TestBackgroundStep:
+    """A step whose request stays open while the steps after it run."""
+
+    @staticmethod
+    def _background(**overrides):
+        return _step(background=True, **overrides)
+
+    def _a_test(self, *steps, **overrides):
+        overrides.setdefault('runner_requirements', ['concurrent_requests'])
+        return Test.model_validate(_test(steps=list(steps), **overrides))
+
+    def test_it_is_kept(self):
+        test = self._a_test(self._background(), _step(id='next'))
+        assert [step.background for step in test.steps] == [True, None]
+
+    def test_it_can_open_a_stream(self):
+        step = Step.model_validate(self._background(
+            operation='subscribe_to_task', params={'id': 'T1'}, expect=None,
+            expect_stream={'min_count': 1}, capture={'taskId': 'task.id'},
+        ))
+        assert step.background is True
+
+    def test_a_request_sent_again_cannot_stay_open(self):
+        with pytest.raises(ValidationError, match='set one or the other'):
+            Step.model_validate(
+                self._background(repeat={'until': 'status.state == X'})
+            )
+
+    def test_repeat_is_still_allowed_on_a_step_that_says_it_is_not_background(self):
+        step = Step.model_validate(
+            _step(background=False, repeat={'until': 'status.state == X'})
+        )
+        assert step.repeat is not None
+
+    @pytest.mark.parametrize('step', [
+        {'id': 'r', 'raw': {'method': 'POST', 'path': '/'}},
+        {'id': 'w', 'expect_webhook': {'task_id': 'T1'}},
+        {
+            'id': 'c',
+            'client_response': {'operation': 'get_task', 'wire_payload': {}},
+            'expect_parsed': {'id': 'x'},
+        },
+    ])
+    def test_it_is_for_an_operation_step(self, step):
+        with pytest.raises(ValidationError, match='keeps the request of an operation open'):
+            Step.model_validate({**step, 'background': True})
+
+    def test_the_test_has_to_declare_the_runner_requirement(self):
+        with pytest.raises(ValidationError, match='concurrent_requests'):
+            Test.model_validate(_test(steps=[self._background(), _step(id='next')]))
+
+    def test_a_step_that_is_not_background_declares_nothing(self):
+        test = Test.model_validate(_test(steps=[_step(background=False)]))
+        assert test.runner_requirements is None
+
+
 class TestProtocolVersionsPrecondition:
     def test_versions_are_kept(self):
         test = Test.model_validate(
