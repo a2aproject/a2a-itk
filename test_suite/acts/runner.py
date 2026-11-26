@@ -38,6 +38,7 @@ subscription to that task is being read.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import enum
 import functools
 import math
@@ -87,7 +88,13 @@ from test_suite.acts.schema import (
     TransportBinding,
     parse_spec_version,
 )
-from test_suite.acts.streaming import StreamedEvent, evaluate_stream, normalize
+from test_suite.acts.streaming import (
+    StreamedEvent,
+    awaits_events,
+    evaluate_events,
+    evaluate_stream,
+    normalize,
+)
 from test_suite.acts.wire_map import (
     binding_for_operation,
     card_interfaces,
@@ -1018,6 +1025,10 @@ class Runner:
 
         Polls rather than blocks, delivery being asynchronous. A missing
         receiver is the runner's gap, not the SUT's, so it lands as `error`.
+
+        The step reads deliveries until `min_count` have arrived and every
+        entry of `events` is decided, or until `timeout_ms` has passed. The
+        other assertions apply to the deliveries read up to then.
         """
         block = step.expect_webhook
         if self._read_webhook is None:
@@ -1033,6 +1044,7 @@ class Runner:
 
         try:
             task_id = scope.substitute(block.task_id)
+            expected = [_resolved(assertion, scope) for assertion in block.events or ()]
         except (UnresolvedVariable, PathError) as exc:
             return self._step(step, Outcome.ERROR, started, message=str(exc))
 
@@ -1040,7 +1052,16 @@ class Runner:
         delivered: list[Mapping[str, Any]] = []
         while True:
             delivered = list(await self._read_webhook(str(task_id)))
-            if len(delivered) >= block.min_count or self._clock() >= deadline:
+            events = [dict(n.get('event') or {}) for n in delivered]
+            # A delivered payload is a stream event, and is addressed in the
+            # same forms: by the name of its kind in either spelling, or
+            # straight through to the fields of the payload.
+            received = [normalize(event, index) for index, event in enumerate(events)]
+            # A delivery still to come could match one of `events`.
+            waiting = awaits_events(expected, received)
+            if (
+                len(delivered) >= block.min_count and not waiting
+            ) or self._clock() >= deadline:
                 break
             await self._sleep(_WEBHOOK_POLL_S)
 
@@ -1061,23 +1082,38 @@ class Runner:
                 checks=1,
             )
 
-        events = [dict(n.get('event') or {}) for n in delivered]
         scope.record_response(step.id, events[-1])
 
         checks = 1
+        if expected:
+            result = evaluate_events(
+                expected, received, path='webhook.events', had='the SUT delivered'
+            )
+            checks += result.checks
+            if not result.ok:
+                failure = FailureDetail.from_assertion(result.first, step.id)
+                if waiting:
+                    failure = dataclasses.replace(
+                        failure,
+                        message=(
+                            f'{failure.message}; the step read deliveries '
+                            f'for {block.timeout_ms}ms'
+                        ),
+                    )
+                return self._step(
+                    step, Outcome.FAIL, started, failure=failure, checks=checks
+                )
+
         for name, subject, target in (
-            ('each_event', block.each_event, events),
-            ('final_event', block.final_event, events[-1:]),
+            ('each_event', block.each_event, received),
+            ('final_event', block.final_event, received[-1:]),
         ):
             if subject is None:
                 continue
             for index, event in enumerate(target):
-                # A delivered payload is a stream event, and is addressed in
-                # the same forms: by the name of its kind in either spelling,
-                # or straight through to the fields of the payload.
                 result = evaluate_body(
                     scope.substitute(subject),
-                    normalize(event, index).view(),
+                    event.view(),
                     path=f'webhook.{name}[{index}]',
                 )
                 checks += result.checks
@@ -1135,20 +1171,25 @@ class Runner:
         a data part; the agent replies with whatever its client produced, in
         the same shape a dispatcher's `payload` would take, so `expect_parsed`
         is evaluated exactly like `expect.body`.
+
+        For a streaming response the data part carries `wire_stream`, the
+        events in order, in place of `wire_payload`. The agent replies with
+        `{events: [...]}`, the events its client surfaced, and each of them is
+        then addressed as an event of a stream is.
         """
         block = step.client_response
+        streamed = block.wire_stream is not None
+        canned = (
+            {'wire_stream': scope.substitute(block.wire_stream)} if streamed
+            else {'wire_payload': scope.substitute(block.wire_payload)}
+        )
         params = {
             'message': {
                 'role': 'ROLE_USER',
                 'messageId': self._new_uuid(),
                 'parts': [
                     {'text': CLIENT_PARSE_BEHAVIOR},
-                    {
-                        'data': {
-                            'operation': block.operation.value,
-                            'wire_payload': scope.substitute(block.wire_payload),
-                        }
-                    },
+                    {'data': {'operation': block.operation.value, **canned}},
                 ],
             }
         }
@@ -1175,6 +1216,8 @@ class Runner:
                 ),
             )
 
+        if streamed:
+            parsed = _surfaced(parsed)
         scope.record_response(step.id, parsed)
         result = evaluate_body(
             scope.substitute(step.expect_parsed), parsed, path='parsed'
@@ -1917,6 +1960,24 @@ def _parsed_from(payload: Any) -> Any | None:
             if isinstance(part, Mapping) and isinstance(part.get('data'), Mapping):
                 return part['data']
     return None
+
+
+def _surfaced(parsed: Mapping[str, Any]) -> Mapping[str, Any]:
+    """What a client read from a canned stream, with each event addressable.
+
+    The agent reports `{events: [...]}`, each event as the client surfaced
+    it. An assertion addresses such an event as it does an event of a stream:
+    by the name of its kind in either spelling, or straight through to the
+    fields of its payload. A reply without a list of events is left as it is,
+    and fails on the assertions that look for one.
+    """
+    events = parsed.get('events')
+    if not isinstance(events, list):
+        return parsed
+    return {
+        **parsed,
+        'events': [normalize(event, index).view() for index, event in enumerate(events)],
+    }
 
 
 def _is_streaming(step: Step) -> bool:
