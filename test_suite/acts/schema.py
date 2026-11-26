@@ -949,6 +949,28 @@ class ActsDocument(_Model):
             seen.add(suite.id)
         return self
 
+    def tests_newer_than_document(self) -> list[Test]:
+        """Tests whose `min_spec_version` is above the document's `spec_version`.
+
+        A run may not go past the version a document was written against, and
+        such a test is part of no run below its minimum, so no run selects it.
+        Left alone it would be missing from every report without a word.
+
+        Empty for a document whose `spec_version` is not a version: a run
+        refuses that document as a whole.
+        """
+        try:
+            newest = parse_spec_version(self.spec_version)
+        except ValueError:
+            return []
+        return [
+            test
+            for suite in self.suites or ()
+            for test in suite.tests
+            if test.min_spec_version is not None
+            and parse_spec_version(test.min_spec_version) > newest
+        ]
+
 
 def is_acts_document(raw: object) -> bool:
     """Does this parsed mapping look like an ACTS document?

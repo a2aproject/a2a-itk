@@ -722,6 +722,17 @@ class TestWhichInterfaceARunDials:
         card = (_interface(None, 'http://sut/any'), _interface('1.0.0', 'http://sut/v10'))
         assert self.pick('1.0', *card) == ('http://sut/v10', '1.0.0')
 
+    @pytest.mark.parametrize(('advertised', 'logged'), [
+        ('1.0', False), ('1.0.0', False), ('1.0.3', False), ('1.1', True), ('1.1.0', True),
+    ])
+    def test_a_patch_component_alone_is_not_logged_as_another_version(
+        self, caplog, advertised, logged
+    ):
+        card = {'supportedInterfaces': [_interface(advertised, 'http://sut/v1')]}
+        with caplog.at_level('INFO', logger=acts_runner.logger.name):
+            acts_runner.build_dispatcher(card, TransportBinding.JSONRPC, 'http://sut', '1.0')
+        assert ('against the jsonrpc interface the card advertises' in caplog.text) is logged
+
     @pytest.mark.parametrize('written', ['v1.0', '1', 'latest', '1.0-rc'])
     def test_a_version_that_cannot_be_read_is_never_used(self, written):
         """It is not the same as no version: the interface says it serves
@@ -816,7 +827,10 @@ class TestARunTargetsOneVersion:
         """An unbounded test claims to hold only up to its document's
         `spec_version`; nobody checked it against anything newer."""
         path = tmp_path / 'old.acts.yaml'
-        path.write_text(VERSIONED_SUITE.format(written_against='1.0'), encoding='utf-8')
+        # Without the test for 1.1: in a document written against 1.0 the
+        # loader refuses it, since no run could select it.
+        written = VERSIONED_SUITE.format(written_against='1.0')
+        path.write_text(written[: written.index('      - id: T-FROM-11')], encoding='utf-8')
         with pytest.raises(ActsRunError) as exc:
             self._run(monkeypatch, path, spec_version='1.1')
         assert 'cannot run at A2A 1.1' in str(exc.value)
