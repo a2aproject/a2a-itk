@@ -4,7 +4,8 @@ Two entry points:
 
   * :func:`resolve_ref` — one-shot ``git ls-remote`` to translate a symbolic
     ref (``main``, ``v1.2.3``) to a 40-hex SHA. Called at plan time by the
-    role-binding runner, not by :func:`fetch_commit` itself.
+    role-binding runner, not by :func:`fetch_commit` itself. A ref that is
+    already a 40-hex SHA is only checked to exist.
 
   * :func:`fetch_commit` — fetch exactly one commit into ``dst``, with
     bounded retry on transient errors. A 404-class failure (SHA not found)
@@ -18,7 +19,9 @@ fake so nothing here touches the real network.
 from __future__ import annotations
 
 import random
+import re
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -27,6 +30,7 @@ from test_suite.launcher.errors import InfraFailure, PermanentError, Stage
 
 
 _GITHUB_HTTPS = 'https://github.com/{repo}.git'
+_FULL_SHA = re.compile(r'[0-9a-f]{40}')
 
 
 def repo_url(repo: str) -> str:
@@ -82,12 +86,14 @@ def _classify_git_failure(stderr: str) -> type[InfraFailure | PermanentError]:
 
 
 def resolve_ref(repo: str, ref: str, *, timeout: int | None = None) -> str:
-    """Resolve a symbolic ref to a 40-hex commit SHA via ``git ls-remote``.
+    """Resolve a ref to a 40-hex commit SHA via ``git ls-remote``.
 
     Args:
         repo: ``owner/name``.
-        ref: A branch, tag, or partial SHA. ``git ls-remote`` will only match
-            branches and tags — a bare SHA does not resolve this way.
+        ref: A branch, a tag, or a full 40-hex commit SHA. ``git ls-remote``
+            lists branches and tags, not commits, so a full SHA is returned
+            as it is once the remote has confirmed the commit. A shortened
+            SHA is not accepted.
         timeout: Per-attempt timeout; defaults to :func:`config.checkout_timeout`.
 
     Ambiguity handling: an unqualified ref like ``main`` can match multiple
@@ -102,6 +108,9 @@ def resolve_ref(repo: str, ref: str, *, timeout: int | None = None) -> str:
         InfraFailure: Network exhausted after retries.
     """
     to = timeout if timeout is not None else config.checkout_timeout()
+    if _FULL_SHA.fullmatch(ref):
+        _require_commit(repo, ref, to)
+        return ref
     last_exc: BaseException | None = None
     for attempt in range(config.retries()):
         try:
@@ -151,6 +160,29 @@ def resolve_ref(repo: str, ref: str, *, timeout: int | None = None) -> str:
         _sleep_backoff(attempt)
 
     raise InfraFailure(repo, ref, Stage.FETCH, cause=last_exc)
+
+
+def _require_commit(repo: str, sha: str, timeout: int) -> None:
+    """Raise ``PermanentError`` when ``sha`` is not a commit on the remote.
+
+    Fetches the one commit object into a throwaway repository. Without this
+    check, a pin to a commit that does not exist would surface only when the
+    peer is started, where the peer is dropped from a run that still passes.
+    A remote that cannot be reached is not an error here: the fetch at start
+    has the retries.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            _run_git(['init', '--quiet'], cwd=Path(tmp), timeout=timeout)
+            fetched = _run_git(
+                ['fetch', '--quiet', '--depth', '1', '--filter=tree:0', repo_url(repo), sha],
+                cwd=Path(tmp),
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return
+    if fetched.returncode != 0 and _classify_git_failure(fetched.stderr) is PermanentError:
+        raise PermanentError(repo, sha, Stage.FETCH, fetched.stderr.strip())
 
 
 def _pick_sha(stdout: str) -> str | None:

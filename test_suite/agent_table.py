@@ -1,4 +1,4 @@
-"""Where each agent in the current run is listening.
+"""Where each agent in the current run is listening, and what it speaks.
 
 ``matrix.yaml`` says which agents exist; this says where the ones started for
 *this run* are. Passed down the call chain rather than held in a module
@@ -16,10 +16,11 @@ _HOST = '127.0.0.1'
 
 @dataclass(frozen=True)
 class AgentEndpoint:
-    """One running agent's ports."""
+    """One running agent: its ports and the A2A versions it speaks."""
 
     http_port: int
     grpc_port: int
+    protocol_versions: tuple[str, ...]  # newest first
 
     @property
     def card_uri(self) -> str:
@@ -39,17 +40,23 @@ class AgentTable(Mapping[str, AgentEndpoint]):
         self._endpoints = dict(endpoints)
 
     @classmethod
-    def from_handles(cls, handles: Mapping[str, object]) -> 'AgentTable':
+    def from_handles(
+        cls,
+        handles: Mapping[str, object],
+        protocol_versions: Mapping[str, tuple[str, ...]],
+    ) -> 'AgentTable':
         """Build from the launcher's ``AgentHandle`` objects.
 
         Takes anything exposing ``http_port`` / ``grpc_port`` so this module
         needn't import the launcher, keeping the traversal engine free of a
-        dependency on how agents get started.
+        dependency on how agents get started. ``protocol_versions`` gives,
+        for each agent in ``handles``, the A2A versions it speaks.
         """
         return cls({
             agent_id: AgentEndpoint(
                 http_port=handle.http_port,  # type: ignore[attr-defined]
                 grpc_port=handle.grpc_port,  # type: ignore[attr-defined]
+                protocol_versions=protocol_versions[agent_id],
             )
             for agent_id, handle in handles.items()
         })

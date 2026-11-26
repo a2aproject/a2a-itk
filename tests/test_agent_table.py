@@ -20,41 +20,55 @@ class _Handle:
         self.grpc_port = grpc_port
 
 
+def _endpoint(http_port, grpc_port):
+    return AgentEndpoint(http_port, grpc_port, protocol_versions=('1.0', '0.3'))
+
+
 class TestEndpoint:
     def test_card_uri_is_built_from_the_http_port(self):
-        assert AgentEndpoint(8080, 9090).card_uri == 'http://127.0.0.1:8080'
+        assert _endpoint(8080, 9090).card_uri == 'http://127.0.0.1:8080'
 
     def test_is_frozen(self):
         with pytest.raises(Exception):  # noqa: B017, PT011
-            AgentEndpoint(1, 2).http_port = 3
+            _endpoint(1, 2).http_port = 3
 
 
 class TestFromHandles:
     def test_reads_both_ports(self):
-        table = AgentTable.from_handles({'current': _Handle(101, 102)})
-        assert table['current'] == AgentEndpoint(101, 102)
+        table = AgentTable.from_handles(
+            {'current': _Handle(101, 102)}, {'current': ('1.0', '0.3')}
+        )
+        assert table['current'] == _endpoint(101, 102)
+
+    def test_each_agent_gets_its_own_versions(self):
+        table = AgentTable.from_handles(
+            {'go_v10': _Handle(1, 2), 'go_v03': _Handle(3, 4)},
+            {'go_v10': ('1.0', '0.3'), 'go_v03': ('0.3',)},
+        )
+        assert table['go_v10'].protocol_versions == ('1.0', '0.3')
+        assert table['go_v03'].protocol_versions == ('0.3',)
 
     def test_empty_cluster(self):
-        assert len(AgentTable.from_handles({})) == 0
+        assert len(AgentTable.from_handles({}, {})) == 0
 
 
 class TestCardUri:
     def test_returns_the_uri(self):
-        table = AgentTable({'go_v10': AgentEndpoint(5000, 5001)})
+        table = AgentTable({'go_v10': _endpoint(5000, 5001)})
         assert table.card_uri('go_v10') == 'http://127.0.0.1:5000'
 
     def test_missing_agent_raises_runtime_error(self):
         """Deliberately not ValueError: _get_valid_subgraphs catches those to
         skip untraversable subgraphs, so a never-started peer would vanish
         from the expansion instead of failing the run."""
-        table = AgentTable({'current': AgentEndpoint(1, 2)})
+        table = AgentTable({'current': _endpoint(1, 2)})
         with pytest.raises(RuntimeError) as e:
             table.card_uri('ghost_v10')
         assert not isinstance(e.value, ValueError)
 
     def test_error_lists_what_did_start(self):
         table = AgentTable({
-            'current': AgentEndpoint(1, 2), 'go_v10': AgentEndpoint(3, 4),
+            'current': _endpoint(1, 2), 'go_v10': _endpoint(3, 4),
         })
         with pytest.raises(RuntimeError, match='current, go_v10'):
             table.card_uri('ghost_v10')
@@ -67,7 +81,7 @@ class TestCardUri:
 class TestMappingBehaviour:
     def test_iterates_and_sizes(self):
         table = AgentTable({
-            'a': AgentEndpoint(1, 2), 'b': AgentEndpoint(3, 4),
+            'a': _endpoint(1, 2), 'b': _endpoint(3, 4),
         })
         assert sorted(table) == ['a', 'b']
         assert len(table) == 2
@@ -75,18 +89,18 @@ class TestMappingBehaviour:
 
     def test_snapshot_is_decoupled_from_the_source_dict(self):
         """A later mutation of the caller's dict must not retarget a live run."""
-        source = {'a': AgentEndpoint(1, 2)}
+        source = {'a': _endpoint(1, 2)}
         table = AgentTable(source)
-        source['b'] = AgentEndpoint(3, 4)
+        source['b'] = _endpoint(3, 4)
         assert 'b' not in table
 
     def test_has_no_public_setter(self):
-        table = AgentTable({'a': AgentEndpoint(1, 2)})
+        table = AgentTable({'a': _endpoint(1, 2)})
         with pytest.raises(TypeError):
-            table['b'] = AgentEndpoint(3, 4)
+            table['b'] = _endpoint(3, 4)
 
     def test_repr_shows_ports(self):
-        assert 'a=:1' in repr(AgentTable({'a': AgentEndpoint(1, 2)}))
+        assert 'a=:1' in repr(AgentTable({'a': _endpoint(1, 2)}))
 
 
 class TestRegistryIsGone:

@@ -158,7 +158,8 @@ def _print_available_sdks() -> None:
     print('Agent identifiers available from matrix.yaml:')
     for agent_id in ids:
         entry = matrix.resolve(agent_id)
-        print(f'  {agent_id:<{width}}  {entry.repo} @ {entry.ref}')
+        versions = ', '.join(entry.protocol_versions)
+        print(f'  {agent_id:<{width}}  {entry.repo} @ {entry.ref}  (A2A {versions})')
     print(f'  {SUT_ID:<{width}}  whatever --mount points at (the code under test)')
     print(
         '\nAppend _2 to any identifier to run a second, independently-ported '

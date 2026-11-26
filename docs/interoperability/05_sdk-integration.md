@@ -104,6 +104,20 @@ Everything above, plus code in the launcher:
 
 The cache key includes the image digest, so a Dockerfile change invalidates every cached peer tree on the next run. That is intended.
 
+### A line for an A2A version not released yet
+
+An SDK that implements a new A2A version on a development branch gets a line of its own for it, such as `v11` for A2A 1.1:
+
+```yaml
+python:
+  v11: {repo: a2aproject/a2a-python, ref: <40-character commit SHA>, protocol_versions: ["1.1", "1.0", "0.3"]}
+```
+
+- **Pin the line to a commit, not to the branch.** The traversal suite gates pull requests in every SDK, so a development branch that breaks overnight must not fail them. A pull request here moves the pin. A pin to a commit that does not exist fails the run when it is planned.
+- **List `protocol_versions`.** Only `v10` and `v03` have a default.
+- **After the SDK's first release of that version,** point the line at `main`, as `v10` is today.
+- **When the SDK's `main` moves to the new version,** pin its `v10` line to the last 1.0 release tag, so that the 1.0 agent stays in the matrix.
+
 ### A `v03` line
 
 The 0.3 releases of each SDK predate ITK, so a `v03` peer is a tag of the form `v0.3.N+itk`: the release commit with the `itk/` agent added on top. To make one, branch from the release tag, add an agent that builds against that version, tag it, and point the matrix at the tag. Only Python, Go and TypeScript have one today, because only those SDKs shipped a 0.3 line.

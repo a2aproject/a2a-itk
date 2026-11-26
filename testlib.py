@@ -461,9 +461,11 @@ async def _execute_single_itk_test(  # noqa: PLR0913
         logger.info('Executing %s traversal test...', label)
         logger.info('Test instruction: %s', test_instruction)
         first_sdk = sdks[0]
-        is_v0 = 'v03' in first_sdk
-
         base_uri = agents.card_uri(first_sdk)
+        # The first request is written as A2A 0.3 only for an agent that
+        # speaks nothing newer.
+        is_v0 = agents[first_sdk].protocol_versions[0] == '0.3'
+
         target_url = f'{base_uri.rstrip("/")}/jsonrpc'
 
         mount = itk_config.mount_dir()

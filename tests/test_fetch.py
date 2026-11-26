@@ -94,6 +94,51 @@ class TestResolveRefReal:
             fetch.resolve_ref(repo, 'refs/heads/no-such-branch')
 
 
+class TestResolveRefPinnedCommit:
+    """A matrix line may pin a peer to a commit that no branch or tag names."""
+
+    def test_a_commit_on_the_remote_is_returned_as_it_is(self, local_repo, fast_backoff):  # noqa: ARG002
+        repo, sha = local_repo
+        assert fetch.resolve_ref(repo, sha) == sha
+
+    def test_a_commit_that_is_not_on_the_remote_is_permanent(self, local_repo, fast_backoff):  # noqa: ARG002
+        """Found when the run is planned. Left to the start of the peer, it
+        would drop the peer from a run that still passes."""
+        repo, _ = local_repo
+        with pytest.raises(PermanentError):
+            fetch.resolve_ref(repo, '0' * 40)
+
+    @pytest.mark.parametrize('outcome', ['times out', 'cannot reach the remote'])
+    def test_a_remote_that_cannot_be_reached_is_left_to_the_fetch_at_start(self, monkeypatch, outcome):
+        def fake(args, *, cwd=None, timeout):  # noqa: ARG001
+            if args[0] != 'fetch':
+                return subprocess.CompletedProcess(args, 0, '', '')
+            if outcome == 'times out':
+                raise subprocess.TimeoutExpired(args, timeout)
+            return subprocess.CompletedProcess(args, 128, '', 'fatal: Could not resolve host: github.com')
+
+        monkeypatch.setattr(fetch, '_run_git', fake)
+        sha = '0123456789abcdef0123456789abcdef01234567'
+        assert fetch.resolve_ref('x/y', sha) == sha
+
+    @pytest.mark.parametrize('ref', [
+        '0123456',                                      # shortened
+        '0123456789ABCDEF0123456789ABCDEF01234567',     # upper case
+        '0123456789abcdef0123456789abcdef012345678',    # 41 characters
+    ])
+    def test_anything_else_is_looked_up_as_a_branch_or_tag(self, monkeypatch, fast_backoff, ref):  # noqa: ARG002
+        asked = []
+
+        def fake(args, *, cwd=None, timeout):  # noqa: ARG001
+            asked.append(args[-1])
+            return subprocess.CompletedProcess(args, 0, '', '')
+
+        monkeypatch.setattr(fetch, '_run_git', fake)
+        with pytest.raises(PermanentError):
+            fetch.resolve_ref('x/y', ref)
+        assert set(asked) == {ref}
+
+
 # ---------------------------------------------------------------------------
 # Classifier
 # ---------------------------------------------------------------------------

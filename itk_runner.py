@@ -159,6 +159,18 @@ def set_matrix(matrix: Matrix | None) -> None:
     _matrix = matrix
 
 
+# The SUT is not in matrix.yaml, so nothing declares what it speaks. It is
+# taken to speak what a `v10` line does.
+SUT_PROTOCOL_VERSIONS = ('1.0', '0.3')
+
+
+def _protocol_versions(agent_id: str) -> tuple[str, ...]:
+    """The A2A versions ``agent_id`` speaks, newest first."""
+    if agent_id == SUT_ID:
+        return SUT_PROTOCOL_VERSIONS
+    return get_matrix().resolve(agent_id).protocol_versions
+
+
 # ---------------------------------------------------------------------------
 # Input: either scenario schema -> executable scenarios
 # ---------------------------------------------------------------------------
@@ -240,7 +252,8 @@ def build_specs(sdk_ids: list[str]) -> dict[str, TargetSpec]:
 
     Refs resolve to SHAs once, here at plan time, so a branch tip that moves
     mid-run cannot mix versions across peers — that's the rule
-    ``TargetSpec`` enforces by rejecting anything but a 40-hex SHA.
+    ``TargetSpec`` enforces by rejecting anything but a 40-hex SHA. A ref
+    that is already a full SHA pins the peer to that commit.
 
     Each unique (repo, ref) resolves once even when several identifiers map
     to it (``python_v10`` and ``python_v10_2`` share one entry).
@@ -444,7 +457,10 @@ async def _run_locked(
         # Where the agents we started are listening. Passed down the call
         # chain rather than published to a global, so nothing can leak into
         # the next run. Holds only the agents that actually came up.
-        agents = AgentTable.from_handles(started_handles)
+        agents = AgentTable.from_handles(
+            started_handles,
+            {agent_id: _protocol_versions(agent_id) for agent_id in started_handles},
+        )
         logger.info('Cluster up: %r', agents)
 
         runnable, trimmed, skipped = _select_runnable(scenarios, agents)

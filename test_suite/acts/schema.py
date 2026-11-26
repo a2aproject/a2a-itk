@@ -26,10 +26,11 @@ everything else through intact.
 from __future__ import annotations
 
 import enum
-import re
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from test_suite.versions import parse_spec_version
 
 
 ACTS_VERSION = '1.0'
@@ -38,25 +39,6 @@ ACTS_VERSION = '1.0'
 #: needs a default reads this one, so the header a run sends, the tests it
 #: selects and the version its report claims cannot come apart.
 DEFAULT_SPEC_VERSION = '1.0'
-
-_SPEC_VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
-
-
-def parse_spec_version(text: str) -> tuple[int, int]:
-    """An A2A version as ``(major, minor)``.
-
-    Versions are compared as numbers, component by component: compared as
-    text, ``1.10`` would sort before ``1.9``.
-
-    Raises:
-        ValueError: ``text`` is not a ``Major.Minor`` string.
-    """
-    match = _SPEC_VERSION.fullmatch(text)
-    if match is None:
-        raise ValueError(
-            f'{text!r} is not an A2A version; expected "Major.Minor", such as "1.1"'
-        )
-    return int(match[1]), int(match[2])
 
 # A step's ``id`` is what ``{{step.var}}`` substitution resolves against, so
 # these are identifiers, not prose.
