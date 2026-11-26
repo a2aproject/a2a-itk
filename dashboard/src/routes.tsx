@@ -4,7 +4,8 @@
 //   #/             -> redirect to the cross-SDK summary view (#/summary)
 //   #/summary      -> all SDKs at a glance (interoperability + conformance)
 //   #/itk/go       -> Go interoperability results
-//   #/acts/go      -> Go conformance results
+//   #/acts/go      -> Go conformance results at A2A 1.0
+//   #/acts/go/1.1  -> Go conformance results at A2A 1.1
 //   #/go           -> legacy one-segment path, redirected to #/itk/go
 //   #/nonsense     -> not-found view
 
@@ -13,7 +14,8 @@ import ActsView from "./acts/components/ActsView.tsx";
 import ItkView from "./itk/components/ItkView.tsx";
 import Layout from "./shared/components/Layout.tsx";
 import NotFound from "./shared/components/NotFound.tsx";
-import { SDKS, findSdk } from "./shared/sdks.ts";
+import { DEFAULT_ACTS_VERSION, SDKS, findSdk } from "./shared/sdks.ts";
+import type { ActsVersion } from "./shared/sdks.ts";
 import type { Domain } from "./shared/types.ts";
 import SummaryView from "./summary/components/SummaryView.tsx";
 
@@ -24,6 +26,15 @@ export const SUMMARY_PATH = "/summary";
 /** Canonical path for one suite/SDK combination. */
 export const sdkPath = (domain: Domain, sdkId: string): string =>
   `/${domain}/${sdkId}`;
+
+/**
+ * Canonical path for one SDK's conformance results at one A2A version. 1.0
+ * keeps the path it had before results were published per version.
+ */
+export const actsPath = (sdkId: string, version: ActsVersion): string =>
+  version === DEFAULT_ACTS_VERSION
+    ? sdkPath("acts", sdkId)
+    : `${sdkPath("acts", sdkId)}/${version}`;
 
 /**
  * The dashboard was single-suite once, so `#/go` used to be a real URL. Keep
@@ -50,6 +61,7 @@ export const router = createHashRouter([
       { path: "itk/:sdkId", element: <ItkView /> },
       { path: "acts", element: toDefault("acts") },
       { path: "acts/:sdkId", element: <ActsView /> },
+      { path: "acts/:sdkId/:version", element: <ActsView /> },
       { path: ":sdkId", element: <LegacySdkPath /> },
       { path: "*", element: <NotFound /> },
     ],
