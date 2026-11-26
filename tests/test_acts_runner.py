@@ -64,7 +64,7 @@ from test_suite.acts.schema import (
 )
 
 
-from tests.acts_fake_agent import run_virtual
+from tests.mock_agent import run_virtual
 
 
 CORPUS = (
