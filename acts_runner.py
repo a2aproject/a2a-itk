@@ -404,7 +404,7 @@ def build_dispatcher(
     not necessarily where the binding is mounted.
     """
     url, advertised = interface_for(card, binding, spec_version)
-    found = _advertised_version({'protocolVersion': advertised})
+    found = interface_version({'protocolVersion': advertised})
     if found is not None and found != parse_spec_version(spec_version):
         logger.info(
             'Running at A2A %s against the %s interface the card advertises '
