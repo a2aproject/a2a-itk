@@ -504,6 +504,75 @@ suites:
               each_event:
                 status_update:
                   generation: {gt: "{{interrupted.generation}}"}
+      - id: PROBE-STREAM-GENERATION
+        name: A stream reports every change, one generation at a time
+        level: must
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-stream-chunked]
+        preconditions:
+          capabilities: {streaming: true}
+        steps:
+          - id: stream
+            operation: send_streaming_message
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-stream-chunked generation probe"}]
+            expect_stream:
+              min_count: 3
+              ordering: [monotonic_state, contiguous_generation]
+              final_event:
+                status: {state: TASK_STATE_COMPLETED}
+      - id: PROBE-MESSAGE-UPDATE
+        name: A client message is reported to a subscriber as a message update
+        level: must
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-hold-working]
+        preconditions:
+          capabilities: {streaming: true}
+        steps:
+          - id: start
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-hold-working 8000 message update probe"}]
+              configuration: {returnImmediately: true}
+            expect: {status: 200}
+            capture: {taskId: task.id}
+          - id: working
+            operation: get_task
+            params: {id: "{{start.taskId}}"}
+            expect: {status: 200}
+            capture: {generation: generation}
+            repeat: {until: "status.state == TASK_STATE_WORKING", max_attempts: 10, delay_ms: 200}
+          - id: add-message
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                taskId: "{{start.taskId}}"
+                parts: [{text: a message while the task is working}]
+              configuration: {returnImmediately: true}
+            expect: {status: 200}
+          - id: resume
+            operation: subscribe_to_task
+            params:
+              id: "{{start.taskId}}"
+              lastSeenGeneration: "{{working.generation}}"
+            expect_stream:
+              timeout_ms: 30000
+              ordering: contiguous_generation
+              events:
+                - index: 0
+                  message_update:
+                    taskId: "{{start.taskId}}"
+                    generation: {gt: "{{working.generation}}"}
+                    message:
+                      role: ROLE_USER
+                      parts: [{text: a message while the task is working}]
+              final_event:
+                status: {state: TASK_STATE_COMPLETED}
 '''
 
 
@@ -525,7 +594,10 @@ class TestGenerationEndToEnd:
         assert {
             r.id: r.failure.message for r in results.values() if r.result is not Outcome.PASS
         } == {}
-        assert set(results) == {'PROBE-GENERATION-ADVANCES', 'PROBE-RESUME'}
+        assert set(results) == {
+            'PROBE-GENERATION-ADVANCES', 'PROBE-RESUME',
+            'PROBE-STREAM-GENERATION', 'PROBE-MESSAGE-UPDATE',
+        }
 
     def test_a_generation_that_does_not_advance_is_caught(self, behaviors_path, probe):
         def stand_still(agent: FakeAgent) -> None:
@@ -553,6 +625,48 @@ class TestGenerationEndToEnd:
         assert result.result is Outcome.FAIL
         assert result.failure.step_id == 'turn1'
         assert result.failure.assertion_path == 'body.task.generation'
+        assert 'is missing' in result.failure.message
+
+    def test_a_change_reported_without_its_own_generation_is_caught(
+        self, behaviors_path, probe
+    ):
+        """An agent that raises the generation once for a chunked artifact and
+        reports every chunk at that value."""
+        def one_generation_for_all_chunks(agent: FakeAgent) -> None:
+            add, advance = agent._add_artifact, agent._advance
+
+            def add_chunk(record, chunk, *, append=False, **kwargs):
+                if append:
+                    # A further chunk of the same artifact: leave the
+                    # generation where the first chunk put it.
+                    agent._advance = lambda record: record.task.generation
+                try:
+                    add(record, chunk, append=append, **kwargs)
+                finally:
+                    agent._advance = advance
+
+            agent._add_artifact = add_chunk
+
+        result = self.run(
+            behaviors_path, probe, one_generation_for_all_chunks
+        )['PROBE-STREAM-GENERATION']
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path.endswith('.generation')
+        assert 'not greater than' in result.failure.message
+
+    def test_a_1_1_subscriber_served_as_a_1_0_one_is_caught(self, behaviors_path, probe):
+        """A client of A2A 1.0 is not sent message updates, so an agent that
+        ignores the version a subscriber asked for leaves the update out."""
+        def as_1_0(agent: FakeAgent) -> None:
+            subscribe = agent.subscribe_to_task
+            agent.subscribe_to_task = lambda request, version: subscribe(request, (1, 0))
+
+        result = self.run(behaviors_path, probe, as_1_0)['PROBE-MESSAGE-UPDATE']
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'resume'
+        # The first event is a status update, so nothing of the message
+        # update the test describes is there.
+        assert result.failure.assertion_path.startswith('events[0].message_update.')
         assert 'is missing' in result.failure.message
 
     def test_a_resume_that_starts_over_is_caught(self, behaviors_path, probe):

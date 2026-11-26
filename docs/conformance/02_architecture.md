@@ -90,7 +90,7 @@ Each test gets a fresh variable `Scope` (section 3.2, isolation), seeded with th
 | --- | --- |
 | operation, unary | Substitute `{{...}}` in `params`, dispatch, record the response, run `capture` and evaluate `expect` (status, headers, body) or `expect_error`. A failed assertion is reported in preference to a `capture` that found no value, because a value is usually captured on the step that also asserts it. When the step's own assertions use the value the capture missed, the miss is what is reported |
 | operation, with `repeat` | Re-dispatch until the `until` expression holds or attempts run out (defaults: 10 attempts, 1000 ms, no backoff). Running out is a fail |
-| operation, streaming | Read events until the stream closes, `max_count` is reached, or the timeout. Evaluate `expect_stream`: event count, matchers on specific events, the final event, and whether the task states form a legal progression. `streams: N` opens N concurrent streams; `disconnect_after` hangs up mid-stream. `capture` reads the first event, with the kind of event as the first path segment (`task.id`), and `expect_stream` may compare events with captured values, this step's included |
+| operation, streaming | Read events until the stream closes, `max_count` is reached, or the timeout. Evaluate `expect_stream`: event count, matchers on specific events, the final event, and the `ordering` rules (see [Stream events](#stream-events)). `streams: N` opens N concurrent streams; `disconnect_after` hangs up mid-stream. `capture` reads the first event, with the kind of event as the first path segment (`task.id`), and `expect_stream` may compare events with captured values, this step's included |
 | raw | Send the HTTP request as written, no default headers; evaluate as above |
 | `client_response` | section 10: ask the SUT's *own client* to parse a canned payload. No A2A operation does this, so it rides a `send_message` whose text is `tck-client-parse` and whose data part carries `{operation, wire_payload}`; the agent answers with what its client parsed and `expect_parsed` is evaluated like a body |
 | `expect_webhook` | Poll the receiver for notifications delivered to `webhookUrl` for a task until `min_count` arrive or `timeout_ms` passes; evaluate `each_event`, `final_event`, `headers` and `token` |
@@ -98,6 +98,24 @@ Each test gets a fresh variable `Scope` (section 3.2, isolation), seeded with th
 Every abstract operation carries `A2A-Version` set to the run version (section 12.4); on gRPC it is call metadata. A raw step is sent as written and reads the run version from `{{specVersion}}`.
 
 A streaming step with no `timeout_ms` of its own gets 30 seconds. Not one streaming step in the corpus declares a timeout, and without a backstop a SUT that never closes a stream would hang the run and produce no report at all.
+
+### Stream events
+
+A stream event is one of six kinds: `task`, `message`, `status_update`, `artifact_update`, and from A2A 1.1 `message_update` and `error`. An assertion addresses an event by the name of its kind (`status_update: {status: ...}`) or straight through to the fields of its payload (`status: ...`). The wire writes the kind in camelCase (`statusUpdate`) and a test usually in snake_case; both spellings name the same kind, so `message_update: {absent: true}` fails on an event that arrived as `messageUpdate`. A payload delivered to the webhook is addressed the same way.
+
+At the top of an event the name of a kind always means the kind. A message update and a stream error both have a field called `message`; `message: ...` does not match them, and that field is reached through its own kind: `message_update: {message: ...}`.
+
+An event of a kind the runner does not know is kept as it arrived and counts as an event of the stream.
+
+`ordering` takes one rule or a list:
+
+| Rule | The stream fails when |
+| --- | --- |
+| `monotonic_state` | a state returns to `SUBMITTED`, or anything follows a terminal state |
+| `monotonic_generation` | a status, artifact or message update has no `generation`, one below 1, or one that is not greater than every generation before it; or a task snapshot has one below 1 or lower than one before it. A snapshot may repeat the latest value |
+| `contiguous_generation` | any of the above, or an update is not exactly one above the latest generation before it, or a snapshot after the first event is above it. Only for a stream that is sent every event |
+
+`message` and `error` events carry no generation and are skipped by the two generation rules. An event of a kind the runner does not know is skipped too, but it may have advanced the generation, so under `contiguous_generation` the event after it is checked for order and not for a gap.
 
 ### Assertions
 
