@@ -54,6 +54,15 @@ class MalformedResponse(DispatchError):
     """
 
 
+class ExchangeEnded(DispatchError):
+    """A request of a live exchange could not be sent: the exchange is over.
+
+    The SUT closed it, or failed it, before the client had sent everything.
+    Set apart from a request that could not be delivered for a reason of the
+    transport, because here the SUT did something a test can speak about.
+    """
+
+
 class UnsupportedByBinding(DispatchError):
     """This binding cannot express the requested call.
 
@@ -162,6 +171,42 @@ class StreamEvent:
     status: int | None = None
 
 
+class LiveExchange(abc.ABC):
+    """One two-way exchange with the SUT (`SendLiveMessage`, from A2A 1.1).
+
+    The client keeps sending requests, the uplink, while the SUT streams
+    events, the downlink. :meth:`events` reads the downlink and :meth:`send`
+    sends one more request; one reader and one sender may work at the same
+    time. The request that opens the exchange is given when it is created
+    (:meth:`Dispatcher.live`) and goes out when the downlink is first read.
+    """
+
+    @abc.abstractmethod
+    def events(self) -> AsyncIterator[StreamEvent]:
+        """Open the exchange and yield the SUT's events in order.
+
+        Raises :class:`StreamNotOpened` when the SUT refuses to open it. To
+        be read once; closing the iterator ends the exchange.
+        """
+
+    @abc.abstractmethod
+    async def send(self, request: Mapping[str, Any]) -> WireResponse | None:
+        """Send one request after the opening one.
+
+        ``request`` is the JSON form of a `StreamRequest`. Returns what the
+        SUT answered where the binding gives a request a response of its own,
+        and ``None`` where it does not.
+
+        Raises :class:`MalformedResponse` when the SUT answers in a form the
+        binding does not allow for such a request, which on an HTTP binding
+        is an event stream. Raises :class:`ExchangeEnded` when the exchange
+        was over before the request could be sent.
+        """
+
+    async def aclose(self) -> None:
+        """End the exchange from this side. Idempotent."""
+
+
 class Dispatcher(abc.ABC):
     """Binds abstract operations to one wire protocol.
 
@@ -236,6 +281,20 @@ class Dispatcher(abc.ABC):
         unwrapping would delete the thing under test. Raises
         :class:`UnsupportedByBinding` on gRPC.
         """
+
+    def live(
+        self,
+        request: Mapping[str, Any],
+        headers: Mapping[str, str] | None = None,
+    ) -> LiveExchange:
+        """A live exchange that ``request`` opens.
+
+        ``request`` is the JSON form of a `StreamRequest`. Nothing is sent
+        until the exchange's events are read.
+        """
+        raise UnsupportedByBinding(
+            f'{type(self).__name__} does not drive a live exchange'
+        )
 
     async def aclose(self) -> None:
         """Release the underlying connection. Idempotent."""

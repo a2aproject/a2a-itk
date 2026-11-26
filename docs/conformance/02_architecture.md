@@ -73,8 +73,8 @@ A SUT answering in a shape the binding does not permit - for example a streaming
 Checked in this order, before any step runs:
 
 1. **Binding.** A backstop - the pipeline already scoped the corpus.
-2. **Step kinds.** The runner does not execute two kinds. One is a bare `assertion` step; the corpus contains none. The other is a `live` step, which drives the two-way exchange A2A 1.1 adds (`SendLiveMessage`): a test with one is skipped with `contains live step(s); not yet supported`.
-3. **Runner requirements.** A test may declare it needs `header_inspection`, `auth_credentials`, `concurrent_streams`, `stream_disconnect`, `concurrent_requests`, `webhook_endpoint` or `live_stream` (section 12.1). This runner has the first five by construction, `webhook_endpoint` whenever the receiver started, and not `live_stream`.
+2. **Step kinds.** The one kind the runner does not execute is a bare `assertion` step; the corpus contains none.
+3. **Runner requirements.** A test may declare it needs `header_inspection`, `auth_credentials`, `concurrent_streams`, `stream_disconnect`, `concurrent_requests`, `webhook_endpoint` or `live_stream` (section 12.1). This runner has the first five and `live_stream` by construction, and `webhook_endpoint` whenever the receiver started.
 4. **Preconditions** (section 12.5), evaluated against the agent card:
    - `capabilities: {streaming: true}` - the card must advertise it (a card that omits a capability has not advertised it). A capability name that A2A does not define at all is reported as `PRECONDITION CANNOT BE SATISFIED`, a distinct skip that `run_acts.py` lists separately, because no SUT could ever clear it and it would otherwise look like "not applicable here".
    - `authentication: true` - the card must declare both `securitySchemes` and a non-empty `securityRequirements`. Schemes alone are an offer, not a requirement.
@@ -108,7 +108,7 @@ Every abstract operation carries `A2A-Version` set to the run version (section 1
 
 The receiver stores `task`, `statusUpdate`, `artifactUpdate` and `messageUpdate` payloads. It still refuses a `message` payload, so a webhook step never sees a delivery of that kind.
 
-`send_live_message`, the two-way exchange A2A 1.1 adds, is in the wire map so that a client step can name it. An operation step cannot name it, because the runner does not drive a live exchange yet.
+`send_live_message`, the two-way exchange A2A 1.1 adds, is in the wire map. A client step can name it, and a [live step](#live-exchanges) drives it. An operation step cannot name it, because such a step sends one request and reads one response.
 
 `stays_open_ms` in `expect_stream` is for a stream the SUT must not close. After each event the runner waits that long for the next one; if none comes and the stream has not ended, the runner hangs up and evaluates the other assertions on the events it has. A stream the SUT closes fails the step. Where the step and one of its streams both set it, the longer wait applies. It cannot be combined with `disconnect_after`, and `timeout_ms` has to be longer than it.
 
@@ -124,6 +124,26 @@ Steps run one after another, with one exception. `background: true` on an operat
 - **Not combined with `repeat`.** A repeated step sends its request again once it is answered, and a background step is answered after the steps that follow it.
 
 A streaming step with no `timeout_ms` of its own gets 30 seconds. Not one streaming step in the corpus declares a timeout, and without a backstop a SUT that never closes a stream would hang the run and produce no report at all.
+
+### Live exchanges
+
+A `live` step drives `SendLiveMessage`, the two-way exchange A2A 1.1 adds: the client keeps sending requests, the uplink, while the agent streams events, the downlink. A test that has one declares `runner_requirements: [live_stream]`.
+
+| Binding | The request in `live.open` | Each request in `live.uplink` | What it is answered with |
+| --- | --- | --- | --- |
+| gRPC | The first message on the `SendLiveMessage` bidirectional stream | One more message on the same stream | Nothing |
+| JSON-RPC | A `SendLiveMessage` call, answered with an event stream that stays open | A `SendLiveMessage` call of its own | The result of that call, the task |
+| REST | `POST /message:live`, answered with an event stream that stays open | A `POST /message:live` of its own | The body of that response, the task |
+
+- **The downlink.** `expect_stream` applies to all of its events, and `capture` reads the first. The step ends when the downlink does: the SUT closes it, or the read reaches `timeout_ms` or `stays_open_ms`. On gRPC the runner keeps its sending side open until then.
+- **The uplink.** Requests go out in the order the test writes them, one at a time, and none before the first downlink event has arrived, because they usually name what `capture` read from it. A request with `after_event` is held until a downlink event that matches has arrived. An event releases one request and is not considered for another.
+- **A request that does not go out.** If the downlink ends while a request is still held, the step fails and says which request: `uplink request 'finish' was never sent: no downlink event matched its after_event`. That is reported before anything the events fail, because it is usually why the task did not get to where the test expects it. A request that became due is sent before the next event is read, so what a step comes to does not depend on how the agent's events were packed on the wire.
+- **An exchange the SUT fails.** On gRPC an agent that ends the exchange with an error status after it has opened fails the step. A rejected request is reported as an event on the stream, and the exchange goes on. A lost connection (`UNAVAILABLE`) is an `error`, because the agent said nothing.
+- **Acknowledgments.** On the HTTP bindings each later request has an answer of its own, and `expect_ack` is asserted on it. An answer that is an error fails the request, and so does an answer that is an event stream, which the runner does not read. On gRPC a request has no answer, and `expect_ack` is counted neither as passed nor as failed.
+- **A refusal.** A SUT that refuses to open the exchange is evaluated against `expect_error`, as for any stream that does not open. Where a refusal is expected and the exchange opens, the step fails at its first event.
+- **Member names.** A test names a request `send_message`, `subscribe` or `unrecognized`. The runner sends the first two as the members of `StreamRequest` that carry a `SendMessageRequest` and a `SubscribeToTaskRequest`, and takes their names from the generated stubs. A2A renamed the first of them (`sendMessage` in the 1.1 release candidate, `request` after it), so on the JSON bindings the name the runner sends is the one in the proto revision the stubs are pinned to (`A2A_SPEC_REF` in `build_protos.sh`). On gRPC the field number is the same in both. `unrecognized` is sent as a member with a name and a field number that no A2A version defines.
+
+**What an HTTP binding cannot relate to an exchange.** A2A does not say yet how a server tells a later HTTP call of an exchange from a call that opens a new one. The ACTS specification settles it for now by the task: a later call carries a message that names the task of the exchange. The runner therefore reports an `error`, and sends nothing, for a test that sends over JSON-RPC or REST an uplink request that is `subscribe` or `unrecognized`, or a message that names no task. Such a test has to declare `transport: [grpc]`; the four corpus tests of rejected requests do. This part is tentative with the rest of the HTTP mapping.
 
 ### Stream events
 
@@ -155,7 +175,7 @@ Failures record the assertion path (`task.status.state`), the expected and actua
 
 ## Deviations
 
-Four tests of a run at A2A 1.0, and two more at 1.1, assert that an agent **lacking** a capability answers `UnsupportedOperationError`. One of the two is a live exchange test, which the runner skips for now. Five tests assert that an agent **requiring** a credential rejects a request without one. Their preconditions are the opposite of what the rest of the corpus needs, and no single agent can be both. Rather than leave those branches of the protocol untested by anyone, the pipeline starts a second agent that meets them.
+Four tests of a run at A2A 1.0, and two more at 1.1, assert that an agent **lacking** a capability answers `UnsupportedOperationError`. Five tests assert that an agent **requiring** a credential rejects a request without one. Their preconditions are the opposite of what the rest of the corpus needs, and no single agent can be both. Rather than leave those branches of the protocol untested by anyone, the pipeline starts a second agent that meets them.
 
 | Deviation | Env var set in the SUT's environment | Re-runs tests skipped as | Checks on the second card |
 | --- | --- | --- | --- |

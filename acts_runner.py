@@ -162,12 +162,16 @@ RUNNER_VARIABLES: dict[str, Any] = {
 #: `concurrent_streams` and `stream_disconnect` are `expect_stream.streams`
 #: and `disconnect_after`, which the runner implements on all three bindings.
 #: `concurrent_requests` is a `background` step, likewise on all three.
+#: `live_stream` is a `live` step, the two-way exchange of A2A 1.1: one
+#: bidirectional stream on gRPC, and on the HTTP bindings an open event
+#: stream with one call for each later request.
 RUNNER_CAPABILITIES: tuple[RunnerRequirement, ...] = (
     RunnerRequirement.HEADER_INSPECTION,
     RunnerRequirement.AUTH_CREDENTIALS,
     RunnerRequirement.CONCURRENT_STREAMS,
     RunnerRequirement.STREAM_DISCONNECT,
     RunnerRequirement.CONCURRENT_REQUESTS,
+    RunnerRequirement.LIVE_STREAM,
 )
 
 class ActsRunError(RuntimeError):

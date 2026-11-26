@@ -90,6 +90,24 @@ class RestDispatcher(HttpDispatcher):
             raw_body=text,
         )
 
+    async def _live_uplink(
+        self, request: Mapping[str, Any], headers: Mapping[str, str] | None
+    ) -> WireResponse:
+        binding = binding_for_operation(
+            Operation.SEND_LIVE_MESSAGE, declared_version(self._headers(headers))
+        )
+        path, body = self._split_params(binding, Operation.SEND_LIVE_MESSAGE, request)
+        response, parsed, text = await self._one_document(
+            binding.rest_method.value, path, payload=body, headers=headers
+        )
+        return WireResponse(
+            status=response.status_code,
+            payload=parsed,
+            error=self._error_from(response, parsed),
+            headers=dict(response.headers),
+            raw_body=text,
+        )
+
     def _error_from(self, response: httpx.Response, parsed: Any) -> WireError | None:
         """Read a ``google.rpc.Status`` error document (A2A §11.6).
 
