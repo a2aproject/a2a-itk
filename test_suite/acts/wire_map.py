@@ -10,6 +10,9 @@ built its own paths would drift from the one that parsed the errors.
 Everything here is data. The dispatchers in :mod:`test_suite.acts.dispatcher`
 read it; nothing in this module performs I/O.
 
+It also reads the `supportedInterfaces` of an agent card, which names the
+bindings differently from ACTS.
+
 ## Which spec wins
 
 ACTS §4.1 and §6.2 carry their own mapping tables, and both are **stale**
@@ -34,9 +37,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any, Mapping
 
-from test_suite.acts.schema import ErrorType, HttpMethod, Operation
+from test_suite.acts.schema import (
+    ErrorType,
+    HttpMethod,
+    Operation,
+    TransportBinding,
+)
 
 
 #: Media type for JSON-RPC requests and responses (A2A §9.1).
@@ -317,6 +325,13 @@ _ERRORS: dict[ErrorType, ErrorBinding] = {
         http_status=400,
         reason='VERSION_NOT_SUPPORTED',
     ),
+    # A2A 1.1.
+    ErrorType.TASK_GENERATION_MISMATCH: ErrorBinding(
+        jsonrpc_code=-32010,
+        grpc_status='ABORTED',
+        http_status=409,
+        reason='TASK_GENERATION_MISMATCH',
+    ),
     # The standard JSON-RPC errors (A2A §9.5). A2A never maps these onto gRPC
     # or REST, so the other columns stay None rather than being guessed.
     ErrorType.JSON_PARSE: ErrorBinding(jsonrpc_code=-32700),
@@ -359,6 +374,50 @@ GRPC_STATUS_TO_HTTP: Mapping[str, int] = MappingProxyType({
     'DATA_LOSS': 500,
     'UNAUTHENTICATED': 401,
 })
+
+
+# --------------------------------------------------------------------------
+# The agent card's interfaces.
+# --------------------------------------------------------------------------
+
+#: Protocol bindings as the agent card spells them, mapped to ACTS's names.
+#: The card says `JSONRPC` / `GRPC` / `HTTP+JSON`; ACTS says `rest` for the
+#: last one. The two vocabularies are separate on purpose, so the translation
+#: lives here rather than either enum growing the other's spelling.
+_CARD_BINDINGS: Mapping[str, TransportBinding] = MappingProxyType({
+    'JSONRPC': TransportBinding.JSONRPC,
+    'GRPC': TransportBinding.GRPC,
+    'HTTP_JSON': TransportBinding.REST,
+    'HTTP+JSON': TransportBinding.REST,
+    'REST': TransportBinding.REST,
+})
+
+_CARD_VERSION = re.compile(r'([0-9]+)\.([0-9]+)(?:\.[0-9]+)?')
+
+
+def interface_binding(interface: Mapping[str, Any]) -> TransportBinding | None:
+    """Which binding one of the card's `supportedInterfaces` serves."""
+    return _CARD_BINDINGS.get(str(interface.get('protocolBinding', '')).upper())
+
+
+def card_interfaces(
+    card: Mapping[str, Any], binding: TransportBinding
+) -> list[Mapping[str, Any]]:
+    """The entries of the card's `supportedInterfaces` that serve ``binding``."""
+    return [
+        interface for interface in card.get('supportedInterfaces') or ()
+        if interface_binding(interface) is binding
+    ]
+
+
+def interface_version(interface: Mapping[str, Any]) -> tuple[int, int] | None:
+    """The interface's `protocolVersion` as ``(major, minor)``, if it is one.
+
+    A patch component is accepted and ignored: a card that writes `1.0.0`
+    means 1.0, and A2A leaves the patch out of version negotiation.
+    """
+    match = _CARD_VERSION.fullmatch(str(interface.get('protocolVersion') or ''))
+    return (int(match[1]), int(match[2])) if match else None
 
 
 def http_status_for_grpc(grpc_status: str) -> int:

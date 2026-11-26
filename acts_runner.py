@@ -44,7 +44,11 @@ from test_suite.acts.schema import (
     TransportBinding,
     parse_spec_version,
 )
-from test_suite.acts.wire_map import WELL_KNOWN_AGENT_CARD_PATH
+from test_suite.acts.wire_map import (
+    WELL_KNOWN_AGENT_CARD_PATH,
+    card_interfaces,
+    interface_version,
+)
 from test_suite.launcher import Cluster, TargetSpec
 from test_suite.launcher.config import mount_dir
 from test_suite.launcher.ports import free_port, release
@@ -166,19 +170,6 @@ RUNNER_CAPABILITIES: tuple[RunnerRequirement, ...] = (
     RunnerRequirement.CONCURRENT_STREAMS,
     RunnerRequirement.STREAM_DISCONNECT,
 )
-
-#: Protocol bindings as the agent card spells them, mapped to ACTS's names.
-#: The card says `JSONRPC` / `GRPC` / `HTTP_JSON`; ACTS says `rest` for the
-#: last one. The two vocabularies are separate on purpose, so the translation
-#: lives here rather than either enum growing the other's spelling.
-_CARD_BINDING = {
-    'JSONRPC': TransportBinding.JSONRPC,
-    'GRPC': TransportBinding.GRPC,
-    'HTTP_JSON': TransportBinding.REST,
-    'HTTP+JSON': TransportBinding.REST,
-    'REST': TransportBinding.REST,
-}
-
 
 class ActsRunError(RuntimeError):
     """The conformance run could not be set up or completed."""
@@ -329,19 +320,6 @@ async def fetch_agent_card(
             raise ActsRunError(f'cannot read the agent card at {url}: {exc}') from exc
 
 
-_CARD_VERSION = re.compile(r'([0-9]+)\.([0-9]+)(?:\.[0-9]+)?')
-
-
-def _advertised_version(interface: dict[str, Any]) -> tuple[int, int] | None:
-    """The interface's `protocolVersion` as ``(major, minor)``, if it is one.
-
-    A patch component is accepted and ignored: a card that writes `1.0.0`
-    means 1.0, and A2A leaves the patch out of version negotiation.
-    """
-    match = _CARD_VERSION.fullmatch(str(interface.get('protocolVersion') or ''))
-    return (int(match[1]), int(match[2])) if match else None
-
-
 def _pick_interface(
     candidates: list[dict[str, Any]], spec_version: str
 ) -> dict[str, Any] | None:
@@ -363,7 +341,7 @@ def _pick_interface(
     is that the agent does not offer this version on this binding.
     """
     version = parse_spec_version(spec_version)
-    advertised = [(_advertised_version(i), i) for i in candidates]
+    advertised = [(interface_version(i), i) for i in candidates]
 
     for found, interface in advertised:
         if found == version:
@@ -391,10 +369,7 @@ def interface_for(
         ActsRunError: The card offers no interface on ``binding`` that a run
             at ``spec_version`` can use.
     """
-    candidates = [
-        i for i in (card.get('supportedInterfaces') or [])
-        if _CARD_BINDING.get(str(i.get('protocolBinding', '')).upper()) is binding
-    ]
+    candidates = card_interfaces(card, binding)
     if not candidates:
         advertised = sorted({
             str(i.get('protocolBinding')) for i in (card.get('supportedInterfaces') or [])
@@ -429,13 +404,18 @@ def build_dispatcher(
     not necessarily where the binding is mounted.
     """
     url, advertised = interface_for(card, binding, spec_version)
-    found = _advertised_version({'protocolVersion': advertised})
+    found = interface_version({'protocolVersion': advertised})
     if found is not None and found != parse_spec_version(spec_version):
         logger.info(
             'Running at A2A %s against the %s interface the card advertises '
             'for A2A %s.',
             spec_version, binding.value, advertised,
         )
+    return _dispatcher_at(url, binding, base_url)
+
+
+def _dispatcher_at(url: str, binding: TransportBinding, base_url: str) -> Dispatcher:
+    """The dispatcher for one interface of the card, given its URL."""
     # Presented on abstract operations only; `dispatch_raw` drops it, which is
     # what keeps the unauthenticated `SEC-EXTCARD-*` probes honest.
     auth = {'Authorization': f'Bearer {ACTS_AUTH_TOKEN}'}
@@ -470,6 +450,66 @@ def build_dispatcher(
     return for_binding(
         binding, url, agent_card_url=base_url, default_headers=auth
     )
+
+
+class OtherVersionInterfaces:
+    """Where a step sent as a client of another A2A version goes.
+
+    A step may be sent as a client of a version other than the one the run
+    targets (`a2a_version`). Where the card lists an interface for that
+    version on the binding under test, the step goes to that interface, as a
+    client of that version would send it. Calling this with a version returns
+    the dispatcher for it, or ``None`` when the card lists no such interface;
+    the step then goes to the interface the run uses.
+
+    Dispatchers are made on first use, one per URL. Agents commonly serve
+    several versions at one URL, and then the run's own dispatcher is the one
+    returned and nothing is opened.
+    """
+
+    def __init__(
+        self,
+        card: dict[str, Any],
+        binding: TransportBinding,
+        base_url: str,
+        spec_version: str,
+        primary: Dispatcher,
+    ) -> None:
+        self._card = card
+        self._binding = binding
+        self._base_url = base_url
+        run_url, _ = interface_for(card, binding, spec_version)
+        self._by_url: dict[str, Dispatcher] = {run_url: primary}
+        self._opened: list[Dispatcher] = []
+
+    def __call__(self, version: str) -> Dispatcher | None:
+        try:
+            wanted = parse_spec_version(version)
+        except ValueError:
+            # Not a version any card could list.
+            return None
+        url = next(
+            (
+                str(interface.get('url') or '')
+                for interface in card_interfaces(self._card, self._binding)
+                if interface_version(interface) == wanted
+            ),
+            '',
+        )
+        if not url:
+            return None
+
+        if url not in self._by_url:
+            opened = _dispatcher_at(url, self._binding, self._base_url)
+            self._opened.append(opened)
+            self._by_url[url] = opened
+        return self._by_url[url]
+
+    async def aclose(self) -> None:
+        """Close what this opened. The run's own dispatcher is not its to close."""
+        for dispatcher in self._opened:
+            await dispatcher.aclose()
+        self._opened.clear()
 
 
 def sut_repo_root() -> Path:
@@ -668,6 +708,9 @@ async def _run_pass(
             if read_webhook is not None:
                 granted.append(RunnerRequirement.WEBHOOK_ENDPOINT)
 
+            other_versions = OtherVersionInterfaces(
+                card, transport, base_url, spec_version, dispatcher
+            )
             runner = Runner(
                 dispatcher,
                 variables=resolved,
@@ -676,8 +719,12 @@ async def _run_pass(
                 sut_behaviors=declared,
                 capabilities=granted,
                 read_webhook=read_webhook,
+                dispatcher_for_version=other_versions,
             )
-            return await runner.run_suite(suite), card
+            try:
+                return await runner.run_suite(suite), card
+            finally:
+                await other_versions.aclose()
 
 
 @contextlib.asynccontextmanager
@@ -986,6 +1033,7 @@ __all__ = [
     'ActsRunError',
     'Deviation',
     'NoApplicableTests',
+    'OtherVersionInterfaces',
     'build_dispatcher',
     'fetch_agent_card',
     'interface_for',

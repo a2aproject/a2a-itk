@@ -147,6 +147,9 @@ def conformance_run(
                 capabilities=[*capabilities, RunnerRequirement.WEBHOOK_ENDPOINT],
                 read_webhook=read_webhook,
                 clock=loop.time,
+                dispatcher_for_version=acts_runner.OtherVersionInterfaces(
+                    card, transport, sut_url, spec_version, dispatcher
+                ),
             )
             return await runner.run_suite(suite), card
 
@@ -685,6 +688,290 @@ class TestGenerationEndToEnd:
         assert result.result is Outcome.FAIL
         assert result.failure.step_id == 'resubscribe'
         assert result.failure.assertion_path.startswith('each_event[0]')
+
+
+# ---------------------------------------------------------------------------
+# Versions and timing, end to end
+# ---------------------------------------------------------------------------
+#
+# A step sent as a client of another A2A version, a response that has to be
+# held or has to come at once, a stream that has to stay open, and the A2A 1.1
+# error for a stale generation.
+
+VERSION_AND_TIMING_PROBE = '''\
+acts_version: "1.0"
+spec_version: "1.1"
+suites:
+  - id: version-and-timing-probe
+    name: Version and timing probe
+    tests:
+      - id: PROBE-STALE-GUARD
+        name: A send guarded by a stale generation is refused
+        level: must
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-multi-turn]
+        steps:
+          - id: turn1
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-multi-turn stale guard probe"}]
+            expect: {status: 200}
+            capture: {taskId: task.id, generation: task.generation}
+          - id: turn2
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                taskId: "{{turn1.taskId}}"
+                parts: [{text: more input}]
+            expect: {status: 200}
+          - id: stale
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                taskId: "{{turn1.taskId}}"
+                parts: [{text: guarded by a stale generation}]
+              configuration: {ifGenerationMatch: "{{turn1.generation}}"}
+            expect_error: {error_type: TaskGenerationMismatchError}
+      - id: PROBE-HELD
+        name: A read naming the current generation is held until the task changes
+        level: should
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-hold-working]
+        steps:
+          - id: start
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-hold-working 5000 held probe"}]
+              configuration: {returnImmediately: true}
+            expect: {status: 200}
+            capture: {taskId: task.id}
+          - id: working
+            operation: get_task
+            params: {id: "{{start.taskId}}"}
+            expect: {status: 200}
+            capture: {generation: generation}
+            repeat: {until: "status.state == TASK_STATE_WORKING", max_attempts: 10, delay_ms: 200}
+          - id: long-poll
+            operation: get_task
+            params: {id: "{{start.taskId}}", currentGeneration: "{{working.generation}}"}
+            min_duration_ms: 1000
+            expect:
+              status: 200
+              body:
+                generation: {gte: "{{working.generation}}"}
+      - id: PROBE-AT-ONCE
+        name: A read that is behind the task is answered at once
+        level: must
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-hold-working]
+        steps:
+          - id: start
+            operation: send_message
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-hold-working 8000 at once probe"}]
+              configuration: {returnImmediately: true}
+            expect: {status: 200}
+            capture: {taskId: task.id}
+          - id: behind
+            operation: get_task
+            params: {id: "{{start.taskId}}", currentGeneration: 0}
+            max_duration_ms: 3000
+            expect: {status: 200}
+      - id: PROBE-STAYS-OPEN
+        name: A stream stays open while the task waits for input
+        level: should
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-multi-turn]
+        preconditions:
+          capabilities: {streaming: true}
+        steps:
+          - id: stream
+            operation: send_streaming_message
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-multi-turn stays open probe"}]
+            expect_stream:
+              stays_open_ms: 3000
+              final_event:
+                status: {state: TASK_STATE_INPUT_REQUIRED}
+      - id: PROBE-UNSUPPORTED-VERSION
+        name: A version the agent does not serve is refused
+        level: must
+        min_spec_version: "1.1"
+        steps:
+          - id: as-1-99
+            operation: send_message
+            a2a_version: "1.99"
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-complete-task unsupported version probe"}]
+            expect_error: {error_type: VersionNotSupportedError}
+      - id: PROBE-SERVED-AS-1-0
+        name: An agent that lists a 1.0 interface serves a request sent as 1.0
+        level: must
+        min_spec_version: "1.1"
+        requires_behaviors: [tck-multi-turn]
+        preconditions:
+          protocol_versions: ["1.0"]
+          capabilities: {streaming: true}
+        steps:
+          - id: as-1-0
+            operation: send_streaming_message
+            a2a_version: "1.0"
+            params:
+              message:
+                role: ROLE_USER
+                parts: [{text: "tck-multi-turn served as 1.0 probe"}]
+            expect_stream:
+              timeout_ms: 10000
+              final_event:
+                status: {state: TASK_STATE_INPUT_REQUIRED}
+'''
+
+
+class TestVersionsAndTimingEndToEnd:
+    @pytest.fixture
+    def probe(self, tmp_path) -> Path:
+        path = tmp_path / 'version-and-timing.acts.yaml'
+        path.write_text(VERSION_AND_TIMING_PROBE, encoding='utf-8')
+        return path
+
+    def run(self, behaviors_path, probe, customize=None, **kwargs) -> dict[str, TestResult]:
+        run = conformance_run(
+            behaviors_path, spec_version='1.1', suite_path=probe,
+            customize=customize, **kwargs,
+        )
+        return {r.id: r for r in run.results}
+
+    def test_a_conforming_agent_passes(self, behaviors_path, probe):
+        results = self.run(behaviors_path, probe)
+        assert {
+            r.id: r.failure.message if r.failure else r.skip_reason
+            for r in results.values() if r.result is not Outcome.PASS
+        } == {}
+        assert len(results) == 6
+
+    def test_an_agent_that_ignores_the_generation_guard_is_caught(
+        self, behaviors_path, probe
+    ):
+        def ignore_the_guard(agent: FakeAgent) -> None:
+            accept = agent._accept
+
+            def unguarded(request):
+                request.configuration.ClearField('if_generation_match')
+                return accept(request)
+
+            agent._accept = unguarded
+
+        result = self.run(behaviors_path, probe, ignore_the_guard)['PROBE-STALE-GUARD']
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'stale'
+        assert 'expected an error, but the call succeeded' in result.failure.message
+
+    def test_an_agent_that_does_not_hold_a_long_poll_is_caught(
+        self, behaviors_path, probe
+    ):
+        def answer_at_once(agent: FakeAgent) -> None:
+            agent.long_poll_timeout_s = 0
+
+        result = self.run(behaviors_path, probe, answer_at_once)['PROBE-HELD']
+        assert result.result is Outcome.FAIL
+        assert result.failure.step_id == 'long-poll'
+        # The response itself is in order: an agent may answer a long poll
+        # early with the unchanged task. Only its timing shows it never held.
+        assert result.failure.assertion_path == 'duration'
+        assert 'requires that it take at least 1000ms' in result.failure.message
+
+    def test_an_agent_that_holds_a_read_it_should_answer_is_caught(
+        self, behaviors_path, probe
+    ):
+        """One that waits for the next change whatever generation the client
+        has. The task changes nothing for eight seconds."""
+        def always_wait_for_a_change(agent: FakeAgent) -> None:
+            get_task = agent.get_task
+
+            async def waiting(request):
+                if request.HasField('current_generation'):
+                    record = agent._find(request.id)
+                    at = record.task.generation
+                    await agent._until(record, lambda: record.task.generation > at)
+                return await get_task(request)
+
+            agent.get_task = waiting
+
+        result = self.run(
+            behaviors_path, probe, always_wait_for_a_change
+        )['PROBE-AT-ONCE']
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'duration'
+        assert 'requires that it take at most 3000ms' in result.failure.message
+
+    def test_an_agent_that_closes_a_stream_at_input_required_is_caught(
+        self, behaviors_path, probe
+    ):
+        """As A2A 1.0 had it, and as 1.1 no longer does."""
+        def as_1_0(agent: FakeAgent) -> None:
+            stream = agent.send_streaming_message
+            agent.send_streaming_message = lambda request, version: stream(request, (1, 0))
+
+        result = self.run(behaviors_path, probe, as_1_0)['PROBE-STAYS-OPEN']
+        assert result.result is Outcome.FAIL
+        assert result.failure.assertion_path == 'stream'
+        assert 'the SUT closed the stream' in result.failure.message
+
+    def test_an_agent_that_serves_any_version_is_caught(self, behaviors_path, probe):
+        def serve_anything(agent: FakeAgent) -> None:
+            agent._negotiate = lambda header: (1, 1)
+
+        result = self.run(behaviors_path, probe, serve_anything)['PROBE-UNSUPPORTED-VERSION']
+        assert result.result is Outcome.FAIL
+        assert 'expected an error, but the call succeeded' in result.failure.message
+
+    def test_the_step_reaches_the_agent_as_the_version_it_names(
+        self, behaviors_path, probe
+    ):
+        """Served as 1.0, the stream ends when the task waits for input. Sent
+        as the run's 1.1 it would stay open, and the step would time out."""
+        seen: list[str | None] = []
+
+        def record_versions(agent: FakeAgent) -> None:
+            negotiate = agent._negotiate
+
+            def recording(header):
+                seen.append(header)
+                return negotiate(header)
+
+            agent._negotiate = recording
+
+        results = self.run(behaviors_path, probe, record_versions)
+        assert results['PROBE-SERVED-AS-1-0'].result is Outcome.PASS
+        assert results['PROBE-UNSUPPORTED-VERSION'].result is Outcome.PASS
+        assert seen.count('1.0') == 1
+        assert seen.count('1.99') == 1
+        assert set(seen) == {'1.0', '1.1', '1.99'}
+
+    def test_a_test_for_a_version_the_agent_does_not_serve_is_skipped(
+        self, behaviors_path, probe
+    ):
+        """An agent that serves only 1.1 owes a 1.0 request nothing but a
+        refusal, so the test does not apply to it."""
+        results = self.run(behaviors_path, probe, versions=('1.1',))
+        skipped_test = results['PROBE-SERVED-AS-1-0']
+        assert skipped_test.result is Outcome.SKIP
+        assert skipped_test.skip_reason == (
+            'agent card lists no jsonrpc interface for A2A 1.0; it lists 1.1'
+        )
+        assert results['PROBE-UNSUPPORTED-VERSION'].result is Outcome.PASS
 
 
 # ---------------------------------------------------------------------------
