@@ -367,3 +367,92 @@ class TestLoadedSuiteQueries:
         assert entry.suite_id == 'core'
         assert entry.source.name == 'core.acts.yaml'
         assert 'T-MUST' in str(entry) and 'core.acts.yaml' in str(entry)
+
+
+class TestSpecVersions:
+    """What the loader keeps for selecting tests by A2A version."""
+
+    @pytest.fixture
+    def loaded(self, tmp_path):
+        content = 'acts_version: "1.0"\nspec_version: "1.1"\n' + textwrap.dedent("""
+            suites:
+              - id: core
+                name: Core
+                tests:
+                  - id: T-EVERY
+                    name: every version
+                    level: must
+                    steps: [{id: s, operation: send_message, params: {}}]
+                  - id: T-ONLY-10
+                    name: 1.0 only
+                    level: must
+                    max_spec_version: "1.0"
+                    steps: [{id: s, operation: send_message, params: {}}]
+                  - id: T-FROM-11
+                    name: from 1.1
+                    level: must
+                    min_spec_version: "1.1"
+                    steps: [{id: s, operation: send_message, params: {}}]
+            """)
+        _write(tmp_path, 'core.acts.yaml', content)
+        return load_suite(
+            _write(tmp_path, 'suite.acts.yaml', _manifest('core.acts.yaml'))
+        )
+
+    def test_a_run_gets_the_tests_whose_range_contains_its_version(self, loaded):
+        assert [t.id for t in loaded.for_spec_version('1.0')] == [
+            'T-EVERY', 'T-ONLY-10',
+        ]
+        assert [t.id for t in loaded.for_spec_version('1.1')] == [
+            'T-EVERY', 'T-FROM-11',
+        ]
+
+    UNREACHABLE = textwrap.dedent("""
+        suites:
+          - id: core
+            name: Core
+            tests:
+              - id: T-FINE
+                name: within the document's version
+                level: must
+                steps: [{id: s, operation: send_message, params: {}}]
+              - id: T-TOO-NEW
+                name: needs a newer version than the document
+                level: must
+                min_spec_version: "1.1"
+                steps: [{id: s, operation: send_message, params: {}}]
+        """)
+
+    def test_a_test_newer_than_its_document_is_a_load_error(self, tmp_path):
+        """No run could select it: a run stops at the document's version, and
+        the test starts above it."""
+        p = _write(tmp_path, 'core.acts.yaml', HEADER + self.UNREACHABLE)
+        loaded = load_suite(p, strict=False)
+        assert [t.id for t in loaded] == ['T-FINE']
+        assert [str(e) for e in loaded.errors] == [
+            "core.acts.yaml: T-TOO-NEW: `min_spec_version` 1.1 is newer than the "
+            "document's `spec_version` 1.0, so no run would select the test"
+        ]
+
+    def test_strict_loading_refuses_it(self, tmp_path):
+        p = _write(tmp_path, 'core.acts.yaml', HEADER + self.UNREACHABLE)
+        with pytest.raises(ActsFileError, match='T-TOO-NEW: `min_spec_version` 1.1'):
+            load_suite(p)
+
+    @pytest.mark.parametrize('document', ['1.1', '1.2'])
+    def test_a_minimum_at_or_below_the_document_version_is_fine(self, tmp_path, document):
+        header = f'acts_version: "1.0"\nspec_version: "{document}"\n'
+        p = _write(tmp_path, 'core.acts.yaml', header + self.UNREACHABLE)
+        assert [t.id for t in load_suite(p)] == ['T-FINE', 'T-TOO-NEW']
+
+    def test_a_document_whose_version_cannot_be_read_is_left_to_the_run(self, tmp_path):
+        """The run refuses the whole document, with a better message."""
+        header = 'acts_version: "1.0"\nspec_version: "latest"\n'
+        p = _write(tmp_path, 'core.acts.yaml', header + self.UNREACHABLE)
+        assert [t.id for t in load_suite(p)] == ['T-FINE', 'T-TOO-NEW']
+
+    def test_each_document_keeps_the_version_it_was_written_against(self, loaded):
+        """Per document, because a manifest and its files may differ."""
+        assert {p.name: v for p, v in loaded.spec_versions.items()} == {
+            'suite.acts.yaml': '1.0', 'core.acts.yaml': '1.1',
+        }

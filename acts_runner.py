@@ -38,7 +38,12 @@ from test_suite.acts.dispatcher import Dispatcher, for_binding
 from test_suite.acts.dispatcher.http_base import FOLLOW_REDIRECTS
 from test_suite.acts.loader import LoadedSuite, LoadedTest, load_suite
 from test_suite.acts.runner import VERSION_HEADER, Runner, TestResult
-from test_suite.acts.schema import RunnerRequirement, TransportBinding
+from test_suite.acts.schema import (
+    DEFAULT_SPEC_VERSION,
+    RunnerRequirement,
+    TransportBinding,
+    parse_spec_version,
+)
 from test_suite.acts.wire_map import WELL_KNOWN_AGENT_CARD_PATH
 from test_suite.launcher import Cluster, TargetSpec
 from test_suite.launcher.config import mount_dir
@@ -58,9 +63,10 @@ _WEBHOOK_STARTUP_ATTEMPTS = 40
 #: The identifier the SUT goes by, matching `itk_runner.SUT_ID`.
 SUT_ID = 'current'
 
-#: The protocol version this runner speaks, sent on every request including
-#: the bootstrap card fetch. Matches `Runner`'s own default.
-SPEC_VERSION = '1.0'
+#: The oldest A2A version a run may target. The corpus is written for A2A 1.0
+#: and newer; a test without a lower bound claims to hold from here on, not for
+#: the versions before it.
+OLDEST_SPEC_VERSION = '1.0'
 
 #: Bearer token the runner presents on every abstract operation, so an
 #: operation the spec puts behind authentication can still be exercised. A2A
@@ -179,11 +185,12 @@ class ActsRunError(RuntimeError):
 
 
 class NoApplicableTests(ActsRunError):
-    """Nothing in the selection targets the requested binding.
+    """Nothing in the selection targets the requested binding or version.
 
     Only reachable from an explicit `-t`/`--suite` selection: the full corpus
-    has tests for all three. Its own type so a caller running several bindings
-    can move on to the next instead of losing the run.
+    has tests for all three bindings at every version it covers. Its own type
+    so a caller running several bindings can move on to the next instead of
+    losing the run.
     """
 
 
@@ -199,6 +206,8 @@ class ActsRun:
     declared_behaviors: frozenset[str] | None = None
     #: The SUT was already running at a URL the caller gave, not started here.
     external_sut: bool = False
+    #: The A2A version the run targeted.
+    spec_version: str = DEFAULT_SPEC_VERSION
 
 
 def _subset(suite: LoadedSuite, tests: list[LoadedTest]) -> LoadedSuite:
@@ -208,8 +217,64 @@ def _subset(suite: LoadedSuite, tests: list[LoadedTest]) -> LoadedSuite:
     writes goes unresolved, which surfaces as a run-wide error about the SUT.
     """
     return LoadedSuite(
-        tests=tests, variables=suite.variables, sources=suite.sources
+        tests=tests,
+        variables=suite.variables,
+        sources=suite.sources,
+        spec_versions=suite.spec_versions,
     )
+
+
+def _check_spec_version(spec_version: str) -> None:
+    """Refuse a run version that is not one, or that the corpus predates."""
+    try:
+        version = parse_spec_version(spec_version)
+    except ValueError as exc:
+        raise ActsRunError(f'spec_version: {exc}') from None
+    if version < parse_spec_version(OLDEST_SPEC_VERSION):
+        raise ActsRunError(
+            f'cannot run at A2A {spec_version}: the conformance suite covers '
+            f'A2A {OLDEST_SPEC_VERSION} and newer'
+        )
+
+
+def _for_version(suite: LoadedSuite, spec_version: str) -> LoadedSuite:
+    """The tests that are part of a run at ``spec_version``.
+
+    A test whose version range excludes the run version is not part of the
+    run at all: it is neither executed nor reported, not even as a skip. That
+    is what keeps a run at an older version reporting the same tests and the
+    same totals after tests for a newer version are added to the corpus.
+
+    A document names the newest version its tests were written against, and a
+    run must not go past it: a test without an upper bound claims to hold only
+    up to that version, so running it at a newer one would grade the SUT on
+    something nobody checked.
+    """
+    version = parse_spec_version(spec_version)
+    too_old = set()
+    for source in {t.source for t in suite.tests}:
+        written_against = suite.spec_versions[source]
+        try:
+            newest = parse_spec_version(written_against)
+        except ValueError as exc:
+            raise ActsRunError(f'{source.name}: spec_version: {exc}') from None
+        if newest < version:
+            too_old.add(f'{source.name} ({written_against})')
+    if too_old:
+        raise ActsRunError(
+            f'cannot run at A2A {spec_version}: these documents were written '
+            f'against an older version: {", ".join(sorted(too_old))}'
+        )
+
+    applicable = suite.for_spec_version(spec_version)
+    if not applicable:
+        raise NoApplicableTests(
+            f'no selected test applies to A2A {spec_version}: '
+            + ', '.join(
+                f'{t.id} ({t.test.version_range()})' for t in suite.tests
+            )
+        )
+    return _subset(suite, applicable)
 
 
 def _in_scope(suite: LoadedSuite, transport: TransportBinding) -> LoadedSuite:
@@ -235,10 +300,12 @@ def _in_scope(suite: LoadedSuite, transport: TransportBinding) -> LoadedSuite:
     return _subset(suite, scoped)
 
 
-async def fetch_agent_card(base_url: str, *, timeout: float = 30.0) -> dict[str, Any]:
+async def fetch_agent_card(
+    base_url: str, *, spec_version: str, timeout: float = 30.0
+) -> dict[str, Any]:
     """Read the well-known agent card off a running agent.
 
-    Sent with `A2A-Version: 1.0`, like every other request the run makes.
+    Sent with the run's `A2A-Version`, like every other request the run makes.
     §3.6.2 makes an absent header mean **0.3**, so an SDK with a compat layer
     answers a bare GET with its v0.3 card — on which `extendedAgentCard` is not
     a capability at all but a top-level `supportsAuthenticatedExtendedCard`.
@@ -255,23 +322,74 @@ async def fetch_agent_card(base_url: str, *, timeout: float = 30.0) -> dict[str,
         timeout=timeout, follow_redirects=FOLLOW_REDIRECTS
     ) as client:
         try:
-            response = await client.get(url, headers={VERSION_HEADER: SPEC_VERSION})
+            response = await client.get(url, headers={VERSION_HEADER: spec_version})
             response.raise_for_status()
             return response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise ActsRunError(f'cannot read the agent card at {url}: {exc}') from exc
 
 
+_CARD_VERSION = re.compile(r'([0-9]+)\.([0-9]+)(?:\.[0-9]+)?')
+
+
+def _advertised_version(interface: dict[str, Any]) -> tuple[int, int] | None:
+    """The interface's `protocolVersion` as ``(major, minor)``, if it is one.
+
+    A patch component is accepted and ignored: a card that writes `1.0.0`
+    means 1.0, and A2A leaves the patch out of version negotiation.
+    """
+    match = _CARD_VERSION.fullmatch(str(interface.get('protocolVersion') or ''))
+    return (int(match[1]), int(match[2])) if match else None
+
+
+def _pick_interface(
+    candidates: list[dict[str, Any]], spec_version: str
+) -> dict[str, Any] | None:
+    """The interface a run at ``spec_version`` should dial, or None.
+
+    In order of preference:
+
+    1. An interface advertising exactly the run version.
+    2. The newest interface of the same major version that is newer than the
+       run version. A minor version is backward compatible within its major,
+       so this is how a run asks whether a newer server still behaves as an
+       older one.
+    3. An interface that advertises no version, which rules nothing out.
+
+    An interface of an older minor or of another major is never picked, nor
+    is one whose `protocolVersion` cannot be read as a version. It answers
+    every request for the run version with a version error, and a run against
+    it would report the whole corpus as conformance failures when the truth
+    is that the agent does not offer this version on this binding.
+    """
+    version = parse_spec_version(spec_version)
+    advertised = [(_advertised_version(i), i) for i in candidates]
+
+    for found, interface in advertised:
+        if found == version:
+            return interface
+
+    newer = [
+        (found, interface) for found, interface in advertised
+        if found is not None and found[0] == version[0] and found > version
+    ]
+    if newer:
+        return max(newer, key=lambda pair: pair[0])[1]
+
+    return next((i for i in candidates if not i.get('protocolVersion')), None)
+
+
 def interface_for(
-    card: dict[str, Any], binding: TransportBinding
+    card: dict[str, Any], binding: TransportBinding, spec_version: str
 ) -> tuple[str, str | None]:
-    """Where ``binding`` is served, per the card.
+    """Where ``binding`` is served for a run at ``spec_version``, per the card.
 
-    Returns the interface's URL and the protocol version it advertises.
+    Returns the interface's URL and the protocol version it advertises, which
+    is not always the run version; see :func:`_pick_interface`.
 
-    Prefers protocol version 1.0 when the card advertises several: the ITK
-    agents publish a 0.3 interface at the same URL for traversal compat, and
-    picking it for a conformance run would test the wrong protocol.
+    Raises:
+        ActsRunError: The card offers no interface on ``binding`` that a run
+            at ``spec_version`` can use.
     """
     candidates = [
         i for i in (card.get('supportedInterfaces') or [])
@@ -286,10 +404,13 @@ def interface_for(
             f'it lists {advertised or "nothing"}'
         )
 
-    chosen = next(
-        (i for i in candidates if str(i.get('protocolVersion', '')) == '1.0'),
-        candidates[0],
-    )
+    chosen = _pick_interface(candidates, spec_version)
+    if chosen is None:
+        listed = ', '.join(str(i.get('protocolVersion')) for i in candidates)
+        raise ActsRunError(
+            f'the agent card advertises no {binding.value} interface for A2A '
+            f'{spec_version}; its {binding.value} interfaces are for {listed}'
+        )
     url = str(chosen.get('url') or '')
     if not url:
         raise ActsRunError(f'the {binding.value} interface on the card has no url')
@@ -297,14 +418,24 @@ def interface_for(
 
 
 def build_dispatcher(
-    card: dict[str, Any], binding: TransportBinding, base_url: str
+    card: dict[str, Any],
+    binding: TransportBinding,
+    base_url: str,
+    spec_version: str,
 ) -> Dispatcher:
     """Construct the dispatcher for ``binding`` against a running agent.
 
     ``base_url`` is the agent's HTTP root — where the card lives — which is
     not necessarily where the binding is mounted.
     """
-    url, _ = interface_for(card, binding)
+    url, advertised = interface_for(card, binding, spec_version)
+    found = _advertised_version({'protocolVersion': advertised})
+    if found is not None and found != parse_spec_version(spec_version):
+        logger.info(
+            'Running at A2A %s against the %s interface the card advertises '
+            'for A2A %s.',
+            spec_version, binding.value, advertised,
+        )
     # Presented on abstract operations only; `dispatch_raw` drops it, which is
     # what keeps the unauthenticated `SEC-EXTCARD-*` probes honest.
     auth = {'Authorization': f'Bearer {ACTS_AUTH_TOKEN}'}
@@ -353,6 +484,7 @@ def sut_repo_root() -> Path:
 async def run(
     *,
     transport: TransportBinding,
+    spec_version: str = DEFAULT_SPEC_VERSION,
     sut_url: str | None = None,
     suite_path: Path | None = None,
     test_ids: list[str] | None = None,
@@ -365,13 +497,21 @@ async def run(
 ) -> ActsRun:
     """Start the SUT (or dial ``sut_url``), run the corpus, and collect results.
 
-    Only the tests ``transport`` is graded on take part; see :func:`_in_scope`.
+    ``spec_version`` is the A2A version the run targets. It is the one input
+    that decides which tests take part (see :func:`_for_version`), what
+    `A2A-Version` every request carries, what `{{specVersion}}` resolves to,
+    which of the card's interfaces is dialed and what the report claims.
+
+    Of those tests, only the ones ``transport`` is graded on take part; see
+    :func:`_in_scope`.
 
     An external SUT cannot be restarted with a deviation's environment
     variable, so ``deviation_urls`` maps each variable (`REDUCED_CAPABILITIES_ENV`,
     `AUTH_ENFORCED_ENV`) to a second instance the caller already started with
     it set. A deviation with no entry leaves its tests skipped.
     """
+    _check_spec_version(spec_version)
+
     deviation_urls = dict(deviation_urls or {})
     if deviation_urls and sut_url is None:
         raise ActsRunError(
@@ -403,6 +543,7 @@ async def run(
             raise ActsRunError(f'no such test(s) in the corpus: {sorted(missing)}')
         suite = _subset(suite, selected)
 
+    suite = _for_version(suite, spec_version)
     suite = _in_scope(suite, transport)
 
     declared = None
@@ -433,6 +574,7 @@ async def run(
     results, card = await _run_pass(
         suite,
         transport=transport,
+        spec_version=spec_version,
         variables=variables,
         capabilities=capabilities,
         declared=declared,
@@ -459,6 +601,7 @@ async def run(
             suite,
             deviation=deviation,
             transport=transport,
+            spec_version=spec_version,
             variables=variables,
             capabilities=capabilities,
             declared=declared,
@@ -474,6 +617,7 @@ async def run(
         agent_card=card,
         declared_behaviors=declared,
         external_sut=sut_url is not None,
+        spec_version=spec_version,
     )
 
 
@@ -481,6 +625,7 @@ async def _run_pass(
     suite: LoadedSuite,
     *,
     transport: TransportBinding,
+    spec_version: str,
     variables: dict[str, Any] | None,
     capabilities: list[RunnerRequirement] | None,
     declared: frozenset[str] | None,
@@ -510,8 +655,8 @@ async def _run_pass(
             base_url = f'http://127.0.0.1:{handle.http_port}'
             logger.info('SUT up at %s (grpc :%s)', base_url, handle.grpc_port)
 
-        card = await fetch_agent_card(base_url)
-        dispatcher = build_dispatcher(card, transport, base_url)
+        card = await fetch_agent_card(base_url, spec_version=spec_version)
+        dispatcher = build_dispatcher(card, transport, base_url, spec_version)
 
         async with dispatcher, _webhook_receiver() as (webhook_url, read_webhook):
             # `webhookUrl` is runner-provided by nature: the address the
@@ -526,6 +671,7 @@ async def _run_pass(
             runner = Runner(
                 dispatcher,
                 variables=resolved,
+                spec_version=spec_version,
                 agent_card=card,
                 sut_behaviors=declared,
                 capabilities=granted,
@@ -713,6 +859,7 @@ async def _rerun_deviation(
     *,
     deviation: Deviation,
     transport: TransportBinding,
+    spec_version: str,
     variables: dict[str, Any] | None,
     capabilities: list[RunnerRequirement] | None,
     declared: frozenset[str] | None,
@@ -749,6 +896,7 @@ async def _rerun_deviation(
             rerun, card = await _run_pass(
                 narrowed,
                 transport=transport,
+                spec_version=spec_version,
                 variables=variables,
                 capabilities=capabilities,
                 declared=declared,
@@ -804,12 +952,26 @@ def to_report(
         # comparing SDKs can tell the two kinds of run apart. The URL itself
         # stays out: it may be an internal hostname.
         env['sut'] = 'external'
+    try:
+        _, advertised = interface_for(
+            run_result.agent_card, run_result.transport, run_result.spec_version
+        )
+    except ActsRunError:
+        # Only a run assembled without its card gets here; a real one resolved
+        # the same interface before it sent anything.
+        advertised = None
+    if advertised is not None:
+        # The version the dialed interface advertises. It differs from
+        # `spec_version` when the card has no interface for exactly the run
+        # version and a newer one of the same major was used instead.
+        env['interface_protocol_version'] = str(advertised)
     return report_writer.build(
         run_result.results,
         run_result.suite,
         sdk=sdk,
         transport=run_result.transport,
         duration_ms=run_result.duration_ms,
+        spec_version=run_result.spec_version,
         env=env,
     )
 

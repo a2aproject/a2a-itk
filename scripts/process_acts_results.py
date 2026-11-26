@@ -213,6 +213,16 @@ def main(argv: list[str] | None = None) -> int:
         logger.error('Two reports claim the same transport: %s', seen)
         raise SystemExit(1)
 
+    versions = sorted({str(r.get('spec_version', '')) for r in reports})
+    if len(versions) > 1:
+        # An entry carries one `spec_version`, and a history file holds one
+        # version's runs: mixing them would report a 1.0 result as a 1.1 one.
+        logger.error(
+            'The reports target different A2A versions (%s); publish each '
+            'version as its own entry.', ', '.join(versions),
+        )
+        raise SystemExit(1)
+
     history = fetch_existing_history(args.history_url)
     history.append(build_run(reports))
 

@@ -18,14 +18,14 @@ ACTS is kept apart from the traversal suite on purpose. They share the launcher 
 
 ## The pipeline
 
-`acts_runner.run(transport, ...)` does the following for one binding.
+`acts_runner.run(transport, spec_version, ...)` does the following for one binding at one A2A version. `spec_version` is the run version; it defaults to `1.0`.
 
 1. **Load the corpus.** `loader.load_suite` reads the manifest (`suite.acts.yaml`), follows its `include:` list, validates every file against the schema exactly as written - nothing is rewritten on the way in - and flattens the result into one ordered list of tests, each tagged with the suite it came from. Duplicate test ids across files are an error here, because they would overwrite each other in the report.
-2. **Scope to the binding.** Tests that declare `transport:` for a different binding are dropped, not skipped. A report covers one binding, and a test that cannot apply to it should not appear in the denominator - gRPC is scored out of 88, not out of 113 with 25 phantom skips. `-t` subsets are applied just before this.
+2. **Select the tests for the run version, then scope to the binding.** A test whose `min_spec_version` / `max_spec_version` range does not contain the run version is dropped, not skipped, so a run at an older version keeps its tests and totals when tests for a newer version are added. A file whose own `spec_version` is older than the run version stops the run: its unbounded tests were never checked against the newer version. Tests that declare `transport:` for a different binding are dropped, not skipped. A report covers one binding, and a test that cannot apply to it should not appear in the denominator - gRPC is scored out of 88, not out of 113 with 25 phantom skips. `-t` subsets are applied just before this.
 3. **Read the behavior contract.** `acts/sut-behaviors.yaml` from the SDK repository root (the parent of the mounted `itk/`), or the file `--behaviors` names. Present: the set of `tck-*` prefixes the SDK claims. Absent: gating is off, with a warning.
 4. **Start the SUT** through the same `Cluster` the traversal suite uses, as a single `MOUNT` target. The agent is started with `--httpPort` and `--grpcPort` and is up when its card answers. With `--sut-url` (or `sut_url` on the service) this step is skipped and the given URL is used as the agent's root.
-5. **Read the card** at `/.well-known/agent-card.json`, with `A2A-Version: 1.0`. The header matters: the spec makes an absent header mean 0.3, and an SDK with a compatibility layer would answer with its 0.3 card, on which capabilities are spelled differently. Redirects are not followed; the card decides what the whole run tests, so an agent that serves it somewhere else should fail loudly.
-6. **Build the dispatcher** for the binding. The URL comes from the card's `supportedInterfaces`, preferring the entry with `protocolVersion: 1.0` (the ITK agents also publish a 0.3 interface at the same URL for traversal compatibility). A JSON-RPC agent may mount at `/jsonrpc/`, a REST one at `/rest/`; the card is the only reliable source. The dispatcher adds `Authorization: Bearer itk-valid-token` to every abstract operation (see [Authentication](#authentication) below).
+5. **Read the card** at `/.well-known/agent-card.json`, with `A2A-Version` set to the run version. The header matters: the spec makes an absent header mean 0.3, and an SDK with a compatibility layer would answer with its 0.3 card, on which capabilities are spelled differently. Redirects are not followed; the card decides what the whole run tests, so an agent that serves it somewhere else should fail loudly.
+6. **Build the dispatcher** for the binding. The URL comes from the card's `supportedInterfaces`: the entry for the binding whose `protocolVersion` is the run version, otherwise the newest entry of the same major version that is newer than the run version, otherwise an entry with no version. An entry for an older version is never used (the ITK agents also publish a 0.3 interface at the same URL for traversal compatibility); with nothing usable the run stops with a configuration error. A JSON-RPC agent may mount at `/jsonrpc/`, a REST one at `/rest/`; the card is the only reliable source. The dispatcher adds `Authorization: Bearer itk-valid-token` to every abstract operation (see [Authentication](#authentication) below).
 7. **Start the webhook receiver**: `notifications_app.py` on a free port, the same mock the traversal suite uses for push notifications. If it comes up, the runner is granted the `webhook_endpoint` requirement and the `webhookUrl` variable; if not, tests needing it skip rather than losing the run.
 8. **Run every test in order** (`Runner.run_suite`). Sequential, because the SUT's task list is global to it and `list_tasks` assertions only mean something if nothing else is creating tasks at the same time.
 9. **Deviation passes.** Some tests were skipped because the default SUT advertised a capability the test needs absent, or declared no authentication when the test needs some. For each such group a second SUT is started with an environment variable asking it to behave differently, those tests alone are re-run, and their verdicts are spliced in.
@@ -95,7 +95,7 @@ Each test gets a fresh variable `Scope` (section 3.2, isolation), seeded with th
 | `client_response` | section 10: ask the SUT's *own client* to parse a canned payload. No A2A operation does this, so it rides a `send_message` whose text is `tck-client-parse` and whose data part carries `{operation, wire_payload}`; the agent answers with what its client parsed and `expect_parsed` is evaluated like a body |
 | `expect_webhook` | Poll the receiver for notifications delivered to `webhookUrl` for a task until `min_count` arrive or `timeout_ms` passes; evaluate `each_event`, `final_event`, `headers` and `token` |
 
-Every abstract operation carries `A2A-Version: 1.0` (section 12.4); on gRPC it is call metadata.
+Every abstract operation carries `A2A-Version` set to the run version (section 12.4); on gRPC it is call metadata. A raw step is sent as written and reads the run version from `{{specVersion}}`.
 
 A streaming step with no `timeout_ms` of its own gets 30 seconds. Not one streaming step in the corpus declares a timeout, and without a backstop a SUT that never closes a stream would hang the run and produce no report at all.
 
@@ -149,7 +149,7 @@ The runner also supplies `otherUserTaskId` (a fixed UUID the SUT has never issue
   "generated_at": "2026-10-06T02:14:09Z",
   "sdk": {"name": "a2a-python", "version": "...", "language": "python", "repository": "..."},
   "transport": "jsonrpc",
-  "environment": {"runner": "a2a-itk", "python": "3.12....", "platform": "..."},
+  "environment": {"runner": "a2a-itk", "python": "3.12....", "platform": "...", "interface_protocol_version": "1.0"},
   "summary": {
     "total": 101, "passed": 96, "failed": 2, "skipped": 3, "errors": 0, "duration_ms": 48213,
     "by_level": {

@@ -101,6 +101,10 @@ class LoadedSuite:
     variables: dict[str, str] = field(default_factory=dict)
     sources: list[Path] = field(default_factory=list)
     errors: list[LoadError] = field(default_factory=list)
+    #: Each document's own `spec_version`: the newest A2A version its tests
+    #: were written against. It does not select what a run tests; it is the
+    #: newest version a run may target with that document's tests.
+    spec_versions: dict[Path, str] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.tests)
@@ -117,6 +121,15 @@ class LoadedSuite:
         A test with no ``transport:`` restriction applies to all of them.
         """
         return [t for t in self.tests if t.test.applies_to(transport)]
+
+    def for_spec_version(self, spec_version: str) -> list[LoadedTest]:
+        """Tests that are part of a run targeting ``spec_version``.
+
+        A test with no version bounds applies to all of them.
+        """
+        return [
+            t for t in self.tests if t.test.applies_to_version(spec_version)
+        ]
 
     def by_level(self, level: Level) -> list[LoadedTest]:
         return [t for t in self.tests if t.level is level]
@@ -202,10 +215,16 @@ def load_suite(path: Path, strict: bool = True) -> LoadedSuite:
         # Later files win: a manifest sets defaults, an included file
         # overrides for its own tests.
         loaded.variables.update(doc.variables or {})
+        loaded.spec_versions[doc_path] = doc.spec_version
+
+        unreachable = _tests_newer_than_document(doc, doc_path, strict=strict)
+        loaded.errors.extend(unreachable.values())
 
         for suite in doc.suites or ():
             _check_unique_suite(suite, doc_path, seen_suite_ids)
             for test in suite.tests:
+                if test.id in unreachable:
+                    continue
                 entry = LoadedTest(
                     test=test,
                     suite_id=suite.id,
@@ -217,6 +236,31 @@ def load_suite(path: Path, strict: bool = True) -> LoadedSuite:
                 loaded.tests.append(entry)
 
     return loaded
+
+
+def _tests_newer_than_document(
+    doc: ActsDocument, path: Path, *, strict: bool
+) -> dict[str, LoadError]:
+    """A load error for each test that no run can select, by test id.
+
+    See :meth:`ActsDocument.tests_newer_than_document`.
+
+    Raises:
+        ActsFileError: There is such a test and ``strict`` is set.
+    """
+    errors = {
+        test.id: LoadError(
+            path,
+            test.id,
+            f'`min_spec_version` {test.min_spec_version} is newer than the '
+            f"document's `spec_version` {doc.spec_version}, so no run would "
+            f'select the test',
+        )
+        for test in doc.tests_newer_than_document()
+    }
+    if errors and strict:
+        raise ActsFileError('; '.join(str(error) for error in errors.values()))
+    return errors
 
 
 def _validate_document(

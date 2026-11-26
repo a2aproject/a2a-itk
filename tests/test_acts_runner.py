@@ -506,6 +506,42 @@ class TestProtocolObligations:
         run(runner, a_test(get_task(), get_task('again')))
         assert all(call[2][VERSION_HEADER] == '1.0' for call in dispatcher.calls)
 
+    def test_the_version_header_carries_the_run_version(self):
+        dispatcher = FakeDispatcher(ok())
+        run(runner_for(dispatcher, spec_version='1.1'), a_test(get_task()))
+        assert dispatcher.calls[0][2][VERSION_HEADER] == '1.1'
+
+    def test_spec_version_resolves_to_the_run_version(self):
+        """A raw step is sent as written, so this variable is how it carries
+        the version the run targets."""
+        dispatcher = FakeDispatcher(ok())
+        step = Step(
+            id='raw',
+            raw={
+                'method': 'POST', 'path': '/',
+                'headers': {'A2A-Version': '{{specVersion}}'},
+                'body': {},
+            },
+        )
+        test = a_test(step, transport=[TransportBinding.JSONRPC])
+        run(runner_for(dispatcher, spec_version='1.1'), test)
+        assert dispatcher.raw_calls[0][0].headers == {'A2A-Version': '1.1'}
+
+    def test_nothing_can_make_the_variable_disagree_with_the_header(self):
+        """Not a caller's variable and not a document's."""
+        dispatcher = FakeDispatcher(ok())
+        step = Step(
+            id='get', operation=Operation.GET_TASK,
+            params={'id': '{{specVersion}}'},
+        )
+        runner = runner_for(
+            dispatcher, spec_version='1.1', variables={'specVersion': '9.9'}
+        )
+        run(runner, a_test(step), variables={'specVersion': '8.8'})
+        _, params, headers = dispatcher.calls[0]
+        assert params['id'] == '1.1'
+        assert headers[VERSION_HEADER] == '1.1'
+
     def test_a_message_without_a_messageId_gets_one(self):
         """§12.4 / §4.3: A2A requires every message to carry one."""
         dispatcher = FakeDispatcher(ok())
@@ -560,6 +596,29 @@ class TestSkipping:
         result = run(runner_for(dispatcher), test)
         assert result.result is Outcome.SKIP
         assert 'grpc' in result.skip_reason
+
+    @pytest.mark.parametrize(
+        ('bounds', 'spec_version', 'said'),
+        [
+            ({'min_spec_version': '1.1'}, '1.0', 'A2A 1.1 and newer'),
+            ({'max_spec_version': '1.0'}, '1.1', 'A2A 1.0 and older'),
+        ],
+    )
+    def test_a_version_the_test_does_not_apply_to(self, bounds, spec_version, said):
+        """A backstop: the pipeline drops these before the run."""
+        dispatcher = FakeDispatcher(ok())
+        runner = runner_for(dispatcher, spec_version=spec_version)
+        result = run(runner, a_test(get_task(), **bounds))
+        assert result.result is Outcome.SKIP
+        assert said in result.skip_reason
+        assert f'targets A2A {spec_version}' in result.skip_reason
+        assert dispatcher.calls == []
+
+    def test_a_version_inside_the_range_runs(self):
+        dispatcher = FakeDispatcher(ok())
+        runner = runner_for(dispatcher, spec_version='1.1')
+        test = a_test(get_task(), min_spec_version='1.1')
+        assert run(runner, test).result is Outcome.PASS
 
     def test_a_runner_requirement_this_runner_lacks(self):
         dispatcher = FakeDispatcher(ok())

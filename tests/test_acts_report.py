@@ -111,6 +111,26 @@ class TestDocument:
             'transport', 'environment', 'summary', 'suites',
         }
 
+    def test_the_spec_version_is_the_one_the_run_targeted(self):
+        suite = a_suite(a_test('A'))
+        common = dict(
+            sdk=SDK, transport=TransportBinding.JSONRPC, duration_ms=1,
+        )
+        assert report.build([a_result('A')], suite, **common)['spec_version'] == '1.0'
+        at_11 = report.build([a_result('A')], suite, spec_version='1.1', **common)
+        assert at_11['spec_version'] == '1.1'
+
+    def test_the_rendered_summary_names_the_version(self):
+        import io
+
+        doc = report.build(
+            [a_result('A')], a_suite(a_test('A')), sdk=SDK,
+            transport=TransportBinding.GRPC, duration_ms=1, spec_version='1.1',
+        )
+        out = io.StringIO()
+        report.render(doc, out)
+        assert 'a2a-python / grpc / A2A 1.1' in out.getvalue()
+
     def test_timestamp_is_iso_8601_zulu(self):
         assert self.build([a_result('A')])['generated_at'] == '2026-09-03T08:42:00Z'
 

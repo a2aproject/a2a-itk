@@ -28,7 +28,12 @@ from typing import Any
 
 from test_suite.acts.loader import LoadedSuite
 from test_suite.acts.runner import Outcome, TestResult
-from test_suite.acts.schema import ACTS_VERSION, Level, TransportBinding
+from test_suite.acts.schema import (
+    ACTS_VERSION,
+    DEFAULT_SPEC_VERSION,
+    Level,
+    TransportBinding,
+)
 
 
 #: §13.5's naming convention. `SHOULD`, but there is no reason to differ.
@@ -147,7 +152,7 @@ def build(
     sdk: Mapping[str, str],
     transport: TransportBinding,
     duration_ms: int,
-    spec_version: str = '1.0',
+    spec_version: str = DEFAULT_SPEC_VERSION,
     acts_version: str = ACTS_VERSION,
     env: Mapping[str, str] | None = None,
     generated_at: datetime | None = None,
@@ -161,7 +166,7 @@ def build(
             `repository`.
         transport: Which binding the run used.
         duration_ms: Wall time for the whole run.
-        spec_version: A2A protocol version tested.
+        spec_version: The A2A version the run targeted.
         acts_version: ACTS format version.
         env: Overrides :func:`environment`.
         generated_at: Overrides the clock, for reproducible tests.
@@ -247,7 +252,8 @@ def render(report: Mapping[str, Any], stream: Any = None) -> None:
     out = stream or sys.stdout
     summary = report['summary']
     print(
-        f'ACTS {report["sdk"]["name"]} / {report["transport"]} — '
+        f'ACTS {report["sdk"]["name"]} / {report["transport"]} / '
+        f'A2A {report["spec_version"]} — '
         f'{summary["total"]} tests in {summary["duration_ms"]}ms',
         file=out,
     )
