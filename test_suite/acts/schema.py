@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import enum
 import re
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -163,6 +163,8 @@ class RunnerRequirement(str, enum.Enum):
     HEADER_INSPECTION = 'header_inspection'
     #: Keep one request open while issuing another: a `background` step.
     CONCURRENT_REQUESTS = 'concurrent_requests'
+    #: Drive a two-way live exchange: a `live` step.
+    LIVE_STREAM = 'live_stream'
 
 
 class HttpMethod(str, enum.Enum):
@@ -650,22 +652,101 @@ class ExpectWebhook(_Model):
     token: Assertion | None = None
 
 
+class SubscribeParams(_Model):
+    """A request to attach to an existing task, on a live exchange."""
+
+    model_config = ConfigDict(extra='allow')
+
+    id: str
+    lastSeenGeneration: int | str | None = None  # noqa: N815 - the wire name
+
+
+class LiveRequest(_Model):
+    """One request a client sends on a live exchange.
+
+    Exactly one of three kinds. The names are those of ACTS and not of the
+    wire, so a test does not change if A2A renames a member.
+    """
+
+    send_message: dict[str, Any] | None = Field(
+        default=None,
+        description='A message, written as the `params` of `send_message` are.',
+    )
+    subscribe: SubscribeParams | None = None
+    unrecognized: Literal[True] | None = Field(
+        default=None,
+        description='A request of a kind the SUT cannot know, as one from a '
+                    'later minor version would be.',
+    )
+
+    @model_validator(mode='before')
+    @classmethod
+    def _unrecognized_is_written_true(cls, data: Any) -> Any:
+        """`true` and nothing else: not `1`, which a literal would let pass."""
+        if isinstance(data, dict) and data.get('unrecognized', True) is not True:
+            raise ValueError('`unrecognized` takes only `true`')
+        return data
+
+    @model_validator(mode='after')
+    def _exactly_one_kind_of_request(self) -> LiveRequest:
+        given = [
+            name for name in ('send_message', 'subscribe', 'unrecognized')
+            if getattr(self, name) is not None
+        ]
+        if len(given) != 1:
+            raise ValueError(
+                f'a live request is exactly one of `send_message`, `subscribe` '
+                f'and `unrecognized: true`; got {given or "none of them"}'
+            )
+        return self
+
+
+class UplinkRequest(LiveRequest):
+    """A request sent after the one that opened the exchange."""
+
+    id: str | None = Field(default=None, min_length=1)
+    description: str | None = None
+    after_event: dict[str, Assertion] | None = Field(
+        default=None,
+        description='Hold this request until an event that matches has '
+                    'arrived from the SUT.',
+    )
+    expect_ack: dict[str, Assertion] | None = Field(
+        default=None,
+        description='Asserted on the response to this request, on a binding '
+                    'where a request of the exchange has one of its own.',
+    )
+
+
+class LiveExchange(_Model):
+    """A two-way exchange with the SUT (`SendLiveMessage`, from A2A 1.1).
+
+    The client keeps sending requests while the SUT streams events. ``open``
+    is the request that starts it and ``uplink`` the requests that follow, in
+    order.
+    """
+
+    open: LiveRequest
+    uplink: Annotated[list[UplinkRequest], Field(min_length=1)] | None = None
+
+
 class StepKind(str, enum.Enum):
-    """Which of the five step forms a step is (spec §4)."""
+    """Which of the step forms a step is (spec §4)."""
 
     OPERATION = 'operation'
     RAW = 'raw'
     CLIENT = 'client'
     WEBHOOK = 'webhook'
     ASSERTION = 'assertion'
+    LIVE = 'live'
 
 
 class Step(_Model):
     """One step of a test.
 
-    The CDDL writes ``step`` as a union of four disjoint records. This is one
+    The CDDL writes ``step`` as a union of disjoint records. This is one
     model with a validator instead, because a pydantic union reports a failure
-    as four parallel "did not match" branches — for a step with a typo, the
+    as parallel "did not match" branches — for a step with a typo, the
     real error is buried in whichever branch was closest. One model can say
     "a raw step cannot carry `params`" directly.
 
@@ -676,12 +757,13 @@ class Step(_Model):
     id: StepId
     description: str | None = None
 
-    # -- the four kinds; exactly one must be present ---------------------
+    # -- the step kinds; exactly one must be present ---------------------
     operation: Operation | None = None
     raw: RawBlock | None = None
     client_response: ClientResponseBlock | None = None
     expect_webhook: ExpectWebhook | None = None
     assertion: InlineAssertion | None = None
+    live: LiveExchange | None = None
 
     # -- operation-step payload -----------------------------------------
     params: dict[str, Any] | None = None
@@ -737,19 +819,21 @@ class Step(_Model):
             return StepKind.CLIENT
         if self.expect_webhook is not None:
             return StepKind.WEBHOOK
+        if self.live is not None:
+            return StepKind.LIVE
         return StepKind.ASSERTION
 
     @model_validator(mode='after')
     def _exactly_one_kind(self) -> Step:
         present = [
             n for n in
-            ('operation', 'raw', 'client_response', 'expect_webhook', 'assertion')
+            ('operation', 'raw', 'client_response', 'expect_webhook', 'assertion', 'live')
             if getattr(self, n) is not None
         ]
         if not present:
             raise ValueError(
                 'a step needs one of `operation`, `raw`, `client_response`, '
-                '`expect_webhook` or `assertion`'
+                '`expect_webhook`, `assertion` or `live`'
             )
         if len(present) > 1:
             raise ValueError(
@@ -803,6 +887,24 @@ class Step(_Model):
                         f'out of band and has no reply to assert on'
                     )
 
+        if kind is StepKind.LIVE:
+            # The response to the request that opens the exchange is the
+            # stream of the SUT's events, so the step is asserted as a stream
+            # is, or as a refusal to open one.
+            for name in ('expect', 'assertions', 'delay_ms'):
+                if getattr(self, name) is not None:
+                    raise ValueError(
+                        f'`{name}` is not a field of a live step; it takes '
+                        f'`expect_stream`, `expect_error`, `capture` and '
+                        f'`a2a_version`'
+                    )
+            if self.expect_error is not None and self.live.uplink is not None:
+                raise ValueError(
+                    'set either `expect_error` or `live.uplink`, not both: a '
+                    'SUT that refuses to open the exchange is sent nothing '
+                    'further'
+                )
+
         if kind is StepKind.ASSERTION:
             for name in ('expect', 'expect_error', 'expect_stream', 'capture', 'repeat'):
                 if getattr(self, name) is not None:
@@ -841,14 +943,15 @@ class Step(_Model):
         if self.repeat is not None and kind is not StepKind.OPERATION:
             raise ValueError(f'`repeat` re-dispatches an operation; not valid on a {kind.value} step')
 
-        if self.a2a_version is not None and kind is not StepKind.OPERATION:
+        if self.a2a_version is not None and kind not in (StepKind.OPERATION, StepKind.LIVE):
             if kind is StepKind.RAW:
                 raise ValueError(
                     '`a2a_version` belongs to an operation step; a raw step '
                     'writes its own `A2A-Version` header'
                 )
             raise ValueError(
-                f'`a2a_version` belongs to an operation step, not a {kind.value} step'
+                f'`a2a_version` belongs to an operation step or a live step, '
+                f'not a {kind.value} step'
             )
 
         bounds = {
@@ -1010,7 +1113,7 @@ class Test(_Model):
 
     @model_validator(mode='after')
     def _declares_the_runner_features_it_uses(self) -> Test:
-        """These four MUST be declared, not left implied.
+        """These five MUST be declared, not left implied.
 
         §3.2 leaves `runner_requirements` optional in general; these are its
         exceptions, because here the alternative is silent. Declared in prose
@@ -1033,6 +1136,8 @@ class Test(_Model):
                  'disconnects mid-stream'),
                 (RunnerRequirement.CONCURRENT_REQUESTS, bool(step.background),
                  'stays open while the steps after it run'),
+                (RunnerRequirement.LIVE_STREAM, step.kind() is StepKind.LIVE,
+                 'drives a live exchange'),
             ):
                 if used and requirement not in declared:
                     raise ValueError(

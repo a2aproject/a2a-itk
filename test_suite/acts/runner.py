@@ -96,6 +96,7 @@ from test_suite.acts.streaming import (
     normalize,
 )
 from test_suite.acts.wire_map import (
+    VERSION_HEADER,
     binding_for_operation,
     card_interfaces,
     interface_version,
@@ -120,10 +121,6 @@ DEFAULT_DELAY_MS = 1000
 #: (`delay_ms: 2000` × `max_attempts: 15`), which keeps a streaming step as
 #: patient as a polled one rather than inventing a second notion of "too slow".
 DEFAULT_STREAM_TIMEOUT_MS: Final = 30_000
-
-#: Sent on every request the runner builds, carrying the A2A version the run
-#: targets. On gRPC the dispatcher turns it into call metadata.
-VERSION_HEADER = 'A2A-Version'
 
 #: The variable through which a test reads the version the run targets. A raw
 #: step is sent exactly as written, so this is how one carries the run's

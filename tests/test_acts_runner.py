@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any, AsyncIterator, Mapping
 
+import httpx
 import pytest
 
 from test_suite.acts import LoadedSuite, LoadedTest, load_suite
@@ -3386,3 +3387,100 @@ class TestWebhookEvents:
         with_events = self.play(receiver, events=two)
         without = self.play(receiver)
         assert with_events.steps[-1].checks == without.steps[-1].checks + 2
+
+
+class TestLiveStepsAreSkipped:
+    """The runner does not drive a live exchange yet. A test with a live step
+    is skipped, and says why; nothing is sent."""
+
+    def a_live_test(self):
+        return a_test(
+            get_task(),
+            Step(
+                id='exchange',
+                live={'open': {'send_message': {'message': {'role': 'ROLE_USER'}}}},
+                expect_stream={'min_count': 1},
+            ),
+            runner_requirements=[RunnerRequirement.LIVE_STREAM],
+        )
+
+    def test_the_test_is_skipped_and_nothing_is_sent(self):
+        dispatcher = FakeDispatcher(ok())
+        result = run(runner_for(dispatcher), self.a_live_test())
+        assert result.result is Outcome.SKIP
+        assert result.skip_reason == 'contains live step(s); not yet supported'
+        assert dispatcher.calls == []
+
+    def test_claiming_the_requirement_does_not_make_it_run(self):
+        """The step kind has no execution path, whatever a caller claims the
+        runner provides."""
+        dispatcher = FakeDispatcher(ok())
+        runner = runner_for(dispatcher, capabilities=[RunnerRequirement.LIVE_STREAM])
+        result = run(runner, self.a_live_test())
+        assert result.result is Outcome.SKIP
+        assert dispatcher.calls == []
+
+    def test_the_pipeline_does_not_claim_the_requirement(self):
+        import acts_runner
+
+        assert RunnerRequirement.LIVE_STREAM not in acts_runner.RUNNER_CAPABILITIES
+
+
+class TestTheVersionAStepIsWrittenFor:
+    """Over REST the verb of `subscribe_to_task` depends on the A2A version.
+    The runner's requests go through the real dispatcher here, so that what
+    is checked is the request on the wire."""
+
+    def subscribe(self, **step):
+        return Step(
+            id=step.pop('id', 'watch'), operation=Operation.SUBSCRIBE_TO_TASK,
+            params={'id': 'T1', 'lastSeenGeneration': 4},
+            expect_stream={'min_count': 1}, **step,
+        )
+
+    def requests(self, *steps, spec_version):
+        from test_suite.acts.dispatcher import RestDispatcher
+
+        seen: list[httpx.Request] = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(
+                200, text='data: {"task": {"id": "T1"}}\n\n',
+                headers={'Content-Type': 'text/event-stream'},
+            )
+
+        async def go():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            dispatcher = RestDispatcher('http://sut.test', client=client)
+            runner = Runner(
+                dispatcher, spec_version=spec_version, new_uuid=lambda: 'generated-id'
+            )
+            result = await runner.run_test(a_test(*steps))
+            await client.aclose()
+            return result
+
+        result = asyncio.run(go())
+        assert result.result is Outcome.PASS, result.failure
+        return [(r.method, str(r.url.query, 'ascii'), r.content) for r in seen]
+
+    def test_a_run_at_1_0_subscribes_by_post(self):
+        assert self.requests(self.subscribe(), spec_version='1.0') == [
+            ('POST', '', b'{"lastSeenGeneration": 4}'),
+        ]
+
+    def test_a_run_at_1_1_subscribes_by_get(self):
+        assert self.requests(self.subscribe(), spec_version='1.1') == [
+            ('GET', 'lastSeenGeneration=4', b''),
+        ]
+
+    def test_a_step_sent_as_another_version_is_written_for_that_version(self):
+        """A subscriber that asked for A2A 1.0, in a run at 1.1."""
+        assert self.requests(
+            self.subscribe(),
+            self.subscribe(id='watch-as-1-0', a2a_version='1.0'),
+            spec_version='1.1',
+        ) == [
+            ('GET', 'lastSeenGeneration=4', b''),
+            ('POST', '', b'{"lastSeenGeneration": 4}'),
+        ]
