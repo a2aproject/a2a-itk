@@ -4,8 +4,59 @@ from pyproto import instruction_pb2
 
 from test_suite.agent_table import AgentTable
 from test_suite.transports import ALL_TRANSPORTS as _ALL_TRANSPORTS
+from test_suite.versions import parse_spec_version
 
 _END_OF_TRAVERSAL_TOKEN = 'traversal-completed'  # noqa: S105
+
+
+def _speaks_1_1(agents: AgentTable, agent_id: str) -> bool:
+    """Does the agent speak A2A 1.1 or newer?
+
+    Only such an agent reads the fields of an instruction that are about the
+    A2A version of a call. No step that an older agent carries out sets one.
+    An older agent still passes on the ones in the instruction it hands to
+    the next agent.
+    """
+    return parse_spec_version(agents.protocol_versions(agent_id)[0]) >= (1, 1)
+
+
+def _served(
+    agents: AgentTable, circuit: list[str], position: int, forced: str | None
+) -> str | None:
+    """The A2A version the agent at ``position`` of the circuit reports.
+
+    That is the version it is called at: the forced one when the agent that
+    calls it reads it from the instruction, and otherwise the newest version
+    both speak, which is what a caller negotiates.
+
+    ``None`` when the agent is not asked to report. The harness calls the
+    first agent itself. An agent that does not speak A2A 1.1 does not read
+    the request to report. Two agents with no version in common cannot make
+    the call at all.
+    """
+    callee = circuit[position]
+    if position == 0 or not _speaks_1_1(agents, callee):
+        return None
+    caller = circuit[position - 1]
+    if forced and _speaks_1_1(agents, caller):
+        return forced
+    theirs = agents.protocol_versions(callee)
+    return next((v for v in agents.protocol_versions(caller) if v in theirs), None)
+
+
+def _say(
+    response: instruction_pb2.ReturnResponse, text: str, served: str | None
+) -> str:
+    """Make ``response`` say ``text``; the token the agent is expected to say.
+
+    With ``served``, the agent is also asked to report the A2A version it is
+    called at, and the token ends in that version.
+    """
+    response.response = text
+    if served is None:
+        return text
+    response.report_protocol_version = True
+    return f'{text} served:{served}'
 
 
 def _parse_edge_strings(
@@ -110,23 +161,28 @@ def _traversal_to_instruction(  # noqa: PLR0913
     streaming: bool = False,
     behavior: str = 'send_message',
     notification_server_url: str = '',
+    hop_protocol_version: str | None = None,
 ) -> tuple[instruction_pb2.Instruction, list[str]]:
     """Converts a circuit of SDK names into a nested A2A instruction.
 
     Args:
         circuit: Ordered list of SDK names representing the traversal path.
         transport: The transport protocol to use for hops.
-        agents: Where this run's agents are listening.
+        agents: Where this run's agents are listening, and what they speak.
         streaming: Whether to use streaming.
         behavior: The behavior to set in CallAgent.
         notification_server_url: The URL of the notification server.
+        hop_protocol_version: The A2A version to force every hop to.
 
     Returns:
-        tuple[instruction_pb2.Instruction, list[str]]: The nested instruction and trace tokens.
+        The nested instruction, and the tokens the agents are expected to
+        say: the trace tokens, then the token that ends the traversal.
     """
     current_inst = instruction_pb2.Instruction()
-    current_inst.return_response.response = (
-        f'{_END_OF_TRAVERSAL_TOKEN}:{transport}'
+    end_token = _say(
+        current_inst.return_response,
+        f'{_END_OF_TRAVERSAL_TOKEN}:{transport}',
+        _served(agents, circuit, len(circuit) - 1, hop_protocol_version),
     )
     hold_task = behavior == 'resubscribe'
     current_inst.return_response.hold_task = hold_task
@@ -141,10 +197,16 @@ def _traversal_to_instruction(  # noqa: PLR0913
             instruction_pb2.SeriesOfSteps.RESPONSE_GENERATOR_CONCAT
         )
 
-        trace_token = f'[{u} -> {v} ({transport})]'
-        trace_tokens.append(trace_token)
         trace = hop.steps.instructions.add()
-        trace.return_response.response = trace_token
+        # `u` says this token, so the version with it is the one `u` is
+        # called at, not the version of the call from `u` to `v`.
+        trace_tokens.append(
+            _say(
+                trace.return_response,
+                f'[{u} -> {v} ({transport})]',
+                _served(agents, circuit, i, hop_protocol_version),
+            )
+        )
         trace.return_response.hold_task = hold_task
 
         call_step = hop.steps.instructions.add()
@@ -168,10 +230,12 @@ def _traversal_to_instruction(  # noqa: PLR0913
             call_step.call_agent.resubscribe.CopyFrom(
                 instruction_pb2.ResubscribeBehavior()
             )
+        if hop_protocol_version and _speaks_1_1(agents, u):
+            call_step.call_agent.protocol_version = hop_protocol_version
 
         current_inst = hop
 
-    return current_inst, trace_tokens
+    return current_inst, [*trace_tokens, end_token]
 
 
 def create_test_suite(  # noqa: PLR0913
@@ -182,21 +246,32 @@ def create_test_suite(  # noqa: PLR0913
     streaming: bool = False,
     behavior: str = 'send_message',
     notification_server_url: str = '',
+    hop_protocol_version: str | None = None,
 ) -> tuple[
     instruction_pb2.Instruction,
     list[str],
 ]:
     """Builds the nested instruction for one scenario, and its trace tokens.
 
+    An agent that speaks A2A 1.1 is asked to report the version it is called
+    at, and each of its tokens then ends in ``served:<version>``. An agent
+    that speaks nothing newer than A2A 1.0 is asked nothing about versions,
+    so a traversal among such agents is the instruction it was before those
+    fields existed.
+
     Args:
         sdks: Agent identifiers taking part, traversal start first.
-        agents: Where this run's agents are listening. Every identifier in
-            ``sdks`` must be present or the traversal cannot be addressed.
+        agents: Where this run's agents are listening, and what they speak.
+            Every identifier in ``sdks`` must be present or the traversal
+            cannot be addressed.
         edges: Optional explicit edges; a complete digraph when omitted.
         protocols: Transports to build a circuit for; all three when omitted.
         streaming: Whether hops stream.
         behavior: What each hop asks the next agent to do.
         notification_server_url: Where push notifications are POSTed.
+        hop_protocol_version: The A2A version every call is made at, for the
+            agents that speak A2A 1.1. ``None`` leaves each call to the
+            version its two agents negotiate.
     """
     testing_instruction = instruction_pb2.Instruction()
     testing_instruction.steps.response_generator = (
@@ -217,17 +292,16 @@ def create_test_suite(  # noqa: PLR0913
             edges=parsed_edges,
         )
         for circuit in circuits:
-            instruction_for_transport, trace_tokens = _traversal_to_instruction(
+            instruction_for_transport, tokens = _traversal_to_instruction(
                 circuit,
                 transport,
                 agents,
                 streaming=streaming,
                 behavior=behavior,
                 notification_server_url=notification_server_url,
+                hop_protocol_version=hop_protocol_version,
             )
-            expected_end_tokens.extend(
-                [*trace_tokens, f'{_END_OF_TRAVERSAL_TOKEN}:{transport}']
-            )
+            expected_end_tokens.extend(tokens)
             testing_instruction.steps.instructions.add().CopyFrom(
                 instruction_for_transport
             )

@@ -71,8 +71,19 @@ class AgentTable(Mapping[str, AgentEndpoint]):
                 started must not be mistaken for one — it would vanish from
                 the expansion instead of failing.
         """
+        return self._started(agent_id).card_uri
+
+    def protocol_versions(self, agent_id: str) -> tuple[str, ...]:
+        """The A2A versions ``agent_id`` speaks, newest first.
+
+        Raises:
+            RuntimeError: As :meth:`card_uri` does, and for the same reason.
+        """
+        return self._started(agent_id).protocol_versions
+
+    def _started(self, agent_id: str) -> AgentEndpoint:
         try:
-            return self._endpoints[agent_id].card_uri
+            return self._endpoints[agent_id]
         except KeyError:
             known = ', '.join(sorted(self._endpoints)) or '(none)'
             raise RuntimeError(

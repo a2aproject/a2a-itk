@@ -164,6 +164,8 @@ class TestFirstRequestVersion:
         # The versions decide, not the name of the line.
         ('python_v03', ('1.0', '0.3'), 'SendMessage', '1.0'),
         ('python_v10', ('0.3',), 'message/send', '0.3'),
+        # The newest version the agent speaks, in the request of 1.0 and later.
+        ('python_v11', ('1.1', '1.0', '0.3'), 'SendMessage', '1.1'),
     ])
     def test_follows_the_versions_of_the_entry_agent(
         self, monkeypatch, entry, protocol_versions, method, version,

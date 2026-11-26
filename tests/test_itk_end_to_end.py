@@ -140,12 +140,19 @@ def traverse(
     edges: list[str] | None = None,
     versions: dict[str, tuple[str, ...]] | None = None,
     customize: Callable[[dict[str, MockAgent]], None] | None = None,
+    hop_protocol_version: str | None = None,
+    calls: dict[str, list[tuple[str, str]]] | None = None,
+    build_subtests: bool = False,
 ) -> bool:
     """One traversal through `testlib.execute_itk_test`. Did it pass?
 
     The two things `testlib` reaches outside the process for are replaced:
     its HTTP client is one on the cluster's network, and the notification
     receiver it starts is the real application, served on that network.
+
+    ``calls``, when given, is filled with the JSON-RPC calls each agent
+    received: method and A2A version, in order. With ``build_subtests`` the
+    scenario is run once for every subset of its agents, and all have to pass.
     """
 
     async def scenario(cluster: _Cluster) -> bool:
@@ -169,8 +176,14 @@ def traverse(
                 scenario_name='traversal',
                 protocols=list(protocols),
                 streaming=streaming,
+                hop_protocol_version=hop_protocol_version,
+                build_subtests=build_subtests,
             )
-        return results['traversal']['passed']
+        if calls is not None:
+            calls.update({
+                name: cluster.network.calls_to(agent) for name, agent in cluster.agents.items()
+            })
+        return all(result['passed'] for result in results.values())
 
     return in_a_cluster(scenario, versions, customize)
 
@@ -203,12 +216,12 @@ def calling(
 
 
 async def call(
-    cluster: _Cluster, agent: str, method: str, params: dict[str, Any]
+    cluster: _Cluster, agent: str, method: str, params: dict[str, Any], version: str = '1.0'
 ) -> dict[str, Any]:
-    """One JSON-RPC call to an agent at A2A 1.0; its result."""
+    """One JSON-RPC call to an agent; its result."""
     reply = await cluster.network.client().post(
         cluster.agents[agent].jsonrpc_url,
-        headers={VERSION_HEADER: '1.0'},
+        headers={VERSION_HEADER: version},
         json={'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params},
     )
     return reply.json()['result']
@@ -263,6 +276,183 @@ class TestATraversalPasses:
         # The test asks at 1.0, the newer agent calls itself at 1.1, and the
         # two agents call each other at 1.0.
         assert seen == {'newer': {'1.0', '1.1'}, 'older': {'1.0'}}
+
+
+#: Three agents: two that speak A2A 1.1 and one that does not.
+MIXED = {'current': ('1.0', '1.1'), 'python_v11': ('1.0', '1.1'), 'ts_v10': ('1.0',)}
+
+
+def versions_received(calls: dict[str, list[tuple[str, str]]]) -> dict[str, set[str]]:
+    return {name: {version for _, version in received} for name, received in calls.items()}
+
+
+class TestTheVersionOfEachCall:
+    """An agent that speaks A2A 1.1 reports the version it is called at, and
+    the harness checks it. `traverse` passes only if every report is the
+    version the harness expected."""
+
+    @pytest.mark.parametrize(('behavior', 'streaming'), [
+        ('send_message', False),
+        ('send_message', True),
+        ('push_notification', False),
+        ('resubscribe', True),
+    ])
+    def test_a_traversal_among_agents_of_mixed_versions_passes(self, behavior, streaming):
+        calls: dict[str, list[tuple[str, str]]] = {}
+        assert traverse(behavior, streaming=streaming, versions=MIXED, calls=calls)
+        # The two newer agents call each other at 1.1, and the harness calls
+        # the entry agent at 1.1. The older agent calls and is called at 1.0.
+        assert versions_received(calls) == {
+            'current': {'1.0', '1.1'},
+            'python_v11': {'1.0', '1.1'},
+            'ts_v10': {'1.0'},
+        }
+
+    def test_the_first_request_is_sent_at_the_newest_version_of_the_entry_agent(self):
+        calls: dict[str, list[tuple[str, str]]] = {}
+        assert traverse('send_message', versions=MIXED, calls=calls)
+        assert calls['current'][0] == ('SendMessage', '1.1')
+
+    def test_a_forced_version_is_the_version_of_every_call_between_newer_agents(self):
+        calls: dict[str, list[tuple[str, str]]] = {}
+        versions = dict.fromkeys(SDKS, ('1.0', '1.1'))
+        assert traverse('send_message', versions=versions, hop_protocol_version='1.0', calls=calls)
+        # Only the harness still calls at 1.1: nothing forces its request.
+        assert calls['current'] == [
+            ('SendMessage', '1.1'), ('SendMessage', '1.0'), ('SendMessage', '1.0'),
+        ]
+        assert versions_received(calls) == {
+            'current': {'1.0', '1.1'}, 'python_v10': {'1.0'}, 'ts_v10': {'1.0'},
+        }
+
+    def test_a_forced_version_reaches_every_subtest_of_a_scenario(self):
+        calls: dict[str, list[tuple[str, str]]] = {}
+        versions = dict.fromkeys(SDKS, ('1.0', '1.1'))
+        assert traverse(
+            'send_message', versions=versions, hop_protocol_version='1.0',
+            build_subtests=True, calls=calls,
+        )
+        # The harness opens each of the three subtests at 1.1. No agent does.
+        assert [version for _, version in calls['current']].count('1.1') == 3
+        assert versions_received(calls) == {
+            'current': {'1.0', '1.1'}, 'python_v10': {'1.0'}, 'ts_v10': {'1.0'},
+        }
+
+    def test_without_a_forced_version_the_same_agents_call_each_other_at_1_1(self):
+        calls: dict[str, list[tuple[str, str]]] = {}
+        assert traverse('send_message', versions=dict.fromkeys(SDKS, ('1.0', '1.1')), calls=calls)
+        assert versions_received(calls) == dict.fromkeys(SDKS, {'1.1'})
+
+    def test_an_agent_that_reports_another_version_is_caught(self, caplog):
+        def lie(agents: dict[str, MockAgent]) -> None:
+            agent = agents['python_v11']
+            carry_out = agent._carry_out
+            agent._carry_out = lambda instruction, _served: carry_out(instruction, '1.0')
+
+        assert not traverse('send_message', versions=MIXED, customize=lie)
+        assert "missing for traversal: ['[python_v11 -> current (jsonrpc)] served:1.1']" in (
+            caplog.text
+        )
+
+    def test_an_agent_that_does_not_report_is_caught(self, caplog):
+        def stay_silent(agents: dict[str, MockAgent]) -> None:
+            agent = agents['python_v11']
+            carry_out = agent._carry_out
+
+            async def unreported(instruction: instruction_pb2.Instruction, served: str):
+                said = await carry_out(instruction, served)
+                return [text.split(' served:')[0] for text in said]
+
+            agent._carry_out = unreported
+
+        assert not traverse('send_message', versions=MIXED, customize=stay_silent)
+        # Every token of the agent, and no token of another one.
+        assert "'[python_v11 -> ts_v10 (jsonrpc)] served:1.0'" in caplog.text
+        assert "'[ts_v10 -> " not in caplog.text
+
+    def test_an_agent_that_calls_at_an_older_version_than_it_could_is_caught(self, caplog):
+        """Its own reports are right. The agents it calls report the gap."""
+        def fall_back(agents: dict[str, MockAgent]) -> None:
+            agent = agents['current']
+            interface_of = agent._interface_of
+
+            async def at_1_0(call: instruction_pb2.CallAgent):
+                url, _ = await interface_of(call)
+                return url, '1.0'
+
+            agent._interface_of = at_1_0
+
+        assert not traverse('send_message', versions=MIXED, customize=fall_back)
+        assert "missing for traversal: ['[python_v11 -> current (jsonrpc)] served:1.1']" in (
+            caplog.text
+        )
+
+    def test_an_agent_that_ignores_a_forced_version_is_caught(self, caplog):
+        def ignore_it(agents: dict[str, MockAgent]) -> None:
+            agent = agents['python_v10']
+            interface_of = agent._interface_of
+
+            async def negotiated(call: instruction_pb2.CallAgent):
+                unforced = instruction_pb2.CallAgent()
+                unforced.CopyFrom(call)
+                unforced.ClearField('protocol_version')
+                return await interface_of(unforced)
+
+            agent._interface_of = negotiated
+
+        versions = dict.fromkeys(SDKS, ('1.0', '1.1'))
+        assert not traverse(
+            'send_message', versions=versions, hop_protocol_version='1.0', customize=ignore_it
+        )
+        # What the agents it calls say: they were called at 1.1.
+        assert "'[ts_v10 -> current (jsonrpc)] served:1.0'" in caplog.text
+
+    def test_an_older_agent_that_passes_the_fields_on_is_enough(self):
+        """The older agent is asked nothing, and stands before the newer one."""
+        versions = {'ts_v10': ('1.0',), 'python_v11': ('1.0', '1.1')}
+        assert traverse('send_message', versions=versions)
+
+    def test_an_agent_that_drops_the_fields_it_passes_on_is_caught(self, caplog):
+        """An agent built without the fields loses them when it writes the
+        instruction for the next agent. That agent is then never asked to
+        report, and the traversal fails at its token."""
+        def drop_what_it_does_not_know(agents: dict[str, MockAgent]) -> None:
+            agent = agents['ts_v10']
+            call_agent = agent._call_agent
+
+            def without_version_fields(instruction: instruction_pb2.Instruction) -> None:
+                step = instruction.WhichOneof('step')
+                if step == 'return_response':
+                    instruction.return_response.ClearField('report_protocol_version')
+                elif step == 'steps':
+                    for child in instruction.steps.instructions:
+                        without_version_fields(child)
+                elif step == 'call_agent':
+                    instruction.call_agent.ClearField('protocol_version')
+                    without_version_fields(instruction.call_agent.instruction)
+
+            async def relay(call: instruction_pb2.CallAgent):
+                known = instruction_pb2.CallAgent()
+                known.CopyFrom(call)
+                without_version_fields(known.instruction)
+                return await call_agent(known)
+
+            agent._call_agent = relay
+
+        versions = {'ts_v10': ('1.0',), 'python_v11': ('1.0', '1.1')}
+        assert not traverse('send_message', versions=versions, customize=drop_what_it_does_not_know)
+        assert "missing for traversal: ['[python_v11 -> ts_v10 (jsonrpc)] served:1.0']" in (
+            caplog.text
+        )
+
+    def test_a_version_the_called_agent_does_not_serve_fails_the_traversal(self):
+        """The call is not made at another version in its place."""
+        versions = {'current': ('1.0', '1.1'), 'python_v11': ('1.0', '1.1'), 'only_1_1': ('1.1',)}
+        calls: dict[str, list[tuple[str, str]]] = {}
+        assert not traverse(
+            'send_message', versions=versions, hop_protocol_version='1.0', calls=calls
+        )
+        assert calls['only_1_1'] == []
 
 
 class TestATraversalThatDidNotWorkFails:
@@ -333,6 +523,50 @@ class TestAnInstruction:
         assert said(in_a_cluster(scenario)) == (
             'TASK_STATE_COMPLETED', 'first\nfrom the other agent\nlast'
         )
+
+    @pytest.mark.parametrize(('asked_at', 'reply'), [
+        ('1.0', 'hello served:1.0'),
+        ('1.1', 'hello served:1.1'),
+    ])
+    def test_a_response_reports_the_version_of_the_request_when_asked(self, asked_at, reply):
+        async def scenario(cluster: _Cluster) -> dict[str, Any]:
+            return (await call(
+                cluster, 'current', 'SendMessage',
+                carrying(saying('hello', report_protocol_version=True)), version=asked_at,
+            ))['task']
+
+        assert said(in_a_cluster(scenario, {'current': ('1.0', '1.1')})) == (
+            'TASK_STATE_COMPLETED', reply
+        )
+
+    def test_every_response_of_a_series_reports_and_a_passed_on_one_does_not(self):
+        """The version is that of the request the agent itself is answering.
+        The agent it calls answers another request, at another version."""
+        async def scenario(cluster: _Cluster) -> dict[str, Any]:
+            series = instruction_pb2.Instruction()
+            series.steps.instructions.extend([
+                saying('first', report_protocol_version=True),
+                calling(cluster.agents['older'], saying('theirs', report_protocol_version=True)),
+                saying('last', report_protocol_version=True),
+            ])
+            return (await call(
+                cluster, 'newer', 'SendMessage', carrying(series), version='1.1'
+            ))['task']
+
+        task = in_a_cluster(scenario, {'newer': ('1.0', '1.1'), 'older': ('1.0',)})
+        assert said(task) == (
+            'TASK_STATE_COMPLETED', 'first served:1.1\ntheirs served:1.0\nlast served:1.1'
+        )
+
+    @pytest.mark.parametrize(('forced', 'called_at'), [('', '1.1'), ('1.1', '1.1'), ('1.0', '1.0')])
+    def test_a_call_is_made_at_the_version_the_instruction_asks_for(self, forced, called_at):
+        async def scenario(cluster: _Cluster) -> list[tuple[str, str]]:
+            other = cluster.agents['ts_v10']
+            await ask(cluster, 'current', calling(other, saying('x'), protocol_version=forced))
+            return cluster.network.calls_to(other)
+
+        versions = {'current': ('1.0', '1.1'), 'ts_v10': ('1.0', '1.1')}
+        assert in_a_cluster(scenario, versions) == [('SendMessage', called_at)]
 
     def test_a_held_task_ends_its_reply_and_stays_open_until_canceled(self):
         async def scenario(cluster: _Cluster) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -442,7 +676,12 @@ class TestAnInstruction:
         ),
         (
             lambda agents: calling(agents['only_1_1'], saying('x')),
-            'lists no JSON-RPC interface for a version this agent speaks',
+            'lists no JSON-RPC interface for A2A 1.0',
+        ),
+        # A version the instruction asks for is not replaced by another one.
+        (
+            lambda agents: calling(agents['ts_v10'], saying('x'), protocol_version='1.1'),
+            'lists no JSON-RPC interface for A2A 1.1',
         ),
         (
             lambda agents: calling(agents['ts_v10'], saying('x'), resubscribe={}),
