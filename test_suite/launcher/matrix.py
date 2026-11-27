@@ -28,7 +28,7 @@ import yaml
 
 from test_suite.launcher.spec import Kind, TargetSpec
 from test_suite.transports import ALL_TRANSPORTS
-from test_suite.versions import parse_spec_version
+from test_suite.versions import newest_first
 
 
 # `<sdk>_v<num>` with an optional `_<instance>` suffix. sdk is lowercase
@@ -261,12 +261,9 @@ def _parse_protocol_versions(raw: object, sdk: str, line: str) -> tuple[str, ...
     if not raw:
         raise MatrixError(f'{where}: must not be empty')
     try:
-        newest_first = sorted(raw, key=parse_spec_version, reverse=True)
+        return newest_first(raw)
     except ValueError as e:
         raise MatrixError(f'{where}: {e}') from None
-    if len(set(raw)) != len(raw):
-        raise MatrixError(f'{where}: lists a version twice: {raw}')
-    return tuple(newest_first)
 
 
 def _default_matrix_path() -> Path:

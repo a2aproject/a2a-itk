@@ -109,7 +109,7 @@ A disconnected edge list (two separate cycles) yields several circuits, each tra
 
 [`testlib.py`](../../testlib.py) serialises the instruction, base64-encodes it, and puts it in a file part of a `SendMessage` (or `SendStreamingMessage`) JSON-RPC request to the **first** agent in the scenario's `sdks` list, at `<card_uri>/jsonrpc`. ITK itself only ever speaks JSON-RPC to the entry agent; the transport under test is what the agents use between themselves.
 
-The request dialect is chosen from the first agent's `protocol_versions`, which come from its line in `matrix.yaml`; `current` is taken to speak 1.0 and 0.3. An agent whose newest version is 0.3 gets an A2A 0.3 request (`message/send`, `kind: file`, `A2A-Version: 0.3`). Any other agent gets the request of A2A 1.0 and later (`SendMessage`, `raw`/ `mediaType`), with its newest version as `A2A-Version`. Putting a `v03` peer first is how a scenario tests the "0.3 client calling 1.0 server" direction.
+The request dialect is chosen from the first agent's `protocol_versions`, which come from its line in `matrix.yaml`. For `current` they come from the run's `sut_protocol_versions`, checked against its agent card once it has started; a run that does not send them takes it to speak 1.0 and 0.3. An agent whose newest version is 0.3 gets an A2A 0.3 request (`message/send`, `kind: file`, `A2A-Version: 0.3`). Any other agent gets the request of A2A 1.0 and later (`SendMessage`, `raw`/ `mediaType`), with its newest version as `A2A-Version`. Putting a `v03` peer first is how a scenario tests the "0.3 client calling 1.0 server" direction.
 
 ### Behaviors
 

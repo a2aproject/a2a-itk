@@ -226,6 +226,47 @@ class TestMountPreflight:
 
 
 # ---------------------------------------------------------------------------
+# --sut-protocol-versions
+# ---------------------------------------------------------------------------
+
+
+class TestSutProtocolVersions:
+    @staticmethod
+    def _run(argv, monkeypatch, tmp_path):
+        """Drive main_async; return its exit code and what the pipeline got."""
+        got: list[tuple[str, ...] | None] = []
+
+        async def capturing(scenarios, *, log_dir=None, sut_protocol_versions=None):  # noqa: ARG001
+            got.append(sut_protocol_versions)
+            return itk_runner.RunReport(results={})
+
+        monkeypatch.setattr(itk_runner, 'run_scenarios', capturing)
+        path = _write(tmp_path, _ONE)
+        rc = asyncio.run(
+            run_tests.main_async(run_tests.parse_args(['--scenarios', str(path), *argv]))
+        )
+        return rc, got
+
+    def test_passed_on_newest_first(self, tmp_path, monkeypatch):
+        rc, got = self._run(
+            ['--sut-protocol-versions', '1.0, 1.1,0.3'], monkeypatch, tmp_path,
+        )
+        assert rc == 0
+        assert got == [('1.1', '1.0', '0.3')]
+
+    def test_absent_means_not_checked(self, tmp_path, monkeypatch):
+        rc, got = self._run([], monkeypatch, tmp_path)
+        assert rc == 0
+        assert got == [None]
+
+    @pytest.mark.parametrize('value', ['', '1.1,', '1.1,1.1', '1.1,latest'])
+    def test_a_malformed_list_fails_before_the_run(self, tmp_path, monkeypatch, value):
+        rc, got = self._run(['--sut-protocol-versions', value], monkeypatch, tmp_path)
+        assert rc == 1
+        assert got == []
+
+
+# ---------------------------------------------------------------------------
 # --dry-run
 # ---------------------------------------------------------------------------
 

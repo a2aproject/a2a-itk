@@ -51,6 +51,7 @@ Other flags:
 
 | Flag | Effect |
 | --- | --- |
+| `--sut-protocol-versions 1.1,1.0,0.3` | The A2A versions the mounted SUT speaks. Its agent card must list each of them, or the run fails. Without the flag the SUT is taken to speak 1.0 and 0.3, and its card is not checked |
 | `--log-dir DIR` | Write each agent's stdout/stderr to `DIR/agent_<id>.log`. The first thing to add when an agent will not start |
 | `--output FILE` | Write results as JSON, in the same shape as the `/run` response |
 
@@ -131,9 +132,12 @@ Request:
 ```json
 {
   "tests": [ ...scenario objects, legacy or traversal/v1, mixed is fine... ],
-  "sut_sdk": "python"
+  "sut_sdk": "python",
+  "sut_protocol_versions": ["1.0", "0.3"]
 }
 ```
+
+`sut_protocol_versions` is optional. It lists the A2A versions the SUT speaks, as `Major.Minor`, in any order. When it is sent and a scenario starts the SUT, the SUT's agent card has to list each version: in an interface, on any binding, or for 0.3 in the card's own `protocolVersion`. Otherwise the run fails the way a SUT that does not start does (see below), with the missing versions in `startup.cluster_error`. When it is absent, the SUT is taken to speak 1.0 and 0.3 and its card is not checked.
 
 Response:
 
@@ -155,13 +159,14 @@ Response:
 }
 ```
 
-`startup` is `null` on a clean run. When a peer failed to start it lists `dropped_peers`, the scenarios that ran `trimmed` and those `skipped`. When the SUT failed to start, every scenario is reported failed and `startup.cluster_error` says why; this is returned as a 200 on purpose so the nightly history records a red night instead of a gap.
+`startup` is `null` on a clean run. When a peer failed to start it lists `dropped_peers`, the scenarios that ran `trimmed` and those `skipped`. When the SUT failed to start, or its card lacks a version in `sut_protocol_versions`, every scenario is reported failed and `startup.cluster_error` says why; this is returned as a 200 on purpose so the nightly history records a red night instead of a gap.
 
 Status codes:
 
 | Code | Meaning |
 | --- | --- |
-| 400 | Malformed scenario, unknown peer, unresolvable ref, or every scenario resolved to nothing runnable |
+| 400 | Malformed scenario or `sut_protocol_versions`, unknown peer, unresolvable ref, or every scenario resolved to nothing runnable |
+| 422 | The body does not have the shape above, for example a version written as a number |
 | 502 | Transient fetch failure (`git ls-remote` kept timing out). Safe to retry |
 | 500 | Anything else. Check the container log |
 
