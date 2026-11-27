@@ -41,6 +41,7 @@ from test_suite.scenarios.resolver import (
     ResolvedScenario,
     resolve_all,
 )
+from test_suite.scenarios.schema import SUT_PROTOCOL_VERSIONS
 from test_suite.launcher.spec import Kind
 from test_suite.scenarios.topology import restrict_to_available
 from test_suite.versions import newest_first, parse_spec_version
@@ -167,9 +168,6 @@ def set_matrix(matrix: Matrix | None) -> None:
     _matrix = matrix
 
 
-# The SUT is not in matrix.yaml. Unless the run says what it speaks, it is
-# taken to speak what a `v10` line does.
-SUT_PROTOCOL_VERSIONS = ('1.0', '0.3')
 
 
 def parse_sut_protocol_versions(raw: list[str]) -> tuple[str, ...]:
@@ -250,7 +248,12 @@ async def _sut_version_problem(
 # ---------------------------------------------------------------------------
 
 
-def prepare(raw_tests: object, *, sut_sdk: str | None = None) -> list[Scenario]:
+def prepare(
+    raw_tests: object,
+    *,
+    sut_sdk: str | None = None,
+    sut_protocol_versions: tuple[str, ...] | None = None,
+) -> list[Scenario]:
     """Resolve an already-parsed scenario document into runnable scenarios.
 
     Accepts a ``{"tests": [...]}`` mapping or a bare list, holding legacy
@@ -259,27 +262,36 @@ def prepare(raw_tests: object, *, sut_sdk: str | None = None) -> list[Scenario]:
     Args:
         raw_tests: The parsed scenario document.
         sut_sdk: SDK under test, for ``test_when`` and ``include_own_lines``.
+        sut_protocol_versions: The A2A versions the SUT speaks, for the
+            scenarios that ask for a version. 1.0 and 0.3 when absent.
 
     Raises:
         test_suite.scenarios.loader.ScenarioFileError: Malformed input.
         test_suite.scenarios.resolver.ResolutionError: A scenario names a
             peer the matrix doesn't have, or can't be bound.
     """
-    return _report(
-        resolve_all(parse_tests(raw_tests), get_matrix(), sut_sdk=sut_sdk)
-    )
+    return _report(resolve_all(
+        parse_tests(raw_tests), get_matrix(),
+        sut_sdk=sut_sdk, sut_protocol_versions=sut_protocol_versions,
+    ))
 
 
-def prepare_file(path: Path, *, sut_sdk: str | None = None) -> list[Scenario]:
+def prepare_file(
+    path: Path,
+    *,
+    sut_sdk: str | None = None,
+    sut_protocol_versions: tuple[str, ...] | None = None,
+) -> list[Scenario]:
     """Same as :func:`prepare`, reading the document from a file.
 
     Both front ends go through one of these two so a scenario behaves the
     same over HTTP and on the CLI — including what gets reported about the
     scenarios that won't run.
     """
-    return _report(
-        resolve_all(load_file(path), get_matrix(), sut_sdk=sut_sdk)
-    )
+    return _report(resolve_all(
+        load_file(path), get_matrix(),
+        sut_sdk=sut_sdk, sut_protocol_versions=sut_protocol_versions,
+    ))
 
 
 def _report(report: ResolutionReport) -> list[Scenario]:
@@ -594,6 +606,7 @@ async def _run_locked(
                 protocols=scenario.protocols,
                 streaming=scenario.streaming,
                 build_subtests=scenario.build_subtests,
+                hop_protocol_version=scenario.hop_protocol_version,
             )
             for name, details in raw.items():
                 # sdks/edges come from the execution because a subtest (or a

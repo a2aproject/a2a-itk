@@ -171,6 +171,31 @@ class TestRoles:
         assert s.roles.include_sut is False
 
 
+class TestProtocolVersionFields:
+    def test_absent_by_default(self):
+        s = TraversalScenarioV1.model_validate(_scenario())
+        assert s.min_protocol_version is None
+        assert s.hop_protocol_version is None
+
+    def test_parse(self):
+        s = TraversalScenarioV1.model_validate(
+            _scenario(min_protocol_version='1.1', hop_protocol_version='1.0')
+        )
+        assert (s.min_protocol_version, s.hop_protocol_version) == ('1.1', '1.0')
+
+    @pytest.mark.parametrize('field', ['min_protocol_version', 'hop_protocol_version'])
+    @pytest.mark.parametrize('value', ['1.1.0', 'v1.1', '', 1.1])
+    def test_a_value_that_is_not_a_version_is_rejected(self, field, value):
+        with pytest.raises(ValidationError, match=field):
+            TraversalScenarioV1.model_validate(_scenario(**{field: value}))
+
+    def test_resubscribe_from_generation_is_a_behavior(self):
+        s = TraversalScenarioV1.model_validate(
+            _scenario(behavior='resubscribe_from_generation')
+        )
+        assert s.behavior is Behavior.RESUBSCRIBE_FROM_GENERATION
+
+
 class TestTestWhen:
     def test_parses(self):
         s = TraversalScenarioV1.model_validate(

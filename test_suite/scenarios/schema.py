@@ -18,10 +18,11 @@ from __future__ import annotations
 import enum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from test_suite.scenarios.topology import Topology
 from test_suite.transports import Transport
+from test_suite.versions import parse_spec_version
 
 
 PEER_PLACEHOLDER = '{peer}'
@@ -32,6 +33,10 @@ TRAVERSAL_V1 = 'traversal/v1'
 # The SUT's identifier. Unlike peers it doesn't resolve through matrix.yaml —
 # it's whatever is bind-mounted into the container.
 SUT_ID = 'current'
+
+# The A2A versions the SUT speaks when the run does not say: what a `v10`
+# line speaks.
+SUT_PROTOCOL_VERSIONS = ('1.0', '0.3')
 
 
 class Tier(str, enum.Enum):
@@ -47,6 +52,7 @@ class Behavior(str, enum.Enum):
     SEND_MESSAGE = 'send_message'
     PUSH_NOTIFICATION = 'push_notification'
     RESUBSCRIBE = 'resubscribe'
+    RESUBSCRIBE_FROM_GENERATION = 'resubscribe_from_generation'
 
 
 class Expand(str, enum.Enum):
@@ -187,6 +193,26 @@ class TraversalScenarioV1(BaseModel):
         description='Also run every traversable induced subgraph containing '
                     'the first agent.',
     )
+
+    min_protocol_version: str | None = Field(
+        default=None,
+        description='The oldest A2A version the scenario is about. It runs '
+                    'only when the SUT speaks this version or a newer one, and '
+                    'only peers that do take part.',
+    )
+    hop_protocol_version: str | None = Field(
+        default=None,
+        description='Make every call by an agent that speaks A2A 1.1 at this '
+                    'version, instead of the newest one both agents of the '
+                    'call speak.',
+    )
+
+    @field_validator('min_protocol_version', 'hop_protocol_version')
+    @classmethod
+    def _is_a_version(cls, value: str | None) -> str | None:
+        if value is not None:
+            parse_spec_version(value)
+        return value
 
     @model_validator(mode='after')
     def _exactly_one_of_each_pair(self) -> 'TraversalScenarioV1':

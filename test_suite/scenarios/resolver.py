@@ -9,9 +9,10 @@ The output is :class:`ResolvedScenario`, deliberately field-for-field the
 legacy scenario shape, so everything downstream (the traversal engine, the
 cluster planner, the results format) is untouched by the new schema.
 
-Resolution does three things:
+Resolution does four things:
 
   * expands roles to agent identifiers, including the ``peers: all`` macro;
+  * keeps the agents that speak the A2A versions a scenario asks for;
   * expands the plural fields to a Cartesian product of executable scenarios;
   * turns ``topology`` into the edge list the engine expects.
 """
@@ -19,6 +20,7 @@ Resolution does three things:
 from __future__ import annotations
 
 import itertools
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from test_suite.launcher.matrix import Matrix, MatrixError
@@ -26,6 +28,7 @@ from test_suite.scenarios.exclusions import KnownFailures
 from test_suite.scenarios.schema import (
     PEER_PLACEHOLDER,
     SUT_ID,
+    SUT_PROTOCOL_VERSIONS,
     Behavior,
     Expand,
     LegacyScenario,
@@ -34,6 +37,7 @@ from test_suite.scenarios.schema import (
     TraversalScenarioV1,
 )
 from test_suite.scenarios.topology import Topology, restrict_to_available
+from test_suite.versions import parse_spec_version, since_1_1
 
 
 class ResolutionError(ValueError):
@@ -63,6 +67,9 @@ class ResolvedScenario:
     # that must not be re-indexed. Lets the runner reuse the resolver's
     # trim/skip decision via ``restrict_to_available``. Not part of the run.
     topology: Topology | None = None
+    # The A2A version every call by an agent that speaks 1.1 is made at, or
+    # ``None`` to let each call be made at the version its agents negotiate.
+    hop_protocol_version: str | None = None
 
     def peer_ids(self) -> list[str]:
         return [s for s in self.sdks if s != SUT_ID]
@@ -94,10 +101,12 @@ def resolve(
     *,
     sut_sdk: str | None = None,
     known_failures: KnownFailures | None = None,
+    sut_protocol_versions: Sequence[str] | None = None,
 ) -> list[ResolvedScenario]:
     """Resolve a mixed batch of scenarios. Convenience over :func:`resolve_all`."""
     return resolve_all(
         scenarios, matrix, sut_sdk=sut_sdk, known_failures=known_failures,
+        sut_protocol_versions=sut_protocol_versions,
     ).scenarios
 
 
@@ -107,6 +116,7 @@ def resolve_all(
     *,
     sut_sdk: str | None = None,
     known_failures: KnownFailures | None = None,
+    sut_protocol_versions: Sequence[str] | None = None,
 ) -> ResolutionReport:
     """Resolve a batch that may mix both schemas.
 
@@ -120,6 +130,10 @@ def resolve_all(
         known_failures: Combinations to leave out. Defaults to the repo's
             ``known_failures.yaml``; pass an empty :class:`KnownFailures` to
             resolve everything, which is what the coverage diff wants.
+        sut_protocol_versions: The A2A versions the SUT speaks, for
+            ``min_protocol_version`` and ``hop_protocol_version``. Defaults
+            to 1.0 and 0.3, what the SUT is taken to speak when the run does
+            not say.
 
     Returns:
         A report with the executable scenarios and the reason for any that
@@ -133,6 +147,7 @@ def resolve_all(
     """
     if known_failures is None:
         known_failures = KnownFailures.from_default()
+    sut_versions = tuple(sut_protocol_versions or SUT_PROTOCOL_VERSIONS)
 
     report = ResolutionReport()
     seen: dict[str, str] = {}
@@ -142,7 +157,9 @@ def resolve_all(
             report.scenarios.append(_from_legacy(scenario))
             continue
 
-        skip = _skip_reason(scenario, sut_sdk)
+        skip = _skip_reason(scenario, sut_sdk) or _version_skip_reason(
+            scenario, sut_versions,
+        )
         if skip:
             report.skipped.append((scenario.name, skip))
             continue
@@ -203,6 +220,54 @@ def _skip_reason(scenario: TraversalScenarioV1, sut_sdk: str | None) -> str | No
     return None
 
 
+def _speaks(scenario: TraversalScenarioV1, versions: Sequence[str]) -> bool:
+    """Do these A2A versions meet what the scenario asks of an agent?
+
+    With ``min_protocol_version``, one of them is that version or newer.
+
+    With ``hop_protocol_version``, the agent's calls are made at that version
+    and it can be called at it. An agent that speaks A2A 1.1 makes every call
+    at the forced version. Any other agent makes a call at the newest version
+    it and the agent it calls both speak, which is the forced one only when
+    that is the newest version it speaks: every agent that takes part speaks
+    the forced version.
+    """
+    if scenario.min_protocol_version is not None:
+        oldest = parse_spec_version(scenario.min_protocol_version)
+        if not any(parse_spec_version(v) >= oldest for v in versions):
+            return False
+    forced = scenario.hop_protocol_version
+    if forced is None:
+        return True
+    newest = max(versions, key=parse_spec_version)
+    return forced in versions and (since_1_1(newest) or newest == forced)
+
+
+def _version_requirements(scenario: TraversalScenarioV1) -> str:
+    """What :func:`_speaks` asks, in words, for a skip reason."""
+    asks = []
+    if scenario.min_protocol_version is not None:
+        asks.append(f'A2A {scenario.min_protocol_version} or newer')
+    if scenario.hop_protocol_version is not None:
+        asks.append(
+            f'calls made at A2A {scenario.hop_protocol_version} '
+            f'(hop_protocol_version)'
+        )
+    return ' and '.join(asks)
+
+
+def _version_skip_reason(
+    scenario: TraversalScenarioV1, sut_versions: tuple[str, ...],
+) -> str | None:
+    """Why the SUT cannot take part, when the scenario includes it."""
+    if not scenario.roles.include_sut or _speaks(scenario, sut_versions):
+        return None
+    return (
+        f'needs {_version_requirements(scenario)}; the SUT speaks '
+        f'{", ".join(sut_versions)}'
+    )
+
+
 def _expand(  # noqa: PLR0913
     scenario: TraversalScenarioV1,
     matrix: Matrix,
@@ -226,11 +291,41 @@ def _expand(  # noqa: PLR0913
     # ResolvedScenario so the runner makes the same trim/skip call at runtime.
     resolved_topology = None if scenario.edges is not None else scenario.topology
 
+    def speaks(agent_id: str) -> bool:
+        return _speaks(scenario, matrix.resolve(agent_id).protocol_versions)
+
+    def runnable(groups: list[tuple[list[str], list[Transport], str | None]]) -> bool:
+        return any(len(sdks) >= _MIN_AGENTS for sdks, _, _ in groups)
+
     out = []
     for behavior, transports, streaming in variants:
-        for sdks, used, peer_label in _groups(
-            scenario, matrix, transports, sut_sdk
+        groups = _groups(scenario, matrix, transports, sut_sdk, speaks)
+        every = _groups(scenario, matrix, transports, sut_sdk)
+        why = None
+        if not runnable(groups) and runnable(every):
+            # Only the version filter left too few agents. Peers that speak a
+            # newer version join the matrix later than the scenarios that need
+            # them, so this is not an authoring error.
+            why = f'no peer in the matrix can take part: it needs {_version_requirements(scenario)}'
+        elif (
+            scenario.edges is not None
+            and scenario.expand is Expand.TOGETHER
+            and groups != every
         ):
+            # Explicit edges are positional, so they cannot be re-indexed for
+            # the agents that are left, as for a known failure. Under
+            # per_peer each group is indexed on its own.
+            why = (
+                f'the explicit edges name agents that cannot take part: '
+                f'it needs {_version_requirements(scenario)}'
+            )
+        if why is not None:
+            if skipped is not None:
+                skipped.append((
+                    _name(scenario, behavior, transports, streaming, multi), why,
+                ))
+            continue
+        for sdks, used, peer_label in groups:
             if len(sdks) < _MIN_AGENTS:
                 raise ResolutionError(
                     f'{scenario.name!r}: resolves to {len(sdks)} agent(s) '
@@ -242,6 +337,7 @@ def _expand(  # noqa: PLR0913
             name = _name(scenario, behavior, used, streaming, multi, peer_label)
             kept, dropped = _apply_exclusions(
                 sdks, known, used, behavior, streaming, sut_sdk,
+                scenario.hop_protocol_version,
             )
             # Same decision the runner makes for a peer that fails to start:
             # rebuild for the survivors, or skip if what's left can't run.
@@ -275,6 +371,7 @@ def _expand(  # noqa: PLR0913
                 build_subtests=scenario.build_subtests,
                 tier=scenario.tier.value,
                 topology=resolved_topology,
+                hop_protocol_version=scenario.hop_protocol_version,
             ))
     return out
 
@@ -286,6 +383,7 @@ def _apply_exclusions(  # noqa: PLR0913
     behavior: Behavior,
     streaming: bool,
     sut_sdk: str | None,
+    hop_protocol_version: str | None = None,
 ) -> tuple[list[str], list[tuple[str, object]]]:
     """Split agents into those that stay and those a known failure removes.
 
@@ -311,6 +409,7 @@ def _apply_exclusions(  # noqa: PLR0913
         hit = known.find(
             sdks=[SUT_ID, agent], protocols=protocols,
             behavior=behavior.value, streaming=streaming, sut_sdk=sut_sdk,
+            hop_protocol_version=hop_protocol_version,
         )
         (dropped.append((agent, hit)) if hit else kept.append(agent))
     return kept, dropped
@@ -321,14 +420,18 @@ def _groups(
     matrix: Matrix,
     transports: list[Transport],
     sut_sdk: str | None = None,
+    speaks: Callable[[str], bool] = lambda _agent_id: True,
 ) -> list[tuple[list[str], list[Transport], str | None]]:
     """The agent groups this scenario runs as, with each group's transports.
 
     Returns one entry for ``expand: together``, and one per peer for
     ``expand: per_peer``. The third element labels the peer for naming, and
     is ``None`` when there is nothing to disambiguate.
+
+    A peer for which ``speaks`` is false takes no part, named or selected by
+    ``all`` alike: it does not speak the A2A versions the scenario is about.
     """
-    peers = _peer_ids(scenario, matrix, transports, sut_sdk)
+    peers = [p for p in _peer_ids(scenario, matrix, transports, sut_sdk) if speaks(p)]
     sut = [SUT_ID] if scenario.roles.include_sut else []
 
     if scenario.expand is Expand.TOGETHER:

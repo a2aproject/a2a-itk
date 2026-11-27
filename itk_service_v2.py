@@ -182,7 +182,9 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
 
     try:
         scenarios = itk_runner.prepare(
-            {'tests': request.tests}, sut_sdk=request.sut_sdk,
+            {'tests': request.tests},
+            sut_sdk=request.sut_sdk,
+            sut_protocol_versions=sut_protocol_versions,
         )
     except (ScenarioFileError, ResolutionError) as e:
         # Malformed or unbindable scenario — the caller sent something we

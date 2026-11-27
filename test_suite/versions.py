@@ -43,3 +43,23 @@ def newest_first(versions: Sequence[str]) -> tuple[str, ...]:
     if len(set(versions)) != len(versions):
         raise ValueError(f'lists a version twice: {list(versions)}')
     return tuple(ordered)
+
+
+def since_1_1(version: str | None) -> bool:
+    """Is ``version`` A2A 1.1 or later?"""
+    return version is not None and parse_spec_version(version) >= (1, 1)
+
+
+def call_version(
+    caller: Sequence[str], callee: Sequence[str], forced: str | None
+) -> str | None:
+    """The A2A version a call is made at, from what the two agents speak.
+
+    ``caller`` and ``callee`` list the versions each speaks, newest first. A
+    caller that speaks A2A 1.1 reads a forced version from its instruction and
+    uses it. Any other caller negotiates the newest version both speak.
+    ``None`` when they speak no version in common: the call cannot be made.
+    """
+    if forced and since_1_1(caller[0]):
+        return forced
+    return next((v for v in caller if v in callee), None)

@@ -136,6 +136,34 @@ class TestExtractTaskIdV10:
         assert testlib._read_v03_notif(event) == []
 
 
+class TestTokenMatching:
+    """A token must be said as itself, not as the start of a longer one."""
+
+    @pytest.mark.parametrize(('token', 'text', 'said'), [
+        ('[a -> b (jsonrpc)] served:1.1', '[a -> b (jsonrpc)] served:1.1\nnext', True),
+        ('[a -> b (jsonrpc)] served:1.1', 'x [a -> b (jsonrpc)] served:1.1', True),
+        ('[a -> b (jsonrpc)] served:1.1', '[a -> b (jsonrpc)] served:1.10', False),
+        ('[a -> b (jsonrpc)] served:1.1', '[a -> b (jsonrpc)] served:1.1.0', True),
+        ('traversal-completed:jsonrpc', 'traversal-completed:jsonrpc-ish', True),
+        ('[a -> b (jsonrpc)]', 'nothing here', False),
+    ])
+    def test_said(self, token, text, said):
+        assert testlib._said(token, text) is said
+
+    def test_a_reply_with_a_longer_version_fails(self):
+        token = '[a -> b (jsonrpc)] served:1.1'
+        result = {'parts': [{'text': '[a -> b (jsonrpc)] served:1.10'}]}
+        assert testlib._verify_send_message(result, [token], 'S') is False
+        result = {'parts': [{'text': token}]}
+        assert testlib._verify_send_message(result, [token], 'S') is True
+
+    def test_a_pushed_state_with_a_longer_version_fails(self):
+        token = 'traversal-completed:jsonrpc served:1.1'
+        verify = testlib._verify_push_notification
+        assert asyncio.run(verify(['traversal-completed:jsonrpc served:1.10'], [token], 'S')) is False
+        assert asyncio.run(verify([token], [token], 'S')) is True
+
+
 class TestFirstRequestVersion:
     """The first request is written in the dialect the entry agent speaks."""
 
@@ -198,6 +226,27 @@ class TestExecuteItkTestExceptions:
                 'edges': None,
             }
         }
+
+    @pytest.mark.parametrize('build_subtests', [False, True])
+    def test_the_forced_version_reaches_every_traversal(self, monkeypatch, build_subtests):
+        forced = []
+
+        async def recording(**kwargs):
+            forced.append(kwargs['hop_protocol_version'])
+            return True
+
+        monkeypatch.setattr(testlib, '_execute_single_itk_test', recording)
+        agents = AgentTable({
+            name: AgentEndpoint(8001 + i, 9001 + i, ('1.1', '1.0'))
+            for i, name in enumerate(['current', 'python_v11', 'go_v11'])
+        })
+        asyncio.run(testlib.execute_itk_test(
+            sdks=list(agents), behavior='send_message', agents=agents,
+            scenario_name='t', protocols=['jsonrpc'],
+            build_subtests=build_subtests, hop_protocol_version='1.0',
+        ))
+        # With subtests: the entry agent with each peer, then all three.
+        assert forced == ['1.0'] * (3 if build_subtests else 1)
 
 
 class TestScenarioDeadline:

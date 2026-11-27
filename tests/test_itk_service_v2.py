@@ -869,6 +869,37 @@ class TestSutProtocolVersions:
         assert r.json()['all_passed'] is True
         assert requests == []
 
+    def test_scenarios_that_ask_for_a_version_resolve_against_the_field(
+        self, client, monkeypatch,
+    ):
+        self._serve_mock_agent(monkeypatch, ('1.1', '1.0'))
+        monkeypatch.setattr(itk_runner, '_matrix', Matrix.from_dict({'sdks': {
+            'python': {'v11': {'repo': 'a2aproject/a2a-python', 'ref': 'c' * 40,
+                               'protocol_versions': ['1.1', '1.0', '0.3']}},
+        }}))
+        forced: list[str | None] = []
+
+        async def probing_execute(sdks, behavior, agents, edges=None, scenario_name=None, **kw):  # noqa: ARG001
+            forced.append(kw.get('hop_protocol_version'))
+            return {scenario_name: {'passed': True, 'sdks': sdks, 'edges': edges}}
+
+        monkeypatch.setattr(itk_runner, 'execute_itk_test', probing_execute)
+        tests = [{
+            'schema': 'traversal/v1', 'name': 'S',
+            'roles': {'peers': [{'sdk': 'python', 'line': 'v11'}]},
+            'transports': ['jsonrpc'], 'behavior': 'send_message',
+            'min_protocol_version': '1.1', 'hop_protocol_version': '1.0',
+        }]
+
+        without = client.post('/run', json={'tests': tests})
+        assert without.status_code == 400
+        assert 'resolved to nothing runnable' in without.json()['detail']
+
+        r = client.post('/run', json={'tests': tests, 'sut_protocol_versions': ['1.1', '1.0']})
+        assert r.status_code == 200
+        assert r.json()['all_passed'] is True
+        assert forced == ['1.0']
+
     @pytest.mark.parametrize(('versions', 'said'), [
         ([], 'must not be empty'),
         (['1.1', 'v1.0'], "'v1.0' is not an A2A version"),

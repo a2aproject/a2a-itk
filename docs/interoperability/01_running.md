@@ -137,7 +137,7 @@ Request:
 }
 ```
 
-`sut_protocol_versions` is optional. It lists the A2A versions the SUT speaks, as `Major.Minor`, in any order. When it is sent and a scenario starts the SUT, the SUT's agent card has to list each version: in an interface, on any binding, or for 0.3 in the card's own `protocolVersion`. Otherwise the run fails the way a SUT that does not start does (see below), with the missing versions in `startup.cluster_error`. When it is absent, the SUT is taken to speak 1.0 and 0.3 and its card is not checked.
+`sut_protocol_versions` is optional. It lists the A2A versions the SUT speaks, as `Major.Minor`, in any order. When it is sent and a scenario starts the SUT, the SUT's agent card has to list each version: in an interface, on any binding, or for 0.3 in the card's own `protocolVersion`. Otherwise the run fails the way a SUT that does not start does (see below), with the missing versions in `startup.cluster_error`. When it is absent, the SUT is taken to speak 1.0 and 0.3 and its card is not checked. Either way, these are the versions the scenarios that ask for one (`min_protocol_version`, `hop_protocol_version`) are resolved against.
 
 Response:
 
