@@ -463,7 +463,9 @@ def _select_runnable(
         if not missing:
             runnable.append((s, s.sdks, s.edges))
             continue
-        restricted = restrict_to_available(s.sdks, s.topology, s.edges, started)
+        restricted = restrict_to_available(
+            s.sdks, s.topology, s.edges, started, entry=s.entry,
+        )
         if restricted is None:
             skipped.append((s.name, missing))
         else:

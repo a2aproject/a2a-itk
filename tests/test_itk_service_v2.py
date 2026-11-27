@@ -573,6 +573,46 @@ class TestPeerDropTolerance:
         assert startup['skipped'] == [{'name': 'pair', 'missing': ['python_v10']}]
         assert startup['trimmed'] == [{'name': 'trio', 'dropped': ['python_v10']}]
 
+    _RELAY = {
+        'schema': 'traversal/v1', 'name': 'relay',
+        'roles': {'peers': [{'sdk': 'python', 'line': 'v10'}, {'sdk': 'go', 'line': 'v10'}],
+                  'entry': {'sdk': 'python', 'line': 'v10'}},
+        'topology': 'chain', 'transports': ['jsonrpc'], 'behavior': 'send_message',
+    }
+
+    def test_the_entry_peer_starts_the_traversal(self, client, monkeypatch, stub_deps):  # noqa: ARG002
+        self._cluster(monkeypatch)
+        r = client.post('/run', json={'tests': [self._RELAY]})
+        assert r.json()['results']['relay']['sdks'] == ['python_v10', 'current', 'go_v10']
+
+    def test_an_entry_peer_that_did_not_start_skips_the_scenario(
+        self, client, monkeypatch, stub_deps,  # noqa: ARG002
+    ):
+        """Started elsewhere it would be a different traversal."""
+        cluster = self._cluster(monkeypatch)
+        _fail_peer(cluster, 'a2aproject/a2a-python', message='uv sync --locked failed')
+
+        r = client.post('/run', json={'tests': [
+            self._RELAY,
+            {'name': 'pair', 'sdks': ['current', 'go_v10'], 'behavior': 'send_message'},
+        ]})
+
+        body = r.json()
+        assert set(body['results']) == {'pair'}
+        assert body['startup']['skipped'] == [{'name': 'relay', 'missing': ['python_v10']}]
+
+    def test_another_peer_that_did_not_start_trims_the_scenario(
+        self, client, monkeypatch, stub_deps,  # noqa: ARG002
+    ):
+        cluster = self._cluster(monkeypatch)
+        _fail_peer(cluster, 'a2aproject/a2a-go', message='go build failed')
+
+        r = client.post('/run', json={'tests': [self._RELAY]})
+
+        body = r.json()
+        assert body['results']['relay']['sdks'] == ['python_v10', 'current']
+        assert body['startup']['trimmed'] == [{'name': 'relay', 'dropped': ['go_v10']}]
+
     def test_clean_run_has_no_startup_block(self, client, stub_deps):  # noqa: ARG002
         r = client.post('/run', json={'tests': [{
             'name': 't', 'sdks': ['current', 'python_v10'], 'behavior': 'send_message',

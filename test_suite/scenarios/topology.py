@@ -1,7 +1,8 @@
 """Named traversal topologies, and their expansion to edge lists.
 
 Authors pick a topology and the edge list follows from the agent count.
-Index 0 is always the SUT; peers follow in scenario order.
+Index 0 is where the traversal starts: the SUT, unless the scenario names a
+peer as ``roles.entry``. The others follow in scenario order.
 
 An explicit ``edges:`` still wins, for graphs none of these names describe.
 """
@@ -81,13 +82,14 @@ def normalize_edges(edges: list[str] | None, node_count: int) -> frozenset[str]:
     return frozenset(e.replace(' ', '') for e in edges)
 
 
-def restrict_to_available(
+def restrict_to_available(  # noqa: PLR0913
     sdks: list[str],
     topology: Topology | None,
     edges: list[str] | None,
     usable: set[str] | frozenset[str],
     *,
     min_agents: int = _MIN_NODES,
+    entry: str | None = None,
 ) -> tuple[list[str], list[str] | None] | None:
     """Restrict a scenario's graph to the agents in ``usable``.
 
@@ -105,6 +107,7 @@ def restrict_to_available(
             up).
         min_agents: Smallest traversable graph; below it there's nothing to
             walk.
+        entry: The peer the scenario names to start the traversal, if any.
 
     Returns:
         The ``(sdks, edges)`` to run — unchanged when nothing is missing, or
@@ -112,6 +115,8 @@ def restrict_to_available(
         survive the loss:
 
           * fewer than ``min_agents`` remain; or
+          * the entry peer is missing: the traversal would start somewhere
+            the scenario did not ask for; or
           * an agent is missing and the edges are an explicit author list
             (``topology is None``): those indices are positional, so dropping
             a node would silently rewire the graph. A named topology instead
@@ -120,6 +125,8 @@ def restrict_to_available(
     """
     kept = [s for s in sdks if s in usable]
     if len(kept) < min_agents:
+        return None
+    if entry is not None and entry not in usable:
         return None
     if len(kept) < len(sdks) and edges is not None and topology is None:
         return None

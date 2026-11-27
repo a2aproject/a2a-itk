@@ -69,7 +69,8 @@ This produces two executable scenarios, `Star - send message - jsonrpc` and `Sta
 | `roles.peers` | - | A list of `{sdk, line, instance?}` or the string `all` |
 | `roles.include_sut` | `true` | `false` makes a peer-only scenario (the smoke set does this) |
 | `roles.include_own_lines` | `false` | Also add the SUT's own SDK's released lines as peers. Needs `sut_sdk` |
-| `topology` | `star` | `star` (SUT <-> each peer), `chain` (a cycle through all), `euler` (complete digraph) |
+| `roles.entry` | - | `{sdk, line}` of the peer that starts the traversal, instead of the first agent (the SUT). ITK sends its first request to it, at the newest version it speaks. One of `peers`, or any line under `all`. Needs `expand: together` and `topology: chain` or `euler`, and cannot be used with `edges` or `build_subtests`. If the entry cannot take part (a transport, a version, a known failure) or does not start, the scenario is skipped rather than started elsewhere |
+| `topology` | `star` | `star` (the first agent, the SUT, <-> each peer), `chain` (a cycle through all, from the first agent), `euler` (complete digraph) |
 | `edges` | - | Explicit edge list, overrides `topology`. Positional, so a trimmed peer cannot be re-indexed - such a scenario is skipped instead |
 | `transports` | all three | Each becomes its own scenario |
 | `transport_sets` | - | `[[jsonrpc, grpc], [http_json]]`: explicit groups, one scenario per group. Mutually exclusive with `transports` |
@@ -77,7 +78,7 @@ This produces two executable scenarios, `Star - send message - jsonrpc` and `Sta
 | `streaming` / `streaming_variants` | `false` | One, or a list that expands. Exactly one of the two |
 | `expand` | `together` | `together`: every peer in one graph. `per_peer`: one SUT-plus-one scenario per peer |
 | `test_when.sut_sdk` | - | Only run when the SUT is one of these SDKs |
-| `min_protocol_version` | - | The oldest A2A version the scenario is about, such as `"1.1"`. It runs only when the SUT speaks this version or a newer one, and only peers that do take part, named or selected by `all` alike |
+| `min_protocol_version` | - | The oldest A2A version the scenario is about, such as `"1.1"`. It runs only when the SUT speaks this version or a newer one, and only peers that do take part, named or selected by `all` alike. The peers a relay chain (`roles.entry`) names are the exception: they need only share a version with the SUT, so a chain from a 0.3 peer can still run only for a SUT that speaks 1.1 |
 | `hop_protocol_version` | - | Make every call by an agent that speaks A2A 1.1 at this version, such as `"1.0"`, instead of the newest version both agents of the call speak. Only agents whose calls are then made at this version take part, the SUT included: one that speaks A2A 1.1 and this version, or one whose newest version is this one |
 | `build_subtests` | `false` | As in legacy |
 
@@ -88,6 +89,8 @@ The behaviors are `send_message`, `push_notification`, `resubscribe` and `resubs
 What the SUT speaks comes from the run's `sut_protocol_versions` (1.0 and 0.3 when it does not say); what a peer speaks comes from its line in `matrix.yaml`. A scenario whose SUT takes part but does not speak what it asks for is skipped, with the reason in the log, and so is one for which no peer that speaks it is in the matrix yet: a 1.1 scenario resolves to nothing for an SDK that speaks only 1.0. A scenario with explicit `edges` is skipped too when one of the agents it names cannot take part, because positional edges cannot be re-indexed.
 
 `instance: 2` on a peer gives a second copy of it (`python_v10_2`) on its own ports, for same-SDK-talks-to-itself graphs.
+
+`roles.entry` with `topology: chain` makes a relay chain. With `peers: [{sdk: python, line: v03}, {sdk: go, line: v10}]` and `entry: {sdk: python, line: v03}`, the agents are `python_v03`, `current`, `go_v10` in that order, and the traversal goes `python_v03 -> current -> go_v10 -> python_v03`: ITK speaks 0.3 to the entry peer, which calls the SUT at 0.3, and the SUT calls `go_v10` at 1.0. A peer other than the entry that a known failure removes, or that does not start, trims the chain like any other scenario, so a relay can shrink to entry <-> SUT; the trim is reported. Known failures are matched against the pair of the SUT and each peer, so a rule about the hop between two peers (`go_v10 -> python_v03` above) is not applied.
 
 ### The shared sets
 

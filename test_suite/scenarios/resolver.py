@@ -70,6 +70,10 @@ class ResolvedScenario:
     # The A2A version every call by an agent that speaks 1.1 is made at, or
     # ``None`` to let each call be made at the version its agents negotiate.
     hop_protocol_version: str | None = None
+    # The peer the scenario names to start the traversal; ``sdks[0]`` when
+    # set. Kept so the runner skips the scenario rather than starting it
+    # elsewhere if this peer fails to start.
+    entry: str | None = None
 
     def peer_ids(self) -> list[str]:
         return [s for s in self.sdks if s != SUT_ID]
@@ -169,6 +173,7 @@ def resolve_all(
             known_failures=known_failures,
             skipped=report.skipped,
             trimmed=report.trimmed,
+            sut_versions=sut_versions,
         ))
 
     for s in report.scenarios:
@@ -220,10 +225,15 @@ def _skip_reason(scenario: TraversalScenarioV1, sut_sdk: str | None) -> str | No
     return None
 
 
-def _speaks(scenario: TraversalScenarioV1, versions: Sequence[str]) -> bool:
+def _speaks(
+    scenario: TraversalScenarioV1, versions: Sequence[str], *, named: bool = False,
+) -> bool:
     """Do these A2A versions meet what the scenario asks of an agent?
 
-    With ``min_protocol_version``, one of them is that version or newer.
+    With ``min_protocol_version``, one of them is that version or newer. A
+    peer a relay chain names is exempt: the chain is about the SUT relaying
+    between versions, such as a 0.3 peer and a 1.0 peer, and the minimum
+    asks only the SUT to speak 1.1.
 
     With ``hop_protocol_version``, the agent's calls are made at that version
     and it can be called at it. An agent that speaks A2A 1.1 makes every call
@@ -232,7 +242,7 @@ def _speaks(scenario: TraversalScenarioV1, versions: Sequence[str]) -> bool:
     that is the newest version it speaks: every agent that takes part speaks
     the forced version.
     """
-    if scenario.min_protocol_version is not None:
+    if scenario.min_protocol_version is not None and not named:
         oldest = parse_spec_version(scenario.min_protocol_version)
         if not any(parse_spec_version(v) >= oldest for v in versions):
             return False
@@ -275,6 +285,7 @@ def _expand(  # noqa: PLR0913
     known_failures: KnownFailures | None = None,
     skipped: list[tuple[str, str]] | None = None,
     trimmed: list[tuple[str, str, str]] | None = None,
+    sut_versions: tuple[str, ...] = SUT_PROTOCOL_VERSIONS,
 ) -> list[ResolvedScenario]:
     """Cartesian product over the plural fields, then over peers if per-peer."""
     known = known_failures if known_failures is not None else KnownFailures()
@@ -290,9 +301,23 @@ def _expand(  # noqa: PLR0913
     # carries its shape and is rebuilt for the smaller set. Carried onto the
     # ResolvedScenario so the runner makes the same trim/skip call at runtime.
     resolved_topology = None if scenario.edges is not None else scenario.topology
+    entry = _entry_id(scenario, matrix)
+
+    # The peers of a relay chain, which is what `roles.entry` is for.
+    relayed = (
+        {peer.agent_id() for peer in scenario.roles.peers}
+        if entry is not None and scenario.roles.peers != 'all' else set()
+    )
 
     def speaks(agent_id: str) -> bool:
-        return _speaks(scenario, matrix.resolve(agent_id).protocol_versions)
+        versions = matrix.resolve(agent_id).protocol_versions
+        if agent_id not in relayed:
+            return _speaks(scenario, versions)
+        # A relayed peer has to share a version with the SUT it talks to.
+        return _speaks(scenario, versions, named=True) and (
+            not scenario.roles.include_sut
+            or any(v in sut_versions for v in versions)
+        )
 
     def runnable(groups: list[tuple[list[str], list[Transport], str | None]]) -> bool:
         return any(len(sdks) >= _MIN_AGENTS for sdks, _, _ in groups)
@@ -307,6 +332,17 @@ def _expand(  # noqa: PLR0913
             # newer version join the matrix later than the scenarios that need
             # them, so this is not an authoring error.
             why = f'no peer in the matrix can take part: it needs {_version_requirements(scenario)}'
+        elif entry is not None and entry not in groups[0][0]:
+            # Under `together` there is one group. A traversal that started
+            # anywhere else would not be the one the scenario describes.
+            why = (
+                f'the entry agent {entry!r} cannot take part over '
+                f'{"+".join(t.value for t in transports)}'
+                + (
+                    f' or does not meet: {_version_requirements(scenario)}'
+                    if _version_requirements(scenario) else ''
+                )
+            )
         elif (
             scenario.edges is not None
             and scenario.expand is Expand.TOGETHER
@@ -325,7 +361,11 @@ def _expand(  # noqa: PLR0913
                     _name(scenario, behavior, transports, streaming, multi), why,
                 ))
             continue
-        for sdks, used, peer_label in groups:
+        for group_sdks, used, peer_label in groups:
+            sdks = (
+                group_sdks if entry is None
+                else [entry, *(a for a in group_sdks if a != entry)]
+            )
             if len(sdks) < _MIN_AGENTS:
                 raise ResolutionError(
                     f'{scenario.name!r}: resolves to {len(sdks)} agent(s) '
@@ -343,7 +383,7 @@ def _expand(  # noqa: PLR0913
             # rebuild for the survivors, or skip if what's left can't run.
             restricted = restrict_to_available(
                 sdks, resolved_topology, scenario.edges, set(kept),
-                min_agents=_MIN_AGENTS,
+                min_agents=_MIN_AGENTS, entry=entry,
             )
             if dropped:
                 if restricted is None:
@@ -372,8 +412,21 @@ def _expand(  # noqa: PLR0913
                 tier=scenario.tier.value,
                 topology=resolved_topology,
                 hop_protocol_version=scenario.hop_protocol_version,
+                entry=entry,
             ))
     return out
+
+
+def _entry_id(scenario: TraversalScenarioV1, matrix: Matrix) -> str | None:
+    """The agent id of ``roles.entry``, checked against the matrix."""
+    if scenario.roles.entry is None:
+        return None
+    agent_id = scenario.roles.entry.agent_id()
+    try:
+        matrix.resolve(agent_id)
+    except MatrixError as e:
+        raise ResolutionError(f'{scenario.name!r}: roles.entry: {e}') from None
+    return agent_id
 
 
 def _apply_exclusions(  # noqa: PLR0913
@@ -393,7 +446,9 @@ def _apply_exclusions(  # noqa: PLR0913
     empties the scenario and skips it; that is right for a rule about a
     transport or behaviour as a whole.
 
-    Assumes the pair is (SUT, peer). In a peer-only scenario
+    Assumes the pair is (SUT, peer), also in a relay chain started by
+    ``roles.entry``, where a rule about the hop between two peers is not
+    checked. In a peer-only scenario
     (``include_sut: false``) ``current`` is not in the graph, so a rule about
     two specific peers cannot be expressed, and one naming ``current`` would
     match every peer. No shipped rule does either.
@@ -428,8 +483,8 @@ def _groups(
     ``expand: per_peer``. The third element labels the peer for naming, and
     is ``None`` when there is nothing to disambiguate.
 
-    A peer for which ``speaks`` is false takes no part, named or selected by
-    ``all`` alike: it does not speak the A2A versions the scenario is about.
+    A peer for which ``speaks`` is false takes no part: it does not speak the
+    A2A versions the scenario is about.
     """
     peers = [p for p in _peer_ids(scenario, matrix, transports, sut_sdk) if speaks(p)]
     sut = [SUT_ID] if scenario.roles.include_sut else []

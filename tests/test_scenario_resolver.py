@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from test_suite.launcher.matrix import Matrix
+from test_suite.scenarios.exclusions import KnownFailures
 from test_suite.scenarios.loader import parse_tests
 from test_suite.scenarios.resolver import (
     ResolutionError,
@@ -518,6 +519,15 @@ class TestProtocolVersions:
         )
         assert s.sdks == ['current', 'python_v11']
 
+    def test_a_named_peer_that_cannot_make_a_forced_call_takes_no_part(self):
+        [s] = resolve(
+            _one(roles={'peers': [{'sdk': 'python', 'line': 'v03'},
+                                  {'sdk': 'python', 'line': 'v11'}]},
+                 hop_protocol_version='1.0'),
+            self.MATRIX, sut_protocol_versions=self.SPEAKS_1_1,
+        )
+        assert s.sdks == ['current', 'python_v11']
+
     def test_per_peer_makes_a_scenario_only_for_peers_that_speak_it(self):
         scenarios = resolve(
             _one(name='S - {peer}', roles={'peers': 'all'}, expand='per_peer',
@@ -559,3 +569,141 @@ class TestProtocolVersions:
         )
         assert s.sdks == ['current', 'python_v03']
         assert s.hop_protocol_version is None
+
+
+class TestEntry:
+    """`roles.entry`: a peer starts the traversal, for relay chains such as
+    a 0.3 peer -> SUT -> a 1.0 peer."""
+
+    def _relay(self, **fields):
+        return _one(
+            roles={'peers': [{'sdk': 'python', 'line': 'v03'},
+                             {'sdk': 'go', 'line': 'v10'}],
+                   'entry': {'sdk': 'python', 'line': 'v03'}},
+            topology='chain', **fields,
+        )
+
+    def test_the_entry_peer_comes_first_and_the_others_keep_their_order(self):
+        [s] = resolve(self._relay(), MATRIX)
+        assert s.sdks == ['python_v03', 'current', 'go_v10']
+        # A chain from there: python_v03 -> SUT -> go_v10 -> python_v03.
+        assert s.edges == ['0->1', '1->2', '2->0']
+        assert s.entry == 'python_v03'
+
+    def test_without_it_the_sut_starts(self):
+        [s] = resolve(_one(roles={'peers': [{'sdk': 'go', 'line': 'v10'}]}), MATRIX)
+        assert s.sdks[0] == 'current'
+        assert s.entry is None
+
+    def test_the_peers_after_it_keep_the_order_they_are_written_in(self):
+        [s] = resolve(
+            _one(roles={'peers': [{'sdk': 'python', 'line': 'v10'},
+                                  {'sdk': 'go', 'line': 'v03'},
+                                  {'sdk': 'go', 'line': 'v10'}],
+                        'entry': {'sdk': 'go', 'line': 'v03'}},
+                 topology='chain'),
+            MATRIX,
+        )
+        assert s.sdks == ['go_v03', 'current', 'python_v10', 'go_v10']
+
+    def test_with_peers_all(self):
+        [s] = resolve(
+            _one(roles={'peers': 'all', 'entry': {'sdk': 'go', 'line': 'v03'}},
+                 topology='chain'),
+            MATRIX,
+        )
+        assert s.sdks == ['go_v03', 'current', 'go_v10', 'java_v10', 'python_v03', 'python_v10']
+
+    def test_an_entry_that_cannot_take_part_skips_the_scenario(self):
+        """go_v03 has no HTTP+JSON, and starting elsewhere would be another
+        traversal."""
+        report = resolve_all(
+            _one(roles={'peers': [{'sdk': 'go', 'line': 'v03'},
+                                  {'sdk': 'python', 'line': 'v10'}],
+                        'entry': {'sdk': 'go', 'line': 'v03'}},
+                 topology='chain', transports=['jsonrpc', 'http_json']),
+            MATRIX,
+        )
+        assert [s.name for s in report.scenarios] == ['S - jsonrpc']
+        assert report.skipped == [
+            ('S - http_json', "the entry agent 'go_v03' cannot take part over http_json"),
+        ]
+
+    def test_an_entry_that_cannot_make_a_forced_call_skips_the_scenario(self):
+        report = resolve_all(self._relay(hop_protocol_version='1.0'), MATRIX)
+        assert report.scenarios == []
+        assert report.skipped == [(
+            'S', "the entry agent 'python_v03' cannot take part over jsonrpc "
+                 'or does not meet: calls made at A2A 1.0 (hop_protocol_version)',
+        )]
+
+    def test_a_relay_can_be_kept_for_a_sut_that_speaks_1_1(self):
+        """The minimum is asked of the SUT; the named 0.3 peer still relays."""
+        older = resolve_all(self._relay(min_protocol_version='1.1'), MATRIX)
+        newer = resolve_all(
+            self._relay(min_protocol_version='1.1'), MATRIX,
+            sut_protocol_versions=('1.1', '1.0', '0.3'),
+        )
+        assert older.scenarios == []
+        assert [s.sdks for s in newer.scenarios] == [['python_v03', 'current', 'go_v10']]
+
+    def test_a_relayed_peer_that_shares_no_version_with_the_sut_skips_the_relay(self):
+        report = resolve_all(
+            self._relay(min_protocol_version='1.1'), MATRIX,
+            sut_protocol_versions=('1.1', '1.0'),
+        )
+        assert report.scenarios == []
+        assert report.skipped == [(
+            'S', "the entry agent 'python_v03' cannot take part over jsonrpc "
+                 'or does not meet: A2A 1.1 or newer',
+        )]
+
+
+    def test_a_known_failure_that_removes_the_entry_skips_the_scenario(self):
+        known = KnownFailures.from_dict({'exclusions': [
+            {'reason': 'broken', 'agents': ['python_v03']},
+        ]})
+        report = resolve_all(self._relay(), MATRIX, known_failures=known)
+        assert report.scenarios == []
+        assert report.skipped == [('S', 'known failure — python_v03 — python_v03: broken')]
+
+    def test_a_known_failure_on_another_peer_trims_the_chain(self):
+        """A relay can shrink to entry <-> SUT, reported as trimmed."""
+        known = KnownFailures.from_dict({'exclusions': [
+            {'reason': 'broken', 'agents': ['go_v10']},
+        ]})
+        report = resolve_all(self._relay(), MATRIX, known_failures=known)
+        [s] = report.scenarios
+        assert s.sdks == ['python_v03', 'current']
+        assert s.edges == ['0->1', '1->0']
+        assert report.trimmed == [('S', 'go_v10', 'go_v10: broken')]
+
+    def test_with_own_lines_they_follow_the_named_peers(self):
+        [s] = resolve(
+            _one(roles={'peers': [{'sdk': 'python', 'line': 'v10'}],
+                        'include_own_lines': True,
+                        'entry': {'sdk': 'python', 'line': 'v10'}},
+                 topology='chain'),
+            MATRIX, sut_sdk='go',
+        )
+        assert s.sdks == ['python_v10', 'current', 'go_v03', 'go_v10']
+
+    def test_in_a_scenario_without_the_sut(self):
+        [s] = resolve(
+            _one(roles={'peers': [{'sdk': 'go', 'line': 'v10'},
+                                  {'sdk': 'python', 'line': 'v03'}],
+                        'include_sut': False,
+                        'entry': {'sdk': 'python', 'line': 'v03'}},
+                 topology='chain'),
+            MATRIX,
+        )
+        assert s.sdks == ['python_v03', 'go_v10']
+        assert s.entry == 'python_v03'
+
+    def test_an_entry_missing_from_the_matrix_fails_loudly(self):
+        with pytest.raises(ResolutionError, match='roles.entry'):
+            resolve(
+                _one(roles={'peers': 'all', 'entry': {'sdk': 'cobol', 'line': 'v10'}},
+                     topology='chain'),
+                MATRIX,
+            )

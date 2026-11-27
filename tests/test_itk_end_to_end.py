@@ -474,6 +474,21 @@ class TestTheVersionOfEachCall:
         assert calls['only_1_1'] == []
 
 
+class TestARelayChain:
+    """A peer starts the traversal (`roles.entry`), and the SUT relays."""
+
+    def test_the_harness_talks_to_the_entry_peer_at_the_version_it_speaks(self):
+        calls: dict[str, list[tuple[str, str]]] = {}
+        relay = {'python_v10': ('1.0',), 'current': ('1.0', '1.1'), 'go_v10': ('1.0',)}
+        assert traverse(
+            'send_message', versions=relay, edges=['0->1', '1->2', '2->0'], calls=calls,
+        )
+        assert calls['python_v10'][0] == ('SendMessage', '1.0')
+        assert versions_received(calls) == {
+            'python_v10': {'1.0'}, 'current': {'1.0'}, 'go_v10': {'1.0'},
+        }
+
+
 class TestWhatACallAt11Asks:
     """A call made at A2A 1.1 names its version for the push notification
     config, and can resume a subscription from a generation. The harness asks
