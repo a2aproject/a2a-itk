@@ -70,6 +70,10 @@ class ResolvedScenario:
     # The A2A version every call by an agent that speaks 1.1 is made at, or
     # ``None`` to let each call be made at the version its agents negotiate.
     hop_protocol_version: str | None = None
+    # The peer the scenario names to start the traversal; ``sdks[0]`` when
+    # set. Kept so the runner skips the scenario rather than starting it
+    # elsewhere if this peer fails to start.
+    entry: str | None = None
 
     def peer_ids(self) -> list[str]:
         return [s for s in self.sdks if s != SUT_ID]
@@ -290,6 +294,7 @@ def _expand(  # noqa: PLR0913
     # carries its shape and is rebuilt for the smaller set. Carried onto the
     # ResolvedScenario so the runner makes the same trim/skip call at runtime.
     resolved_topology = None if scenario.edges is not None else scenario.topology
+    entry = _entry_id(scenario, matrix)
 
     def speaks(agent_id: str) -> bool:
         return _speaks(scenario, matrix.resolve(agent_id).protocol_versions)
@@ -307,6 +312,17 @@ def _expand(  # noqa: PLR0913
             # newer version join the matrix later than the scenarios that need
             # them, so this is not an authoring error.
             why = f'no peer in the matrix can take part: it needs {_version_requirements(scenario)}'
+        elif entry is not None and entry not in groups[0][0]:
+            # Under `together` there is one group. A traversal that started
+            # anywhere else would not be the one the scenario describes.
+            why = (
+                f'the entry agent {entry!r} cannot take part over '
+                f'{"+".join(t.value for t in transports)}'
+                + (
+                    f' or does not meet: {_version_requirements(scenario)}'
+                    if _version_requirements(scenario) else ''
+                )
+            )
         elif (
             scenario.edges is not None
             and scenario.expand is Expand.TOGETHER
@@ -325,7 +341,11 @@ def _expand(  # noqa: PLR0913
                     _name(scenario, behavior, transports, streaming, multi), why,
                 ))
             continue
-        for sdks, used, peer_label in groups:
+        for group_sdks, used, peer_label in groups:
+            sdks = (
+                group_sdks if entry is None
+                else [entry, *(a for a in group_sdks if a != entry)]
+            )
             if len(sdks) < _MIN_AGENTS:
                 raise ResolutionError(
                     f'{scenario.name!r}: resolves to {len(sdks)} agent(s) '
@@ -343,7 +363,7 @@ def _expand(  # noqa: PLR0913
             # rebuild for the survivors, or skip if what's left can't run.
             restricted = restrict_to_available(
                 sdks, resolved_topology, scenario.edges, set(kept),
-                min_agents=_MIN_AGENTS,
+                min_agents=_MIN_AGENTS, entry=entry,
             )
             if dropped:
                 if restricted is None:
@@ -372,8 +392,21 @@ def _expand(  # noqa: PLR0913
                 tier=scenario.tier.value,
                 topology=resolved_topology,
                 hop_protocol_version=scenario.hop_protocol_version,
+                entry=entry,
             ))
     return out
+
+
+def _entry_id(scenario: TraversalScenarioV1, matrix: Matrix) -> str | None:
+    """The agent id of ``roles.entry``, checked against the matrix."""
+    if scenario.roles.entry is None:
+        return None
+    agent_id = scenario.roles.entry.agent_id()
+    try:
+        matrix.resolve(agent_id)
+    except MatrixError as e:
+        raise ResolutionError(f'{scenario.name!r}: roles.entry: {e}') from None
+    return agent_id
 
 
 def _apply_exclusions(  # noqa: PLR0913
@@ -393,7 +426,9 @@ def _apply_exclusions(  # noqa: PLR0913
     empties the scenario and skips it; that is right for a rule about a
     transport or behaviour as a whole.
 
-    Assumes the pair is (SUT, peer). In a peer-only scenario
+    Assumes the pair is (SUT, peer), also in a relay chain started by
+    ``roles.entry``, where a rule about the hop between two peers is not
+    checked. In a peer-only scenario
     (``include_sut: false``) ``current`` is not in the graph, so a rule about
     two specific peers cannot be expressed, and one naming ``current`` would
     match every peer. No shipped rule does either.

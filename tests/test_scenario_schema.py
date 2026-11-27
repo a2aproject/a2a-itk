@@ -196,6 +196,59 @@ class TestProtocolVersionFields:
         assert s.behavior is Behavior.RESUBSCRIBE_FROM_GENERATION
 
 
+class TestEntry:
+    PEERS = [{'sdk': 'python', 'line': 'v03'}, {'sdk': 'go', 'line': 'v10'}]
+
+    def test_absent_by_default(self):
+        assert TraversalScenarioV1.model_validate(_scenario()).roles.entry is None
+
+    def test_names_one_of_the_peers(self):
+        s = TraversalScenarioV1.model_validate(_scenario(
+            roles={'peers': self.PEERS, 'entry': {'sdk': 'python', 'line': 'v03'}},
+            topology='chain',
+        ))
+        assert s.roles.entry == PeerRef(sdk='python', line='v03')
+
+    def test_may_name_any_peer_under_all(self):
+        s = TraversalScenarioV1.model_validate(_scenario(
+            roles={'peers': 'all', 'entry': {'sdk': 'python', 'line': 'v03'}},
+            topology='chain',
+        ))
+        assert s.roles.entry.agent_id() == 'python_v03'
+
+    def test_a_peer_not_in_the_list_is_rejected(self):
+        with pytest.raises(ValidationError, match='must be one of the peers'):
+            TraversalScenarioV1.model_validate(_scenario(
+                roles={'peers': self.PEERS, 'entry': {'sdk': 'ts', 'line': 'v03'}},
+            ))
+
+    @pytest.mark.parametrize(('extra', 'said'), [
+        ({'expand': 'per_peer'}, 'needs `expand: together`'),
+        ({'edges': ['0->1', '1->0']}, 'cannot be used with explicit `edges`'),
+        ({'topology': None}, 'needs `topology: chain` or `euler`'),
+        ({'topology': 'star'}, 'needs `topology: chain` or `euler`'),
+        ({'build_subtests': True}, 'cannot be used with `build_subtests`'),
+    ])
+    def test_cannot_be_combined_with(self, extra, said):
+        fields = {
+            'roles': {'peers': self.PEERS, 'entry': {'sdk': 'go', 'line': 'v10'}},
+            'topology': 'chain',
+            **extra,
+        }
+        if fields['topology'] is None:
+            del fields['topology']  # the default, star
+        with pytest.raises(ValidationError, match=said):
+            TraversalScenarioV1.model_validate(_scenario(**fields))
+
+    @pytest.mark.parametrize('topology', ['chain', 'euler'])
+    def test_works_with(self, topology):
+        s = TraversalScenarioV1.model_validate(_scenario(
+            roles={'peers': self.PEERS, 'entry': {'sdk': 'go', 'line': 'v10'}},
+            topology=topology,
+        ))
+        assert s.roles.entry is not None
+
+
 class TestTestWhen:
     def test_parses(self):
         s = TraversalScenarioV1.model_validate(

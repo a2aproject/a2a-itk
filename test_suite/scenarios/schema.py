@@ -119,6 +119,26 @@ class Roles(BaseModel):
                     '— a different question from cross-SDK compatibility. '
                     'Needs sut_sdk; without one it adds nothing.',
     )
+    entry: PeerRef | None = Field(
+        default=None,
+        description='The peer that starts the traversal, in place of the '
+                    'first agent. ITK sends its first request to this peer, '
+                    'at the newest version it speaks. The graph is the one the '
+                    'topology builds, so a chain relays through the agents in '
+                    'their order from there.',
+    )
+
+    @model_validator(mode='after')
+    def _entry_is_a_peer(self) -> 'Roles':
+        if (
+            self.entry is not None
+            and self.peers != 'all'
+            and self.entry not in self.peers
+        ):
+            raise ValueError(
+                f'`entry` {self.entry.agent_id()!r} must be one of the peers'
+            )
+        return self
 
 
 class TestWhen(BaseModel):
@@ -234,6 +254,30 @@ class TraversalScenarioV1(BaseModel):
             raise ValueError('one of `behavior` or `behaviors` is required')
         if self.transports is None and self.transport_sets is None:
             raise ValueError('one of `transports` or `transport_sets` is required')
+        if self.roles.entry is not None and self.expand is Expand.PER_PEER:
+            raise ValueError(
+                '`roles.entry` needs `expand: together`; under per_peer every '
+                'scenario but one would leave the entry out'
+            )
+        if self.roles.entry is not None:
+            if self.edges is not None:
+                raise ValueError(
+                    '`roles.entry` cannot be used with explicit `edges`: they '
+                    'are positional and their index 0 already starts the '
+                    'traversal'
+                )
+            if self.topology is Topology.STAR:
+                raise ValueError(
+                    '`roles.entry` needs `topology: chain` or `euler`; a star '
+                    'is centered on the first agent, which would be the entry '
+                    'peer instead of the SUT'
+                )
+            if self.build_subtests:
+                raise ValueError(
+                    '`roles.entry` cannot be used with `build_subtests`: '
+                    'subtests keep the first agent, and some would leave the '
+                    'SUT out'
+                )
         for field, value in (
             ('behaviors', self.behaviors),
             ('transport_sets', self.transport_sets),
