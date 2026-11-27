@@ -68,7 +68,7 @@ This produces two executable scenarios, `Star - send message - jsonrpc` and `Sta
 | `roles.sut` | `current` | Only `current` is allowed |
 | `roles.peers` | - | A list of `{sdk, line, instance?}` or the string `all` |
 | `roles.include_sut` | `true` | `false` makes a peer-only scenario (the smoke set does this) |
-| `roles.include_own_lines` | `false` | Also add the SUT's own SDK's released lines as peers. Needs `sut_sdk` |
+| `roles.include_own_lines` | `false` | Also add the SUT's own SDK's released lines as peers. Needs `sut_sdk`. A line that speaks A2A 1.1 or newer, and a newer version than the SUT does, is left out, so a SUT on its SDK's 1.0 line is not tested against the 1.1 line until it speaks 1.1 |
 | `roles.entry` | - | `{sdk, line}` of the peer that starts the traversal, instead of the first agent (the SUT). ITK sends its first request to it, at the newest version it speaks. One of `peers`, or any line under `all`. Needs `expand: together` and `topology: chain` or `euler`, and cannot be used with `edges` or `build_subtests`. If the entry cannot take part (a transport, a version, a known failure) or does not start, the scenario is skipped rather than started elsewhere |
 | `topology` | `star` | `star` (the first agent, the SUT, <-> each peer), `chain` (a cycle through all, from the first agent), `euler` (complete digraph) |
 | `edges` | - | Explicit edge list, overrides `topology`. Positional, so a trimmed peer cannot be re-indexed - such a scenario is skipped instead |
@@ -97,7 +97,7 @@ What the SUT speaks comes from the run's `sut_protocol_versions` (1.0 and 0.3 wh
 | File | Tier | Shape |
 | --- | --- | --- |
 | [`scenarios/traversal/pr.yaml`](../../scenarios/traversal/pr.yaml) | pr | Star of the SUT against `python_v10`, `python_v03`, `go_v10`, `go_v03` plus the SUT's own lines. Three declarations: send message (both streaming variants), push notification, resubscribe. Every transport |
-| [`scenarios/traversal/nightly.yaml`](../../scenarios/traversal/nightly.yaml) | nightly | The SUT against every peer in the matrix, one pair per scenario (`peers: all`, `expand: per_peer`). Same three behaviors |
+| [`scenarios/traversal/nightly.yaml`](../../scenarios/traversal/nightly.yaml) | nightly | The SUT against every peer in the matrix, one pair per scenario (`peers: all`, `expand: per_peer`). Same three behaviors. For a SUT that speaks A2A 1.1 also: `resubscribe_from_generation` and `send_message` forced to 1.0 against every peer that speaks 1.1, and two relay chains, `python_v03 -> current -> go_v10` and `ts_v03 -> current -> python_v10`, with and without streaming. These resolve to nothing for a SUT that speaks only 1.0 |
 | [`scenarios/traversal/smoke.yaml`](../../scenarios/traversal/smoke.yaml) | - | Peer-only Python <-> Go. The default for `run_tests.py`; runs with nothing but this repo checked out |
 | [`scenarios/smoke.json`](../../scenarios/smoke.json) | - | The legacy twin of `smoke.yaml`, kept so the two formats stay provably equivalent |
 
