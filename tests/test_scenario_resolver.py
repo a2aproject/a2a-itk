@@ -519,6 +519,15 @@ class TestProtocolVersions:
         )
         assert s.sdks == ['current', 'python_v11']
 
+    def test_a_named_peer_that_cannot_make_a_forced_call_takes_no_part(self):
+        [s] = resolve(
+            _one(roles={'peers': [{'sdk': 'python', 'line': 'v03'},
+                                  {'sdk': 'python', 'line': 'v11'}]},
+                 hop_protocol_version='1.0'),
+            self.MATRIX, sut_protocol_versions=self.SPEAKS_1_1,
+        )
+        assert s.sdks == ['current', 'python_v11']
+
     def test_per_peer_makes_a_scenario_only_for_peers_that_speak_it(self):
         scenarios = resolve(
             _one(name='S - {peer}', roles={'peers': 'all'}, expand='per_peer',
@@ -620,13 +629,35 @@ class TestEntry:
             ('S - http_json', "the entry agent 'go_v03' cannot take part over http_json"),
         ]
 
-    def test_an_entry_that_does_not_speak_the_version_skips_the_scenario(self):
-        report = resolve_all(self._relay(min_protocol_version='1.0'), MATRIX)
+    def test_an_entry_that_cannot_make_a_forced_call_skips_the_scenario(self):
+        report = resolve_all(self._relay(hop_protocol_version='1.0'), MATRIX)
         assert report.scenarios == []
         assert report.skipped == [(
             'S', "the entry agent 'python_v03' cannot take part over jsonrpc "
-                 'or does not meet: A2A 1.0 or newer',
+                 'or does not meet: calls made at A2A 1.0 (hop_protocol_version)',
         )]
+
+    def test_a_relay_can_be_kept_for_a_sut_that_speaks_1_1(self):
+        """The minimum is asked of the SUT; the named 0.3 peer still relays."""
+        older = resolve_all(self._relay(min_protocol_version='1.1'), MATRIX)
+        newer = resolve_all(
+            self._relay(min_protocol_version='1.1'), MATRIX,
+            sut_protocol_versions=('1.1', '1.0', '0.3'),
+        )
+        assert older.scenarios == []
+        assert [s.sdks for s in newer.scenarios] == [['python_v03', 'current', 'go_v10']]
+
+    def test_a_relayed_peer_that_shares_no_version_with_the_sut_skips_the_relay(self):
+        report = resolve_all(
+            self._relay(min_protocol_version='1.1'), MATRIX,
+            sut_protocol_versions=('1.1', '1.0'),
+        )
+        assert report.scenarios == []
+        assert report.skipped == [(
+            'S', "the entry agent 'python_v03' cannot take part over jsonrpc "
+                 'or does not meet: A2A 1.1 or newer',
+        )]
+
 
     def test_a_known_failure_that_removes_the_entry_skips_the_scenario(self):
         known = KnownFailures.from_dict({'exclusions': [

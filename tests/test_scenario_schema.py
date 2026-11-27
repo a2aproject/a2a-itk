@@ -228,6 +228,10 @@ class TestEntry:
         ({'topology': None}, 'needs `topology: chain` or `euler`'),
         ({'topology': 'star'}, 'needs `topology: chain` or `euler`'),
         ({'build_subtests': True}, 'cannot be used with `build_subtests`'),
+        ({'min_protocol_version': '1.1',
+          'roles': {'peers': PEERS, 'include_sut': False,
+                    'entry': {'sdk': 'go', 'line': 'v10'}}},
+         'needs `include_sut: true`'),
     ])
     def test_cannot_be_combined_with(self, extra, said):
         fields = {

@@ -78,7 +78,7 @@ This produces two executable scenarios, `Star - send message - jsonrpc` and `Sta
 | `streaming` / `streaming_variants` | `false` | One, or a list that expands. Exactly one of the two |
 | `expand` | `together` | `together`: every peer in one graph. `per_peer`: one SUT-plus-one scenario per peer |
 | `test_when.sut_sdk` | - | Only run when the SUT is one of these SDKs |
-| `min_protocol_version` | - | The oldest A2A version the scenario is about, such as `"1.1"`. It runs only when the SUT speaks this version or a newer one, and only peers that do take part, named or selected by `all` alike |
+| `min_protocol_version` | - | The oldest A2A version the scenario is about, such as `"1.1"`. It runs only when the SUT speaks this version or a newer one, and only peers that do take part, named or selected by `all` alike. The peers a relay chain (`roles.entry`) names are the exception: they need only share a version with the SUT, so a chain from a 0.3 peer can still run only for a SUT that speaks 1.1 |
 | `hop_protocol_version` | - | Make every call by an agent that speaks A2A 1.1 at this version, such as `"1.0"`, instead of the newest version both agents of the call speak. Only agents whose calls are then made at this version take part, the SUT included: one that speaks A2A 1.1 and this version, or one whose newest version is this one |
 | `build_subtests` | `false` | As in legacy |
 

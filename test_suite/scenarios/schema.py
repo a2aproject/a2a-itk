@@ -218,7 +218,9 @@ class TraversalScenarioV1(BaseModel):
         default=None,
         description='The oldest A2A version the scenario is about. It runs '
                     'only when the SUT speaks this version or a newer one, and '
-                    'only peers that do take part.',
+                    'only peers that do take part, except the peers of a relay '
+                    'chain (`roles.entry`), which need only share a version '
+                    'with the SUT.',
     )
     hop_protocol_version: str | None = Field(
         default=None,
@@ -277,6 +279,11 @@ class TraversalScenarioV1(BaseModel):
                     '`roles.entry` cannot be used with `build_subtests`: '
                     'subtests keep the first agent, and some would leave the '
                     'SUT out'
+                )
+            if self.min_protocol_version is not None and not self.roles.include_sut:
+                raise ValueError(
+                    '`min_protocol_version` in a relay chain is asked of the '
+                    'SUT, so it needs `include_sut: true`'
                 )
         for field, value in (
             ('behaviors', self.behaviors),

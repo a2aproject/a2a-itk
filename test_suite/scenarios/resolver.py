@@ -173,6 +173,7 @@ def resolve_all(
             known_failures=known_failures,
             skipped=report.skipped,
             trimmed=report.trimmed,
+            sut_versions=sut_versions,
         ))
 
     for s in report.scenarios:
@@ -224,10 +225,15 @@ def _skip_reason(scenario: TraversalScenarioV1, sut_sdk: str | None) -> str | No
     return None
 
 
-def _speaks(scenario: TraversalScenarioV1, versions: Sequence[str]) -> bool:
+def _speaks(
+    scenario: TraversalScenarioV1, versions: Sequence[str], *, named: bool = False,
+) -> bool:
     """Do these A2A versions meet what the scenario asks of an agent?
 
-    With ``min_protocol_version``, one of them is that version or newer.
+    With ``min_protocol_version``, one of them is that version or newer. A
+    peer a relay chain names is exempt: the chain is about the SUT relaying
+    between versions, such as a 0.3 peer and a 1.0 peer, and the minimum
+    asks only the SUT to speak 1.1.
 
     With ``hop_protocol_version``, the agent's calls are made at that version
     and it can be called at it. An agent that speaks A2A 1.1 makes every call
@@ -236,7 +242,7 @@ def _speaks(scenario: TraversalScenarioV1, versions: Sequence[str]) -> bool:
     that is the newest version it speaks: every agent that takes part speaks
     the forced version.
     """
-    if scenario.min_protocol_version is not None:
+    if scenario.min_protocol_version is not None and not named:
         oldest = parse_spec_version(scenario.min_protocol_version)
         if not any(parse_spec_version(v) >= oldest for v in versions):
             return False
@@ -279,6 +285,7 @@ def _expand(  # noqa: PLR0913
     known_failures: KnownFailures | None = None,
     skipped: list[tuple[str, str]] | None = None,
     trimmed: list[tuple[str, str, str]] | None = None,
+    sut_versions: tuple[str, ...] = SUT_PROTOCOL_VERSIONS,
 ) -> list[ResolvedScenario]:
     """Cartesian product over the plural fields, then over peers if per-peer."""
     known = known_failures if known_failures is not None else KnownFailures()
@@ -296,8 +303,21 @@ def _expand(  # noqa: PLR0913
     resolved_topology = None if scenario.edges is not None else scenario.topology
     entry = _entry_id(scenario, matrix)
 
+    # The peers of a relay chain, which is what `roles.entry` is for.
+    relayed = (
+        {peer.agent_id() for peer in scenario.roles.peers}
+        if entry is not None and scenario.roles.peers != 'all' else set()
+    )
+
     def speaks(agent_id: str) -> bool:
-        return _speaks(scenario, matrix.resolve(agent_id).protocol_versions)
+        versions = matrix.resolve(agent_id).protocol_versions
+        if agent_id not in relayed:
+            return _speaks(scenario, versions)
+        # A relayed peer has to share a version with the SUT it talks to.
+        return _speaks(scenario, versions, named=True) and (
+            not scenario.roles.include_sut
+            or any(v in sut_versions for v in versions)
+        )
 
     def runnable(groups: list[tuple[list[str], list[Transport], str | None]]) -> bool:
         return any(len(sdks) >= _MIN_AGENTS for sdks, _, _ in groups)
@@ -463,8 +483,8 @@ def _groups(
     ``expand: per_peer``. The third element labels the peer for naming, and
     is ``None`` when there is nothing to disambiguate.
 
-    A peer for which ``speaks`` is false takes no part, named or selected by
-    ``all`` alike: it does not speak the A2A versions the scenario is about.
+    A peer for which ``speaks`` is false takes no part: it does not speak the
+    A2A versions the scenario is about.
     """
     peers = [p for p in _peer_ids(scenario, matrix, transports, sut_sdk) if speaks(p)]
     sut = [SUT_ID] if scenario.roles.include_sut else []
