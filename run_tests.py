@@ -119,6 +119,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              'in the file.',
     )
     parser.add_argument(
+        '--sut-protocol-versions', type=str,
+        help=f"Comma-separated A2A versions the '{SUT_ID}' agent speaks, e.g. "
+             '"1.1,1.0,0.3". Its agent card must list each of them, or the '
+             'run fails. Omit to take it to speak 1.0 and 0.3 without '
+             'checking the card.',
+    )
+    parser.add_argument(
         '--sdks', type=str,
         help='Comma-separated agent identifiers to keep, e.g. '
              '"python_v10,go_v10". Scenarios naming anything outside this '
@@ -183,6 +190,16 @@ def _report(results: dict[str, itk_runner.ScenarioResult]) -> bool:
 
 
 async def main_async(args: argparse.Namespace) -> int:
+    sut_protocol_versions = None
+    if args.sut_protocol_versions is not None:
+        try:
+            sut_protocol_versions = itk_runner.parse_sut_protocol_versions(
+                [v.strip() for v in args.sut_protocol_versions.split(',')],
+            )
+        except ValueError as e:
+            logger.error('--sut-protocol-versions: %s', e)  # noqa: TRY400
+            return 1
+
     scenarios = load_scenarios(args.scenarios, args.sut_sdk)
     total = len(scenarios)
 
@@ -233,7 +250,11 @@ async def main_async(args: argparse.Namespace) -> int:
         return 0
 
     try:
-        report = await itk_runner.run_scenarios(scenarios, log_dir=args.log_dir)
+        report = await itk_runner.run_scenarios(
+            scenarios,
+            log_dir=args.log_dir,
+            sut_protocol_versions=sut_protocol_versions,
+        )
     except (MatrixError, PermanentError) as e:
         logger.error('%s', e)  # noqa: TRY400 — a traceback adds nothing here
         return 1

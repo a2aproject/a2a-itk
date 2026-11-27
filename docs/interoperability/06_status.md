@@ -41,7 +41,7 @@ The entries fall into three kinds:
 
 Because every SDK's CI pins `A2A_ITK_REVISION=main`:
 
-- `GET /health`, port 8000, and the `tests`/`sut_sdk` request shape of `/run`
+- `GET /health`, port 8000, and the `tests`/`sut_sdk` request shape of `/run` (`sut_protocol_versions` was added later and is optional)
 - the `passed`/`sdks`/`edges` keys of each result; everything else on a result was added later and is optional
 - the legacy scenario format
 - the published `itk_<sdk>.json` entry shape (fields are only ever added)

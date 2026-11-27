@@ -24,6 +24,13 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import httpx
+
+from test_suite.acts.wire_map import (
+    VERSION_HEADER,
+    WELL_KNOWN_AGENT_CARD_PATH,
+    interface_version,
+)
 from test_suite.agent_table import AgentTable
 from test_suite.launcher import Cluster, TargetSpec
 from test_suite.launcher.fetch import resolve_ref
@@ -36,6 +43,7 @@ from test_suite.scenarios.resolver import (
 )
 from test_suite.launcher.spec import Kind
 from test_suite.scenarios.topology import restrict_to_available
+from test_suite.versions import newest_first, parse_spec_version
 from testlib import execute_itk_test
 
 
@@ -99,10 +107,10 @@ class ClusterStartupError(RuntimeError):
     """The run cannot proceed because a required agent didn't start.
 
     Raised only when a *peer* being down cannot be tolerated: the SUT
-    (``current``) itself failed to start, or every scenario needed a peer
-    that failed. A peer failure that leaves at least one scenario runnable
-    does **not** raise — the peer is dropped and the run continues (see
-    :func:`_select_runnable`).
+    (``current``) itself failed to start or its card lacks a version the run
+    says it speaks, or every scenario needed a peer that failed. A peer
+    failure that leaves at least one scenario runnable does **not** raise —
+    the peer is dropped and the run continues (see :func:`_select_runnable`).
 
     Carries per-agent detail so the caller can say *which* agent died and at
     which stage, plus an optional headline naming why it was fatal.
@@ -159,16 +167,82 @@ def set_matrix(matrix: Matrix | None) -> None:
     _matrix = matrix
 
 
-# The SUT is not in matrix.yaml, so nothing declares what it speaks. It is
+# The SUT is not in matrix.yaml. Unless the run says what it speaks, it is
 # taken to speak what a `v10` line does.
 SUT_PROTOCOL_VERSIONS = ('1.0', '0.3')
 
 
-def _protocol_versions(agent_id: str) -> tuple[str, ...]:
+def parse_sut_protocol_versions(raw: list[str]) -> tuple[str, ...]:
+    """Validate the A2A versions a run says the SUT speaks; newest first.
+
+    Raises:
+        ValueError: The list is empty, an entry is not a ``Major.Minor``
+            string, or one is listed twice.
+    """
+    if not raw:
+        raise ValueError('must not be empty')
+    return newest_first(raw)
+
+
+def _protocol_versions(
+    agent_id: str, sut_protocol_versions: tuple[str, ...] | None,
+) -> tuple[str, ...]:
     """The A2A versions ``agent_id`` speaks, newest first."""
     if agent_id == SUT_ID:
-        return SUT_PROTOCOL_VERSIONS
+        return sut_protocol_versions or SUT_PROTOCOL_VERSIONS
     return get_matrix().resolve(agent_id).protocol_versions
+
+
+async def _fetch_agent_card(http_port: int, *, version: str) -> dict:
+    """Read the agent card of an agent this run started.
+
+    Sent with ``version`` as `A2A-Version`: without the header a server takes
+    the request to be A2A 0.3 and may answer with a card of that version.
+    """
+    url = f'http://127.0.0.1:{http_port}{WELL_KNOWN_AGENT_CARD_PATH}'
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(url, headers={VERSION_HEADER: version})
+        response.raise_for_status()
+        card = response.json()
+    if not isinstance(card, dict):
+        raise ValueError(f'the agent card at {url} is not a JSON object')
+    return card
+
+
+def _advertised_versions(card: dict) -> set[tuple[int, int]]:
+    """The A2A versions the card names.
+
+    Each of its interfaces names one, on any binding. A card in the shape of
+    A2A 0.3 names its version at the top instead, and a card that also serves
+    0.3 clients may have both. A version that cannot be read counts as none.
+    """
+    interfaces = card.get('supportedInterfaces')
+    if not isinstance(interfaces, list):
+        interfaces = []
+    found = (
+        interface_version(entry)
+        for entry in [card, *interfaces]
+        if isinstance(entry, dict)
+    )
+    return {version for version in found if version is not None}
+
+
+async def _sut_version_problem(
+    http_port: int, wanted: tuple[str, ...],
+) -> str | None:
+    """Why the SUT's agent card fails ``wanted``, or None if it lists each version."""
+    try:
+        card = await _fetch_agent_card(http_port, version=wanted[0])
+    except (httpx.HTTPError, ValueError) as e:
+        return f'cannot read its agent card: {e}'
+    advertised = _advertised_versions(card)
+    missing = [v for v in wanted if parse_spec_version(v) not in advertised]
+    if not missing:
+        return None
+    listed = ', '.join(
+        f'{major}.{minor}' for major, minor in sorted(advertised, reverse=True)
+    ) or 'none'
+    return f'its agent card does not list A2A {", ".join(missing)}; it lists {listed}'
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +376,7 @@ async def run_scenarios(
     scenarios: list[Scenario],
     *,
     log_dir: Path | None = None,
+    sut_protocol_versions: tuple[str, ...] | None = None,
 ) -> RunReport:
     """Start one cluster and run every scenario against it.
 
@@ -316,6 +391,11 @@ async def run_scenarios(
         scenarios: What to run. Must be non-empty.
         log_dir: If set, each agent's stdout/stderr is captured to
             ``<log_dir>/agent_<id>.log``.
+        sut_protocol_versions: The A2A versions the SUT speaks, newest first,
+            as :func:`parse_sut_protocol_versions` returns them. When given
+            and the run starts the SUT, its agent card must list each of them,
+            or the run fails. When absent, the SUT is taken to speak 1.0 and
+            0.3 and its card is not checked.
 
     Returns:
         A :class:`RunReport`: results keyed by scenario name (a scenario with
@@ -324,8 +404,9 @@ async def run_scenarios(
 
     Raises:
         ValueError: ``scenarios`` is empty.
-        ClusterStartupError: The SUT failed to start, or every scenario
-            needed a peer that did — nothing runnable is left.
+        ClusterStartupError: The SUT failed to start, its card lacks a
+            version in ``sut_protocol_versions``, or every scenario needed a
+            peer that failed to start — nothing runnable is left.
         test_suite.launcher.matrix.MatrixError: Unknown agent id.
         test_suite.launcher.errors.PermanentError: Unresolvable ref.
         test_suite.launcher.errors.InfraFailure: Transient fetch failure.
@@ -334,7 +415,9 @@ async def run_scenarios(
         raise ValueError('No scenarios provided')
 
     async with _execution_lock:
-        return await _run_locked(scenarios, log_dir=log_dir)
+        return await _run_locked(
+            scenarios, log_dir=log_dir, sut_protocol_versions=sut_protocol_versions,
+        )
 
 
 def _select_runnable(
@@ -417,6 +500,7 @@ async def _run_locked(
     scenarios: list[Scenario],
     *,
     log_dir: Path | None,
+    sut_protocol_versions: tuple[str, ...] | None,
 ) -> RunReport:
     logger.info(
         'Planning cluster for %d scenario(s): %s',
@@ -453,13 +537,33 @@ async def _run_locked(
                 sorted(dropped_peers.items()),
                 summary=f'the code under test ({SUT_ID!r}) failed to start',
             )
+        # A SUT that does not advertise what the run says it speaks would be
+        # tested against the wrong expectations, so nothing runs.
+        if sut_protocol_versions and SUT_ID in started_handles:
+            problem = await _sut_version_problem(
+                started_handles[SUT_ID].http_port, sut_protocol_versions,
+            )
+            if problem is not None:
+                raise ClusterStartupError(
+                    sorted({**dropped_peers, SUT_ID: problem}.items()),
+                    summary=(
+                        f'the code under test ({SUT_ID!r}) failed the '
+                        f'sut_protocol_versions check'
+                    ),
+                )
+            logger.info(
+                "'%s' advertises A2A %s", SUT_ID, ', '.join(sut_protocol_versions),
+            )
 
         # Where the agents we started are listening. Passed down the call
         # chain rather than published to a global, so nothing can leak into
         # the next run. Holds only the agents that actually came up.
         agents = AgentTable.from_handles(
             started_handles,
-            {agent_id: _protocol_versions(agent_id) for agent_id in started_handles},
+            {
+                agent_id: _protocol_versions(agent_id, sut_protocol_versions)
+                for agent_id in started_handles
+            },
         )
         logger.info('Cluster up: %r', agents)
 

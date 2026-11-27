@@ -51,6 +51,10 @@ class RunTestsRequest(BaseModel):
     # SDK under test, for `test_when` and `include_own_lines`. Absent means
     # nothing is filtered, which is what a legacy scenarios.json wants.
     sut_sdk: str | None = None
+    # The A2A versions the SDK under test speaks, as `Major.Minor`. When sent,
+    # its agent card must list each of them or the run fails. Absent means 1.0
+    # and 0.3, not checked against the card.
+    sut_protocol_versions: list[str] | None = None
 
 
 class TestResultDetails(BaseModel):
@@ -165,6 +169,17 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
     if not request.tests:
         raise HTTPException(status_code=400, detail='No tests provided')
 
+    sut_protocol_versions = None
+    if request.sut_protocol_versions is not None:
+        try:
+            sut_protocol_versions = itk_runner.parse_sut_protocol_versions(
+                request.sut_protocol_versions,
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400, detail=f'sut_protocol_versions: {e}',
+            ) from e
+
     try:
         scenarios = itk_runner.prepare(
             {'tests': request.tests}, sut_sdk=request.sut_sdk,
@@ -190,7 +205,9 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
 
     try:
         report = await itk_runner.run_scenarios(
-            scenarios, log_dir=_agent_log_dir(),
+            scenarios,
+            log_dir=_agent_log_dir(),
+            sut_protocol_versions=sut_protocol_versions,
         )
     except (MatrixError, PermanentError) as e:
         # Bad matrix entry, bogus agent id, unknown ref — none retryable.
@@ -201,7 +218,8 @@ async def run_tests(request: RunTestsRequest) -> RunTestsResponse:
         raise HTTPException(status_code=502, detail=str(e)) from e
     except ClusterStartupError as e:
         # Reached only when a peer being down could not be tolerated: the SUT
-        # itself failed to start, or every scenario needed a peer that did.
+        # itself failed to start or lacks a version the request says it
+        # speaks, or every scenario needed a peer that failed to start.
         # A lone peer build hiccup no longer lands here — it is dropped and
         # the run continues.
         #

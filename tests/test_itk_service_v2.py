@@ -14,15 +14,18 @@ tested independently in its own module — here we only verify the glue:
     recorded as an all-failed run (200 + cluster_error) so the nightly
     history gets an entry instead of a gap
   * launcher handles reach the executor as an AgentTable
+  * a request's sut_protocol_versions is checked against the SUT's card
   * scenarios executed sequentially against the shared cluster
 """
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -32,6 +35,7 @@ from test_suite.launcher import fetch
 from test_suite.launcher.errors import InfraFailure, PermanentError, Stage
 from test_suite.launcher.matrix import Matrix
 from test_suite.launcher.spec import Kind
+from tests.mock_agent import MockAgent
 
 
 _SHA_A = 'a' * 40
@@ -681,6 +685,239 @@ class TestAgentTableWiring:
         table = AgentTable({'current': AgentEndpoint(1, 2, ('1.0', '0.3'))})
         with pytest.raises(RuntimeError, match='No running agent'):
             table.card_uri('python_v10')
+
+
+# ---------------------------------------------------------------------------
+# What the SUT speaks
+# ---------------------------------------------------------------------------
+
+
+class TestSutProtocolVersions:
+    """``sut_protocol_versions`` says what the SUT speaks, and its card must agree.
+
+    The card is read only when the request sends the field, so a run that does
+    not is unchanged: the SUT is taken to speak 1.0 and 0.3.
+    """
+
+    _SUT_AND_PEER = {'tests': [
+        {'name': 't', 'sdks': ['current', 'python_v10'], 'behavior': 'echo'},
+    ]}
+
+    @staticmethod
+    def _serve_cards(monkeypatch, handler):
+        """Answer the harness's own HTTP requests with ``handler``; record them."""
+        requests: list[httpx.Request] = []
+
+        async def recording(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            response = handler(request)
+            return await response if inspect.isawaitable(response) else response
+
+        real_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            itk_runner.httpx, 'AsyncClient',
+            lambda **kw: real_client(transport=httpx.MockTransport(recording), **kw),
+        )
+        return requests
+
+    def _serve_mock_agent(self, monkeypatch, versions):
+        """The SUT's card is the one a :class:`MockAgent` serving ``versions`` has."""
+        agents: dict[int, MockAgent] = {}
+
+        def handler(request: httpx.Request):
+            port = request.url.port
+            agent = agents.setdefault(
+                port, MockAgent(base_url=f'http://127.0.0.1:{port}', versions=versions),
+            )
+            return agent.handle(request)
+
+        return self._serve_cards(monkeypatch, handler)
+
+    @staticmethod
+    def _record_versions(monkeypatch):
+        seen: dict[str, tuple[str, ...]] = {}
+        ports: dict[str, int] = {}
+
+        async def probing_execute(sdks, behavior, agents, edges=None, scenario_name=None, **_kw):  # noqa: ARG001
+            seen.update({s: agents[s].protocol_versions for s in sdks})
+            ports.update({s: agents[s].http_port for s in sdks})
+            return {scenario_name: {'passed': True, 'sdks': sdks, 'edges': edges}}
+
+        monkeypatch.setattr(itk_runner, 'execute_itk_test', probing_execute)
+        return seen, ports
+
+    def test_without_the_field_the_card_is_not_read(self, client, monkeypatch):
+        requests = self._serve_cards(monkeypatch, lambda _r: httpx.Response(500))
+        seen, _ = self._record_versions(monkeypatch)
+
+        r = client.post('/run', json=self._SUT_AND_PEER)
+
+        assert r.status_code == 200
+        assert r.json()['all_passed'] is True
+        assert requests == []
+        assert seen == {'current': ('1.0', '0.3'), 'python_v10': ('1.0', '0.3')}
+
+    def test_a_card_that_lists_every_version_lets_the_run_go_ahead(self, client, monkeypatch):
+        requests = self._serve_mock_agent(monkeypatch, ('1.1', '1.0', '0.3'))
+        seen, ports = self._record_versions(monkeypatch)
+
+        r = client.post('/run', json={
+            **self._SUT_AND_PEER, 'sut_protocol_versions': ['1.0', '0.3', '1.1'],
+        })
+
+        assert r.status_code == 200
+        assert r.json()['all_passed'] is True
+        # Newest first, whatever order the request used. The peer keeps what
+        # its matrix line says.
+        assert seen == {'current': ('1.1', '1.0', '0.3'), 'python_v10': ('1.0', '0.3')}
+        # The SUT's card, asked for at its newest version.
+        [request] = requests
+        assert request.url.port == ports['current']
+        assert request.url.path == '/.well-known/agent-card.json'
+        assert request.headers['A2A-Version'] == '1.1'
+
+    def test_a_version_missing_from_the_card_fails_the_run_as_a_recorded_red_run(
+        self, client, monkeypatch,
+    ):
+        self._serve_mock_agent(monkeypatch, ('1.0', '0.3'))
+
+        async def must_not_run(**_kw):
+            raise AssertionError('no scenario may run against a SUT that failed the check')
+
+        monkeypatch.setattr(itk_runner, 'execute_itk_test', must_not_run)
+
+        r = client.post('/run', json={
+            **self._SUT_AND_PEER, 'sut_protocol_versions': ['1.1', '1.0', '0.3'],
+        })
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body['all_passed'] is False
+        assert body['results']['t']['passed'] is False
+        error = body['startup']['cluster_error']
+        assert 'sut_protocol_versions' in error
+        assert 'does not list A2A 1.1; it lists 1.0, 0.3' in error
+        assert body['startup']['dropped_peers'] == {
+            'current': 'its agent card does not list A2A 1.1; it lists 1.0, 0.3',
+        }
+        assert _FakeCluster.instances[-1].exited
+
+    def test_a_sut_that_speaks_only_0_3_passes_with_a_card_of_that_version(
+        self, client, monkeypatch,
+    ):
+        requests = self._serve_cards(monkeypatch, lambda _r: httpx.Response(200, json={
+            'url': 'http://127.0.0.1:1/jsonrpc', 'preferredTransport': 'JSONRPC',
+            'protocolVersion': '0.3.0',
+        }))
+        seen, _ = self._record_versions(monkeypatch)
+
+        r = client.post('/run', json={**self._SUT_AND_PEER, 'sut_protocol_versions': ['0.3']})
+
+        assert r.status_code == 200
+        assert r.json()['all_passed'] is True
+        assert [request.headers['A2A-Version'] for request in requests] == ['0.3']
+        assert seen['current'] == ('0.3',)
+
+    def test_peers_that_did_not_start_are_still_reported(self, client, monkeypatch):
+        self._serve_mock_agent(monkeypatch, ('1.0',))
+        cluster = _FakeCluster()
+        monkeypatch.setattr(itk_runner, 'Cluster', lambda *a, **kw: cluster)
+        _fail_peer(cluster, 'a2aproject/a2a-go', message='go build failed')
+
+        r = client.post('/run', json={
+            'tests': [{'name': 't', 'sdks': ['current', 'python_v10', 'go_v10'],
+                       'behavior': 'echo'}],
+            'sut_protocol_versions': ['1.0', '0.3'],
+        })
+
+        dropped = r.json()['startup']['dropped_peers']
+        assert set(dropped) == {'current', 'go_v10'}
+        assert 'does not list A2A 0.3' in dropped['current']
+        assert 'go build failed' in dropped['go_v10']
+
+    @pytest.mark.parametrize('answer', [
+        httpx.Response(404),
+        # An error status is not a card, even with a card in its body.
+        httpx.Response(503, json={'supportedInterfaces': [
+            {'protocolBinding': 'JSONRPC', 'protocolVersion': '1.0'},
+        ]}),
+        httpx.Response(200, text='not json'),
+        httpx.Response(200, json=['not', 'an', 'object']),
+    ])
+    def test_a_card_that_cannot_be_read_fails_the_run(self, client, monkeypatch, answer):
+        self._serve_cards(monkeypatch, lambda _r: answer)
+
+        r = client.post('/run', json={
+            **self._SUT_AND_PEER, 'sut_protocol_versions': ['1.0'],
+        })
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body['all_passed'] is False
+        assert 'cannot read its agent card' in body['startup']['dropped_peers']['current']
+        assert _FakeCluster.instances[-1].exited
+
+    def test_a_run_that_does_not_start_the_sut_does_not_read_a_card(self, client, monkeypatch):
+        requests = self._serve_cards(monkeypatch, lambda _r: httpx.Response(500))
+
+        r = client.post('/run', json={
+            'tests': [{'name': 't', 'sdks': ['python_v10', 'go_v10'], 'behavior': 'echo'}],
+            'sut_protocol_versions': ['1.1'],
+        })
+
+        assert r.status_code == 200
+        assert r.json()['all_passed'] is True
+        assert requests == []
+
+    @pytest.mark.parametrize(('versions', 'said'), [
+        ([], 'must not be empty'),
+        (['1.1', 'v1.0'], "'v1.0' is not an A2A version"),
+        (['1.1.0'], "'1.1.0' is not an A2A version"),
+        (['1.0', '1.0'], 'lists a version twice'),
+    ])
+    def test_a_malformed_list_is_refused_before_anything_starts(self, client, versions, said):
+        r = client.post('/run', json={
+            **self._SUT_AND_PEER, 'sut_protocol_versions': versions,
+        })
+
+        assert r.status_code == 400
+        assert r.json()['detail'].startswith('sut_protocol_versions: ')
+        assert said in r.json()['detail']
+        assert _FakeCluster.instances == []
+
+
+class TestAdvertisedVersions:
+    """What counts as a card listing a version."""
+
+    @pytest.mark.parametrize(('card', 'listed'), [
+        # Any binding counts, and a patch component is ignored.
+        ({'supportedInterfaces': [
+            {'protocolBinding': 'GRPC', 'protocolVersion': '1.1.0'},
+            {'protocolBinding': 'JSONRPC', 'protocolVersion': '1.0'},
+        ]}, {(1, 1), (1, 0)}),
+        # A version that cannot be read lists nothing.
+        ({'supportedInterfaces': [
+            {'protocolBinding': 'JSONRPC', 'protocolVersion': 'v1.1'},
+            {'protocolBinding': 'JSONRPC'},
+            'not an interface',
+            {'protocolBinding': 'JSONRPC', 'protocolVersion': '1.0'},
+        ]}, {(1, 0)}),
+        ({'supportedInterfaces': [
+            {'protocolBinding': 'JSONRPC', 'protocolVersion': '1.10'},
+        ]}, {(1, 10)}),
+        ({}, set()),
+        ({'supportedInterfaces': None}, set()),
+        ({'supportedInterfaces': 'JSONRPC'}, set()),
+        # A card in the shape of A2A 0.3 names its version at the top.
+        ({'url': 'http://127.0.0.1:1', 'preferredTransport': 'JSONRPC',
+          'protocolVersion': '0.3.0'}, {(0, 3)}),
+        # A card that also serves 0.3 clients can name versions both ways.
+        ({'protocolVersion': '0.3', 'supportedInterfaces': [
+            {'protocolBinding': 'JSONRPC', 'protocolVersion': '1.0'},
+        ]}, {(1, 0), (0, 3)}),
+    ])
+    def test_card(self, card, listed):
+        assert itk_runner._advertised_versions(card) == listed
 
 
 # ---------------------------------------------------------------------------
