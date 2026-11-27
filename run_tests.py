@@ -55,7 +55,11 @@ _DEFAULT_SCENARIOS = Path(__file__).parent / 'scenarios' / 'smoke.json'
 # ---------------------------------------------------------------------------
 
 
-def load_scenarios(path: Path, sut_sdk: str | None = None) -> list[Scenario]:
+def load_scenarios(
+    path: Path,
+    sut_sdk: str | None = None,
+    sut_protocol_versions: tuple[str, ...] | None = None,
+) -> list[Scenario]:
     """Load a scenario file in either schema and bind it to concrete agents.
 
     Takes an SDK's ``scenarios.json`` unchanged, or a ``traversal/v1``
@@ -69,7 +73,9 @@ def load_scenarios(path: Path, sut_sdk: str | None = None) -> list[Scenario]:
             with a readable message rather than a traceback.
     """
     try:
-        scenarios = itk_runner.prepare_file(path, sut_sdk=sut_sdk)
+        scenarios = itk_runner.prepare_file(
+            path, sut_sdk=sut_sdk, sut_protocol_versions=sut_protocol_versions,
+        )
     except (ScenarioFileError, ResolutionError) as e:
         sys.exit(str(e))
 
@@ -200,7 +206,7 @@ async def main_async(args: argparse.Namespace) -> int:
             logger.error('--sut-protocol-versions: %s', e)  # noqa: TRY400
             return 1
 
-    scenarios = load_scenarios(args.scenarios, args.sut_sdk)
+    scenarios = load_scenarios(args.scenarios, args.sut_sdk, sut_protocol_versions)
     total = len(scenarios)
 
     selected = None

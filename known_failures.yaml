@@ -15,6 +15,7 @@
 #
 # Fields (all optional except `reason`; those set must all match):
 #   agents  transports  behaviors  streaming  sut_sdk  unless_sut_sdk
+#   hop_protocol_version (matches a scenario that forces its hops to it)
 #   reason (required)   issue
 #
 # Every entry below was established by a real cross-SDK run. Add `issue:`

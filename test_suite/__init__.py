@@ -4,7 +4,7 @@ from pyproto import instruction_pb2
 
 from test_suite.agent_table import AgentTable
 from test_suite.transports import ALL_TRANSPORTS as _ALL_TRANSPORTS
-from test_suite.versions import parse_spec_version
+from test_suite.versions import call_version, since_1_1
 
 _END_OF_TRAVERSAL_TOKEN = 'traversal-completed'  # noqa: S105
 
@@ -12,11 +12,6 @@ _END_OF_TRAVERSAL_TOKEN = 'traversal-completed'  # noqa: S105
 # subscription from the last generation the caller saw. Resuming needs A2A
 # 1.1, so on a call made at an older version the two are the same.
 _RESUBSCRIBE = ('resubscribe', 'resubscribe_from_generation')
-
-
-def _since_1_1(version: str | None) -> bool:
-    """Is ``version`` A2A 1.1 or later?"""
-    return version is not None and parse_spec_version(version) >= (1, 1)
 
 
 def _speaks_1_1(agents: AgentTable, agent_id: str) -> bool:
@@ -27,7 +22,7 @@ def _speaks_1_1(agents: AgentTable, agent_id: str) -> bool:
     An older agent still passes on the ones in the instruction it hands to
     the next agent.
     """
-    return _since_1_1(agents.protocol_versions(agent_id)[0])
+    return since_1_1(agents.protocol_versions(agent_id)[0])
 
 
 def _call_version(
@@ -35,15 +30,11 @@ def _call_version(
 ) -> str | None:
     """The A2A version the call from ``caller`` to ``callee`` is made at.
 
-    The forced one when the caller reads it from the instruction, and
-    otherwise the newest version both speak, which is what a caller
-    negotiates. ``None`` when they speak no version in common: the call
-    cannot be made at all.
+    See :func:`test_suite.versions.call_version`.
     """
-    if forced and _speaks_1_1(agents, caller):
-        return forced
-    theirs = agents.protocol_versions(callee)
-    return next((v for v in agents.protocol_versions(caller) if v in theirs), None)
+    return call_version(
+        agents.protocol_versions(caller), agents.protocol_versions(callee), forced,
+    )
 
 
 def _served(
@@ -244,7 +235,7 @@ def _traversal_to_instruction(  # noqa: PLR0913
                     url=notification_server_url
                 )
             )
-            if _since_1_1(version):
+            if since_1_1(version):
                 call_step.call_agent.push_notification.protocol_version = version
         elif behavior == 'send_message':
             call_step.call_agent.send_message.CopyFrom(
@@ -254,7 +245,7 @@ def _traversal_to_instruction(  # noqa: PLR0913
             call_step.call_agent.resubscribe.CopyFrom(
                 instruction_pb2.ResubscribeBehavior()
             )
-            if behavior == 'resubscribe_from_generation' and _since_1_1(version):
+            if behavior == 'resubscribe_from_generation' and since_1_1(version):
                 call_step.call_agent.resubscribe.from_last_seen_generation = True
         if hop_protocol_version and _speaks_1_1(agents, u):
             call_step.call_agent.protocol_version = hop_protocol_version

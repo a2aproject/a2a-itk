@@ -94,12 +94,12 @@ For each transport in the scenario:
 
 No step that an agent speaking nothing newer than A2A 1.0 carries out has a field about versions set. A traversal among such agents is, byte for byte, the instruction it was before those fields existed. In a traversal that also has an agent speaking A2A 1.1, an older agent passes those fields on inside the instruction it hands to the next agent.
 
-The compiler can also force every hop to one A2A version: each `CallAgent` carried out by an agent that speaks A2A 1.1 gets that `protocol_version`, and the expected `served:` versions follow. No scenario asks for this yet.
+The compiler can also force every hop to one A2A version: each `CallAgent` carried out by an agent that speaks A2A 1.1 gets that `protocol_version`, and the expected `served:` versions follow. A scenario asks for this with `hop_protocol_version` (see [03_scenarios.md](03_scenarios.md#traversalv1)). An agent that does not speak 1.1 still makes its call at the newest version it and the agent it calls both speak, so only agents whose calls are then made at the forced version take part. ITK's own first request to the entry agent is not forced.
 
 Two more fields ask the calling agent for something A2A 1.1 added to a request, and are set only on a call made at A2A 1.1 or later:
 
 - With `push_notification`, the call names its version for the push notification config it registers (`PushNotificationBehavior.protocol_version`).
-- With `resubscribe_from_generation`, the call resumes its second subscription from the last generation it saw (`ResubscribeBehavior.from_last_seen_generation`). A scenario in the legacy format can name this behavior. The shared format cannot yet. On a call made at an older version it is `resubscribe`.
+- With `resubscribe_from_generation`, the call resumes its second subscription from the last generation it saw (`ResubscribeBehavior.from_last_seen_generation`). On a call made at an older version it is `resubscribe`.
 
 If the scenario lists several transports, one circuit per transport is built and all of them are concatenated into a single top-level `SeriesOfSteps`. This is why the shared sets split transports into separate scenarios: a bundled scenario fails as a whole and its name does not say which transport broke.
 
@@ -115,7 +115,7 @@ The request dialect is chosen from the first agent's `protocol_versions`, which 
 
 | Behavior | What each hop does | How the result is read |
 | --- | --- | --- |
-| `send_message` | Calls the next agent and returns its reply concatenated with its own trace token | The final JSON-RPC result (or the joined SSE stream when `streaming: true`) must contain every expected token |
+| `send_message` | Calls the next agent and returns its reply concatenated with its own trace token | The final JSON-RPC result (or the joined SSE stream when `streaming: true`) must contain every expected token. A token that ends in a version must not run on into more digits, so `served:1.1` is not found in `served:1.10` |
 | `push_notification` | Same, but every agent also registers a push notification config pointing at ITK's mock receiver and pushes its status updates there | ITK starts [`notifications_app.py`](../../notifications_app.py) on a free port for the scenario, then reads `GET /notifications` and checks both the final text and that every intermediate state was pushed - proof that each hop pushed, not just the last one |
 | `resubscribe` | Streaming only. The caller starts a stream, reads the task id, disconnects, resubscribes to the task, then cancels it. `hold_task` keeps every task in `WORKING` so there is something to resubscribe to | Same token check as `send_message` on the aggregated stream |
 | `resubscribe_from_generation` | As `resubscribe`. On a call made at A2A 1.1 or later the caller also passes the generation of the task it read as `lastSeenGeneration` when it resubscribes. The called agent may continue from that generation or open with the task again | Same token check. It shows that the caller reaches the end of the task, not which of the two the called agent did |

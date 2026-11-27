@@ -259,6 +259,24 @@ class TestSutProtocolVersions:
         assert rc == 0
         assert got == [None]
 
+    def test_scenarios_resolve_against_the_versions(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(itk_runner, '_matrix', itk_runner.Matrix.from_dict({'sdks': {
+            'python': {'v11': {'repo': 'a2aproject/a2a-python', 'ref': 'c' * 40,
+                               'protocol_versions': ['1.1', '1.0', '0.3']}},
+        }}))
+        path = tmp_path / 'v11.json'
+        path.write_text(json.dumps({'tests': [{
+            'schema': 'traversal/v1', 'name': 'S',
+            'roles': {'peers': [{'sdk': 'python', 'line': 'v11'}]},
+            'transports': ['jsonrpc'], 'behavior': 'send_message',
+            'min_protocol_version': '1.1',
+        }]}), encoding='utf-8')
+
+        with pytest.raises(SystemExit, match='no scenarios left'):
+            run_tests.load_scenarios(path)
+        [s] = run_tests.load_scenarios(path, sut_protocol_versions=('1.1', '1.0'))
+        assert s.sdks == ['current', 'python_v11']
+
     @pytest.mark.parametrize('value', ['', '1.1,', '1.1,1.1', '1.1,latest'])
     def test_a_malformed_list_fails_before_the_run(self, tmp_path, monkeypatch, value):
         rc, got = self._run(['--sut-protocol-versions', value], monkeypatch, tmp_path)

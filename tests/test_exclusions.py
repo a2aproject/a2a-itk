@@ -101,11 +101,53 @@ class TestParsing:
                 {'reason': 'r', 'transport': 'grpc'},  # singular typo
             ]})
 
+    @pytest.mark.parametrize(('value', 'said'), [
+        (1.0, 'must be a string; quote it'),
+        ('1.0.0', "'1.0.0' is not an A2A version"),
+    ])
+    def test_a_hop_version_that_is_not_a_version_is_rejected(self, value, said):
+        with pytest.raises(ExclusionError, match=said):
+            KnownFailures.from_dict({'exclusions': [
+                {'reason': 'r', 'hop_protocol_version': value},
+            ]})
+
     def test_missing_file_means_no_exclusions(self, tmp_path):
         assert len(KnownFailures.from_path(tmp_path / 'nope.yaml')) == 0
 
     def test_shipped_file_parses(self):
         KnownFailures.from_default()
+
+
+class TestHopProtocolVersion:
+    """A rule can cover only the scenarios that force their hops to a version."""
+
+    RULE = Exclusion(reason='r', agents=frozenset({'go_v10'}), hop_protocol_version='1.0')
+
+    def test_matches_a_scenario_forcing_that_version(self):
+        assert _match(self.RULE, hop_protocol_version='1.0')
+
+    @pytest.mark.parametrize('forced', [None, '1.1'])
+    def test_does_not_match_any_other(self, forced):
+        assert not _match(self.RULE, hop_protocol_version=forced)
+
+    def test_a_rule_without_it_matches_whatever_is_forced(self):
+        assert _match(Exclusion(reason='r', agents=frozenset({'go_v10'})), hop_protocol_version='1.0')
+
+    def test_is_shown_in_the_scope(self):
+        assert self.RULE.scope() == 'go_v10 hops at A2A 1.0'
+
+    def test_is_applied_during_resolution(self):
+        known = KnownFailures.from_dict({'exclusions': [
+            {'reason': 'go at 1.0', 'agents': ['go_v10'], 'hop_protocol_version': '1.0'},
+        ]})
+        forced = resolve_all(
+            _scenario(transports=['jsonrpc'], hop_protocol_version='1.0'),
+            MATRIX, known_failures=known,
+        )
+        free = resolve_all(_scenario(transports=['jsonrpc']), MATRIX, known_failures=known)
+        assert forced.scenarios == []
+        assert forced.skipped == [('S', 'known failure — go_v10 — go_v10 hops at A2A 1.0: go at 1.0')]
+        assert [s.sdks for s in free.scenarios] == [['current', 'go_v10']]
 
 
 class TestAppliedDuringResolution:

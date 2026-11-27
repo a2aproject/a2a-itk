@@ -16,6 +16,8 @@ from pathlib import Path
 
 import yaml
 
+from test_suite.versions import parse_spec_version
+
 
 class ExclusionError(ValueError):
     """Malformed known-failures file."""
@@ -36,9 +38,10 @@ class Exclusion:
     sut_sdk: frozenset[str] = frozenset()
     unless_sut_sdk: frozenset[str] = frozenset()
     streaming: bool | None = None
+    hop_protocol_version: str | None = None
     issue: str | None = None
 
-    def matches(  # noqa: PLR0911
+    def matches(  # noqa: PLR0911, PLR0913
         self,
         *,
         sdks: list[str],
@@ -46,6 +49,7 @@ class Exclusion:
         behavior: str,
         streaming: bool,
         sut_sdk: str | None = None,
+        hop_protocol_version: str | None = None,
     ) -> bool:
         """Does this rule cover the given resolved scenario?"""
         if self.agents and not (self.agents & set(sdks)):
@@ -62,6 +66,11 @@ class Exclusion:
         if self.sut_sdk and sut_sdk not in self.sut_sdk:
             return False
         if self.unless_sut_sdk and sut_sdk in self.unless_sut_sdk:
+            return False
+        if (
+            self.hop_protocol_version is not None
+            and hop_protocol_version != self.hop_protocol_version
+        ):
             return False
         return not (self.streaming is not None and streaming != self.streaming)
 
@@ -80,6 +89,8 @@ class Exclusion:
             bits.append('/'.join(sorted(self.behaviors)))
         if self.streaming is not None:
             bits.append('streaming' if self.streaming else 'non-streaming')
+        if self.hop_protocol_version is not None:
+            bits.append(f'hops at A2A {self.hop_protocol_version}')
         return ' '.join(bits) or 'everything'
 
     def summary(self) -> str:
@@ -137,7 +148,7 @@ class KnownFailures:
                 )
             unknown = set(entry) - {
                 'reason', 'agents', 'transports', 'behaviors', 'streaming',
-                'issue', 'sut_sdk', 'unless_sut_sdk',
+                'issue', 'sut_sdk', 'unless_sut_sdk', 'hop_protocol_version',
             }
             if unknown:
                 raise ExclusionError(
@@ -149,6 +160,20 @@ class KnownFailures:
                     f'{where}: exclusions[{i}] sets both `sut_sdk` and '
                     f'`unless_sut_sdk`; use one or the other'
                 )
+            hop = entry.get('hop_protocol_version')
+            if hop is not None:
+                if not isinstance(hop, str):
+                    raise ExclusionError(
+                        f'{where}: exclusions[{i}].hop_protocol_version must '
+                        f'be a string; quote it, because YAML reads a bare 1.0 '
+                        f'as a number'
+                    )
+                try:
+                    parse_spec_version(hop)
+                except ValueError as e:
+                    raise ExclusionError(
+                        f'{where}: exclusions[{i}].hop_protocol_version: {e}'
+                    ) from None
             out.append(Exclusion(
                 reason=reason,
                 agents=frozenset(entry.get('agents') or []),
@@ -157,11 +182,12 @@ class KnownFailures:
                 sut_sdk=frozenset(entry.get('sut_sdk') or []),
                 unless_sut_sdk=frozenset(entry.get('unless_sut_sdk') or []),
                 streaming=entry.get('streaming'),
+                hop_protocol_version=hop,
                 issue=entry.get('issue'),
             ))
         return cls(out)
 
-    def find(
+    def find(  # noqa: PLR0913
         self,
         *,
         sdks: list[str],
@@ -169,12 +195,14 @@ class KnownFailures:
         behavior: str,
         streaming: bool,
         sut_sdk: str | None = None,
+        hop_protocol_version: str | None = None,
     ) -> Exclusion | None:
         """The first rule covering this scenario, if any."""
         for e in self._exclusions:
             if e.matches(
                 sdks=sdks, protocols=protocols, behavior=behavior,
                 streaming=streaming, sut_sdk=sut_sdk,
+                hop_protocol_version=hop_protocol_version,
             ):
                 return e
         return None

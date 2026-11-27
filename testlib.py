@@ -2,6 +2,7 @@ import asyncio  # noqa: I001
 import base64
 import json
 import logging
+import re
 import socket
 from typing import Any
 import subprocess
@@ -254,6 +255,18 @@ async def read_push_notifications(
     return responses
 
 
+def _said(token: str, text: str) -> bool:
+    """Does ``text`` contain ``token``, and not only as the start of a longer one?
+
+    A token that ends in a version must not run on into more digits, so
+    ``served:1.1`` is not found in ``served:1.10``. No other token ends in a
+    digit, and those are found as plain substrings.
+    """
+    if not token[-1:].isdigit():
+        return token in text
+    return re.search(re.escape(token) + r'(?![0-9])', text) is not None
+
+
 def _verify_send_message(
     result: dict,
     expected_end_tokens: list[str],
@@ -263,7 +276,7 @@ def _verify_send_message(
 
     logger.info('Test Result for %s: %s', label, full_response)
 
-    missing = [token for token in expected_end_tokens if token not in full_response]
+    missing = [token for token in expected_end_tokens if not _said(token, full_response)]
     if not missing:
         logger.info('--- INTEGRATION TEST PASSED: %s ---', label)
         return True
@@ -311,7 +324,7 @@ async def _verify_push_notification(
     remaining_states = list(expected_states)
     for text in notification_texts:
         for state in list(remaining_states):
-            if state in text:
+            if _said(state, text):
                 remaining_states.remove(state)
 
     if remaining_states:
@@ -323,7 +336,7 @@ async def _verify_push_notification(
 
     logger.info('Test Result for %s: %s', label, full_response)
 
-    if all(token in full_response for token in expected_end_tokens):
+    if all(_said(token, full_response) for token in expected_end_tokens):
         logger.info('--- INTEGRATION TEST PASSED: %s ---', label)
         return True
 
@@ -373,7 +386,7 @@ async def _read_stream_response(
                     # Check if traversal completed!
                     joined_text = '\n'.join(collected_text)
                     if all(
-                        token in joined_text for token in expected_end_tokens
+                        _said(token, joined_text) for token in expected_end_tokens
                     ):
                         logger.info(
                             'Found all expected tokens in stream, breaking.'

@@ -400,3 +400,162 @@ class TestIncludeOwnLines:
     def test_unknown_sut_sdk_adds_nothing(self):
         [s] = resolve(self._scenario(), MATRIX, sut_sdk='cobol')
         assert s.sdks == ['current', 'go_v10']
+
+
+class TestProtocolVersions:
+    """`min_protocol_version` and `hop_protocol_version` keep only the agents
+    that speak what a scenario is about, one case per pair of the version
+    matrix: an agent speaking 1.1, 1.0 and 0.3; 1.0 and 0.3; 1.0 only; 0.3
+    only."""
+
+    MATRIX = Matrix.from_dict({'sdks': {
+        'python': {
+            'v11': {'repo': 'a2aproject/a2a-python', 'ref': 'c' * 40,
+                    'protocol_versions': ['1.1', '1.0', '0.3']},
+            'v10': {'repo': 'a2aproject/a2a-python', 'ref': 'main'},
+            'v03': {'repo': 'a2aproject/a2a-python', 'ref': 'v0.3.24+itk'},
+        },
+        'rust': {'v10': {'repo': 'a2aproject/a2a-rs', 'ref': 'main',
+                         'protocol_versions': ['1.0']}},
+    }})
+    EVERY_PEER = ['python_v03', 'python_v10', 'python_v11', 'rust_v10']
+    SPEAKS_1_1 = ('1.1', '1.0', '0.3')
+
+    def _resolve(self, sut_versions=None, **fields):
+        return resolve_all(
+            _one(roles={'peers': 'all'}, **fields), self.MATRIX,
+            sut_protocol_versions=sut_versions,
+        )
+
+    @pytest.mark.parametrize(('fields', 'sut_versions', 'peers'), [
+        # Nothing asked: every agent, whatever it speaks.
+        ({}, None, EVERY_PEER),
+        ({}, SPEAKS_1_1, EVERY_PEER),
+        # A scenario about A2A 1.1 needs it, or a newer version, from each.
+        ({'min_protocol_version': '1.1'}, SPEAKS_1_1, ['python_v11']),
+        ({'min_protocol_version': '1.0'}, SPEAKS_1_1, ['python_v10', 'python_v11', 'rust_v10']),
+        ({'min_protocol_version': '1.0'}, ('1.0',), ['python_v10', 'python_v11', 'rust_v10']),
+        ({'min_protocol_version': '0.3'}, ('0.3',), EVERY_PEER),
+        # Forced hops need that very version from each.
+        ({'hop_protocol_version': '1.0'}, SPEAKS_1_1, ['python_v10', 'python_v11', 'rust_v10']),
+        # An agent that does not speak 1.1 negotiates its newest version, so
+        # it takes part only if that is the forced one.
+        ({'hop_protocol_version': '0.3'}, SPEAKS_1_1, ['python_v03', 'python_v11']),
+        ({'hop_protocol_version': '1.1'}, SPEAKS_1_1, ['python_v11']),
+        ({'min_protocol_version': '1.1', 'hop_protocol_version': '1.0'},
+         SPEAKS_1_1, ['python_v11']),
+    ])
+    def test_the_agents_that_take_part(self, fields, sut_versions, peers):
+        [s] = self._resolve(sut_versions, **fields).scenarios
+        assert s.sdks == ['current', *peers]
+
+    @pytest.mark.parametrize(('fields', 'sut_versions', 'said'), [
+        ({'min_protocol_version': '1.1'}, None,
+         'needs A2A 1.1 or newer; the SUT speaks 1.0, 0.3'),
+        ({'min_protocol_version': '1.0'}, ('0.3',),
+         'needs A2A 1.0 or newer; the SUT speaks 0.3'),
+        ({'hop_protocol_version': '0.3'}, ('1.0',),
+         'needs calls made at A2A 0.3 (hop_protocol_version); the SUT speaks 1.0'),
+        ({'hop_protocol_version': '0.3'}, ('1.0', '0.3'),
+         'needs calls made at A2A 0.3 (hop_protocol_version); the SUT speaks 1.0, 0.3'),
+        ({'min_protocol_version': '1.1', 'hop_protocol_version': '1.0'}, ('1.1',),
+         'needs A2A 1.1 or newer and calls made at A2A 1.0 (hop_protocol_version); '
+         'the SUT speaks 1.1'),
+    ])
+    def test_a_sut_that_does_not_speak_it_resolves_to_nothing(self, fields, sut_versions, said):
+        report = self._resolve(sut_versions, **fields)
+        assert report.scenarios == []
+        assert report.skipped == [('S', said)]
+
+    def test_no_peer_that_speaks_it_is_a_skip_and_not_an_error(self):
+        """Lines that speak a newer version join the matrix after the
+        scenarios that need them."""
+        matrix = Matrix.from_dict({'sdks': {
+            'go': {'v10': {'repo': 'a2aproject/a2a-go', 'ref': 'main'}},
+        }})
+        report = resolve_all(
+            _one(roles={'peers': 'all'}, min_protocol_version='1.1'), matrix,
+            sut_protocol_versions=self.SPEAKS_1_1,
+        )
+        assert report.scenarios == []
+        assert report.skipped == [
+            ('S', 'no peer in the matrix can take part: it needs A2A 1.1 or newer'),
+        ]
+
+    def test_explicit_edges_are_not_re_indexed_for_the_agents_left(self):
+        edges = ['0->1', '1->0', '0->3', '3->0', '1->2', '2->1']
+        report = self._resolve(('1.0',), edges=edges, min_protocol_version='1.0')
+        assert report.scenarios == []
+        assert report.skipped == [(
+            'S', 'the explicit edges name agents that cannot take part: '
+                 'it needs A2A 1.0 or newer',
+        )]
+        # When every agent takes part, the edges are used as written.
+        [s] = self._resolve(('1.0',), edges=edges, min_protocol_version='0.3').scenarios
+        assert s.edges == edges
+
+    def test_per_peer_with_explicit_edges_keeps_the_peers_left(self):
+        scenarios = self._resolve(
+            ('1.0',), name='S - {peer}', expand='per_peer',
+            edges=['0->1', '1->0'], min_protocol_version='1.0',
+        ).scenarios
+        assert [s.sdks[1] for s in scenarios] == ['python_v10', 'python_v11', 'rust_v10']
+
+    def test_too_few_agents_for_another_reason_is_still_an_error(self):
+        with pytest.raises(ResolutionError, match='resolves to 1 agent'):
+            resolve_all(
+                _one(roles={'peers': [{'sdk': 'go', 'line': 'v03'}]},
+                     transports=['http_json'], min_protocol_version='0.3'),
+                MATRIX,
+            )
+
+    def test_a_named_peer_that_does_not_speak_it_takes_no_part(self):
+        [s] = resolve(
+            _one(roles={'peers': [{'sdk': 'python', 'line': 'v03'},
+                                  {'sdk': 'python', 'line': 'v11'}]},
+                 min_protocol_version='1.1'),
+            self.MATRIX, sut_protocol_versions=self.SPEAKS_1_1,
+        )
+        assert s.sdks == ['current', 'python_v11']
+
+    def test_per_peer_makes_a_scenario_only_for_peers_that_speak_it(self):
+        scenarios = resolve(
+            _one(name='S - {peer}', roles={'peers': 'all'}, expand='per_peer',
+                 min_protocol_version='1.0'),
+            self.MATRIX, sut_protocol_versions=('1.0',),
+        )
+        assert [s.name for s in scenarios] == [
+            'S - python_v10', 'S - python_v11', 'S - rust_v10',
+        ]
+
+    def test_own_lines_are_filtered_too(self):
+        [s] = resolve(
+            _one(roles={'include_own_lines': True,
+                        'peers': [{'sdk': 'rust', 'line': 'v10'}]},
+                 min_protocol_version='1.0'),
+            self.MATRIX, sut_sdk='python', sut_protocol_versions=('1.0',),
+        )
+        assert s.sdks == ['current', 'rust_v10', 'python_v10', 'python_v11']
+
+    def test_a_peer_only_scenario_does_not_ask_the_sut(self):
+        [s] = resolve(
+            _one(roles={'peers': 'all', 'include_sut': False},
+                 min_protocol_version='1.0'),
+            self.MATRIX, sut_protocol_versions=('0.3',),
+        )
+        assert s.sdks == ['python_v10', 'python_v11', 'rust_v10']
+
+    def test_the_forced_version_is_carried_to_the_run(self):
+        [forced] = self._resolve(self.SPEAKS_1_1, hop_protocol_version='1.0').scenarios
+        [free] = self._resolve(self.SPEAKS_1_1).scenarios
+        assert forced.hop_protocol_version == '1.0'
+        assert free.hop_protocol_version is None
+
+    def test_legacy_scenarios_are_not_filtered(self):
+        [s] = resolve(
+            parse_tests([{'name': 'L', 'sdks': ['current', 'python_v03'],
+                          'behavior': 'send_message'}]),
+            self.MATRIX, sut_protocol_versions=('1.1',),
+        )
+        assert s.sdks == ['current', 'python_v03']
+        assert s.hop_protocol_version is None
