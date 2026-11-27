@@ -11,6 +11,10 @@
 # Each transport is its own scenario and a peer that cannot speak one drops
 # out of that scenario alone, so there is no separate "no go_v03, http_json"
 # variant — matrix.yaml records the limit and the resolver acts on it.
+#
+# A peer that speaks a newer A2A version than the SUT joins these stars like
+# any other named peer, but `include_own_lines` adds only the SUT's own lines
+# that are not newer than it.
 
 tests:
   - schema: traversal/v1

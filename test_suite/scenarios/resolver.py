@@ -324,8 +324,8 @@ def _expand(  # noqa: PLR0913
 
     out = []
     for behavior, transports, streaming in variants:
-        groups = _groups(scenario, matrix, transports, sut_sdk, speaks)
-        every = _groups(scenario, matrix, transports, sut_sdk)
+        groups = _groups(scenario, matrix, transports, sut_sdk, speaks, sut_versions)
+        every = _groups(scenario, matrix, transports, sut_sdk, sut_versions=sut_versions)
         why = None
         if not runnable(groups) and runnable(every):
             # Only the version filter left too few agents. Peers that speak a
@@ -470,12 +470,13 @@ def _apply_exclusions(  # noqa: PLR0913
     return kept, dropped
 
 
-def _groups(
+def _groups(  # noqa: PLR0913
     scenario: TraversalScenarioV1,
     matrix: Matrix,
     transports: list[Transport],
     sut_sdk: str | None = None,
     speaks: Callable[[str], bool] = lambda _agent_id: True,
+    sut_versions: tuple[str, ...] = SUT_PROTOCOL_VERSIONS,
 ) -> list[tuple[list[str], list[Transport], str | None]]:
     """The agent groups this scenario runs as, with each group's transports.
 
@@ -486,7 +487,10 @@ def _groups(
     A peer for which ``speaks`` is false takes no part: it does not speak the
     A2A versions the scenario is about.
     """
-    peers = [p for p in _peer_ids(scenario, matrix, transports, sut_sdk) if speaks(p)]
+    peers = [
+        p for p in _peer_ids(scenario, matrix, transports, sut_sdk, sut_versions)
+        if speaks(p)
+    ]
     sut = [SUT_ID] if scenario.roles.include_sut else []
 
     if scenario.expand is Expand.TOGETHER:
@@ -517,6 +521,7 @@ def _peer_ids(
     matrix: Matrix,
     transports: list[Transport],
     sut_sdk: str | None = None,
+    sut_versions: tuple[str, ...] = SUT_PROTOCOL_VERSIONS,
 ) -> list[str]:
     """Peer identifiers, in scenario order (or matrix order for ``all``)."""
     if scenario.roles.peers == 'all':
@@ -540,16 +545,19 @@ def _peer_ids(
             raise ResolutionError(f'{scenario.name!r}: {e}') from None
         ids.append(agent_id)
 
-    ids.extend(_own_lines(scenario, matrix, transports, sut_sdk, exclude=ids))
+    ids.extend(_own_lines(
+        scenario, matrix, transports, sut_sdk, exclude=ids, sut_versions=sut_versions,
+    ))
     return ids
 
 
-def _own_lines(
+def _own_lines(  # noqa: PLR0913
     scenario: TraversalScenarioV1,
     matrix: Matrix,
     transports: list[Transport],
     sut_sdk: str | None,
     exclude: list[str],
+    sut_versions: tuple[str, ...] = SUT_PROTOCOL_VERSIONS,
 ) -> list[str]:
     """The SUT's own SDK's released lines, for ``include_own_lines``.
 
@@ -557,16 +565,28 @@ def _own_lines(
     ``expand: together``: a line that can't speak every requested transport
     would break the graph. That reproduces a2a-java's pairing of a
     four-peer jsonrpc+grpc star with a three-peer http_json one.
+
+    A line that speaks A2A 1.1 or newer, and a newer version than the SUT
+    does, is left out. It is the SDK's next version, which the SUT's own
+    changes are not tested against until the SUT speaks it too. Older lines
+    are added as before, whatever the SUT speaks.
     """
     if not scenario.roles.include_own_lines or sut_sdk is None:
         return []
     wanted = [t.value for t in transports]
+    sut_newest = max(map(parse_spec_version, sut_versions))
+
+    def ahead_of_the_sut(versions: tuple[str, ...]) -> bool:
+        newest = max(versions, key=parse_spec_version)
+        return since_1_1(newest) and parse_spec_version(newest) > sut_newest
+
     return [
         e.agent_id
         for e in matrix.entries()
         if e.sdk == sut_sdk
         and e.agent_id not in exclude
         and (scenario.expand is Expand.PER_PEER or e.supports(wanted))
+        and not ahead_of_the_sut(e.protocol_versions)
     ]
 
 

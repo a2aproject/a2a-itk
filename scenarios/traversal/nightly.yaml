@@ -8,6 +8,10 @@
 # Three entries rather than one because behaviour and streaming are not
 # independent: push notifications are out of band, so streaming is
 # meaningless, and resubscribe only exists for a streaming subscription.
+#
+# The entries after those are about A2A 1.1. Each runs only for a SUT that
+# speaks 1.1 (`sut_protocol_versions` on the run); for an SDK that speaks
+# only 1.0 they are skipped.
 
 tests:
   - schema: traversal/v1
@@ -45,3 +49,59 @@ tests:
     transports: [jsonrpc, grpc, http_json]
     behavior: resubscribe
     streaming: true
+
+  - schema: traversal/v1
+    name: Nightly - current vs {peer} - resubscribe from generation
+    tier: nightly
+    min_protocol_version: "1.1"
+    roles:
+      sut: current
+      peers: all
+    expand: per_peer
+    topology: star
+    transports: [jsonrpc, grpc, http_json]
+    behavior: resubscribe_from_generation
+    streaming: true
+
+  - schema: traversal/v1
+    name: Nightly - current vs {peer} - send message at 1.0
+    tier: nightly
+    min_protocol_version: "1.1"
+    hop_protocol_version: "1.0"
+    roles:
+      sut: current
+      peers: all
+    expand: per_peer
+    topology: star
+    transports: [jsonrpc, grpc, http_json]
+    behavior: send_message
+
+  - schema: traversal/v1
+    name: Nightly - relay python_v03 -> current -> go_v10
+    tier: nightly
+    min_protocol_version: "1.1"
+    roles:
+      sut: current
+      peers:
+        - {sdk: python, line: v03}
+        - {sdk: go, line: v10}
+      entry: {sdk: python, line: v03}
+    topology: chain
+    transports: [jsonrpc, grpc, http_json]
+    behavior: send_message
+    streaming_variants: [false, true]
+
+  - schema: traversal/v1
+    name: Nightly - relay ts_v03 -> current -> python_v10
+    tier: nightly
+    min_protocol_version: "1.1"
+    roles:
+      sut: current
+      peers:
+        - {sdk: ts, line: v03}
+        - {sdk: python, line: v10}
+      entry: {sdk: ts, line: v03}
+    topology: chain
+    transports: [jsonrpc, grpc, http_json]
+    behavior: send_message
+    streaming_variants: [false, true]

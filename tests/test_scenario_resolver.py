@@ -543,9 +543,39 @@ class TestProtocolVersions:
             _one(roles={'include_own_lines': True,
                         'peers': [{'sdk': 'rust', 'line': 'v10'}]},
                  min_protocol_version='1.0'),
-            self.MATRIX, sut_sdk='python', sut_protocol_versions=('1.0',),
+            self.MATRIX, sut_sdk='python', sut_protocol_versions=self.SPEAKS_1_1,
         )
         assert s.sdks == ['current', 'rust_v10', 'python_v10', 'python_v11']
+
+    @pytest.mark.parametrize(('sut_versions', 'own'), [
+        # A SUT on its SDK's current line is not tested against the next one.
+        (None, ['python_v03', 'python_v10']),
+        (('1.0',), ['python_v03', 'python_v10']),
+        # A SUT that speaks it is, and against the older lines too, in any
+        # order the run lists its versions.
+        (SPEAKS_1_1, ['python_v03', 'python_v10', 'python_v11']),
+        (('0.3', '1.1', '1.0'), ['python_v03', 'python_v10', 'python_v11']),
+        # Only a line that speaks 1.1 is held back; older lines are not.
+        (('0.3',), ['python_v03', 'python_v10']),
+    ])
+    @pytest.mark.parametrize('expand', ['together', 'per_peer'])
+    def test_own_lines_newer_than_the_sut_are_left_out(self, sut_versions, own, expand):
+        scenarios = resolve(
+            _one(name='S - {peer}', roles={'include_own_lines': True,
+                                          'peers': [{'sdk': 'rust', 'line': 'v10'}]},
+                 expand=expand),
+            self.MATRIX, sut_sdk='python', sut_protocol_versions=sut_versions,
+        )
+        assert [p for s in scenarios for p in s.sdks if p != 'current'] == ['rust_v10', *own]
+
+    def test_a_named_peer_newer_than_the_sut_still_takes_part(self):
+        """The rule is about own lines added for the SUT, not about peers a
+        scenario names."""
+        [s] = resolve(
+            _one(roles={'peers': [{'sdk': 'python', 'line': 'v11'}]}),
+            self.MATRIX, sut_sdk='python',
+        )
+        assert s.sdks == ['current', 'python_v11']
 
     def test_a_peer_only_scenario_does_not_ask_the_sut(self):
         [s] = resolve(

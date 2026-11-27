@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.scenarios_diff import atoms, explain_drop, main
 from test_suite.launcher.matrix import Matrix
@@ -259,3 +260,114 @@ class TestSharedSetIsValid:
         }
 
         assert {'python_v03', 'go_v03'} <= push_peers
+
+
+class TestSharedSetsAt11:
+    """The A2A 1.1 entries of the shared sets.
+
+    For an SDK that speaks only 1.0 they resolve to nothing, so its runs do
+    not change. For one that speaks 1.1 they add the relay chains now, and
+    the scenarios between agents that speak 1.1 once the matrix has a line
+    that does.
+    """
+
+    SPEAKS_1_1 = ('1.1', '1.0', '0.3')
+
+    @staticmethod
+    def _with_python_v11():
+        data = yaml.safe_load((ROOT / 'matrix.yaml').read_text(encoding='utf-8'))
+        data['sdks']['python']['v11'] = {
+            'repo': 'a2aproject/a2a-python', 'ref': 'c' * 40,
+            'protocol_versions': ['1.1', '1.0', '0.3'],
+        }
+        return Matrix.from_dict(data)
+
+    @staticmethod
+    def _without_the_1_1_entries(path, tmp_path):
+        data = yaml.safe_load(path.read_text(encoding='utf-8'))
+        data['tests'] = [t for t in data['tests'] if 'min_protocol_version' not in t]
+        old = tmp_path / path.name
+        old.write_text(yaml.safe_dump(data), encoding='utf-8')
+        return old
+
+    @pytest.mark.parametrize('path', [SHARED_PR, SHARED_NIGHTLY])
+    @pytest.mark.parametrize('sdk', ['python', 'go', 'ts', 'java', 'rust', 'dotnet'])
+    @pytest.mark.parametrize('sut_versions', [None, ('1.0',), ('0.3',)])
+    def test_an_sdk_that_does_not_speak_1_1_runs_what_it_ran_before(
+        self, path, sdk, sut_versions, tmp_path,
+    ):
+        before = resolve(
+            load_file(self._without_the_1_1_entries(path, tmp_path)), Matrix.from_default(),
+            sut_sdk=sdk, sut_protocol_versions=sut_versions,
+        )
+        now = resolve(
+            load_file(path), Matrix.from_default(),
+            sut_sdk=sdk, sut_protocol_versions=sut_versions,
+        )
+        assert now == before
+        assert now
+
+    def test_a_v11_line_joins_an_older_sdks_nightly_but_not_its_pr_stars(self):
+        """`peers: all` picks it up, as for any new line; the PR stars name
+        their peers, and own lines are held back until the SUT speaks 1.1."""
+        matrix = self._with_python_v11()
+        nightly = resolve(load_file(SHARED_NIGHTLY), matrix, sut_sdk='go')
+        pr = resolve(load_file(SHARED_PR), matrix, sut_sdk='python')
+        assert any('python_v11' in s.sdks for s in nightly)
+        assert not any('python_v11' in s.sdks for s in pr)
+
+    def test_a_1_1_sdk_also_runs_the_relay_chains(self):
+        scenarios = resolve(
+            load_file(SHARED_NIGHTLY), Matrix.from_default(),
+            sut_sdk='go', sut_protocol_versions=self.SPEAKS_1_1,
+        )
+        relays = {
+            (s.name, tuple(s.sdks), s.streaming) for s in scenarios if 'relay' in s.name
+        }
+        python_chain = ('python_v03', 'current', 'go_v10')
+        ts_chain = ('ts_v03', 'current', 'python_v10')
+        assert relays == {
+            *(
+                (f'Nightly - relay python_v03 -> current -> go_v10 - {t} - {mode}',
+                 python_chain, mode == 'streaming')
+                for t in ('jsonrpc', 'grpc', 'http_json')
+                for mode in ('non-streaming', 'streaming')
+            ),
+            # ts_v03 serves grpc and http_json only to a TypeScript client.
+            *(
+                (f'Nightly - relay ts_v03 -> current -> python_v10 - jsonrpc - {mode}',
+                 ts_chain, mode == 'streaming')
+                for mode in ('non-streaming', 'streaming')
+            ),
+        }
+
+    def test_with_a_v11_line_a_1_1_sdk_runs_the_1_1_pairs(self):
+        scenarios = resolve(
+            load_file(SHARED_NIGHTLY), self._with_python_v11(),
+            sut_sdk='go', sut_protocol_versions=self.SPEAKS_1_1,
+        )
+        pairs = {
+            s.name for s in scenarios
+            if 'from generation' in s.name or 'at 1.0' in s.name
+        }
+        assert pairs == {
+            f'Nightly - current vs python_v11 - {what} - {t}'
+            for what in ('resubscribe from generation', 'send message at 1.0')
+            for t in ('jsonrpc', 'grpc', 'http_json')
+        }
+        forced = {s.hop_protocol_version for s in scenarios if 'at 1.0' in s.name}
+        assert forced == {'1.0'}
+
+    @pytest.mark.parametrize(('sut_versions', 'has_v11'), [
+        (None, False),
+        (SPEAKS_1_1, True),
+    ])
+    def test_the_sdks_own_v11_line_joins_its_pr_stars_only_once_it_speaks_1_1(
+        self, sut_versions, has_v11,
+    ):
+        scenarios = resolve(
+            load_file(SHARED_PR), self._with_python_v11(),
+            sut_sdk='python', sut_protocol_versions=sut_versions,
+        )
+        assert scenarios
+        assert all(('python_v11' in s.sdks) is has_v11 for s in scenarios)
